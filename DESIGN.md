@@ -2,11 +2,12 @@
 
 ## Scope
 
-The container owns three runtime surfaces:
+The container owns four runtime surfaces:
 
 - `cloudflare-web`: HTTP API, static GUI, process lifecycle, candidate cache and active-pool commit.
 - `cfdata`: candidate discovery, data-center aggregation, latency/loss detail tests and CSV output.
 - `cfnat`: local TCP forwarding through the selected fixed or scanned IP pool.
+- `sing-box`: short-lived VLESS data-plane probes; it is not a persistent proxy service.
 
 The Web layer orchestrates these binaries. It does not duplicate their scanning algorithms.
 
@@ -16,9 +17,11 @@ Candidate generation and business acceptance are separate stages:
 
 1. CFdata reads the local broad CDN ranges and writes `ip.csv`.
 2. The candidate cache merges community DNS results, CFdata output and sampled official Cloudflare CIDRs.
-3. The active-pool probe validates the configured TLS SNI, HTTP Host and WebSocket path.
-4. A new pool is committed only when it meets the configured minimum size and CFnat starts successfully.
-5. Failure leaves the previous active pool and cache in place.
+3. The first active-pool stage validates the configured TLS SNI, HTTP Host and WebSocket path in parallel.
+4. If VLESS probing is enabled, only the fastest WS passes are tested sequentially through a short-lived sing-box process until the target pool is full.
+5. The VLESS probe replaces only the candidate server and port; UUID, TLS/ECH/uTLS and WebSocket settings come from the local outbound template. A configured `generate_204` response is the business acceptance signal.
+6. A new pool is committed only when it meets the configured minimum size and CFnat starts successfully.
+7. Any probe, template or process failure leaves the previous active pool and cache in place.
 
 `proxy-candidates.json` is discovery state. `proxy-active.json` is last-known-good forwarding state. They must not be treated as interchangeable.
 
@@ -39,5 +42,6 @@ The “完整优选” browser action runs CFdata, waits for a successful exit, 
 - User-triggered stop actions require confirmation.
 - Long-running actions report their current stage and restore button state on both success and failure.
 - External candidate sources are server allowlisted; arbitrary remote scripts or URLs are not accepted.
+- The VLESS outbound template lives under `/data`, is mode `0600` when copied by the operator, and is never returned by the API. Temporary sing-box configs are mode `0600`, redacted on errors and deleted after each probe.
 - All rendered log and result content is escaped before insertion into HTML.
 - Mobile tables scroll inside their result surface and cannot widen the document viewport.

@@ -14,7 +14,9 @@ FROM scratch
 COPY dist/linux-amd64/cfdata /usr/local/bin/cfdata
 COPY dist/linux-amd64/cfnat /usr/local/bin/cfnat
 COPY dist/linux-amd64/cloudflare-web /usr/local/bin/cloudflare-web
+COPY dist/linux-amd64/sing-box /usr/local/bin/sing-box
 COPY dist/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY third_party/sing-box/LICENSE /usr/share/licenses/sing-box/LICENSE
 
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     DATA_DIR=/data \
@@ -45,7 +47,14 @@ ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     PROXY_AUTO_CFDATA=false \
     PROXY_AUTO_CFDATA_TIMEOUT=600 \
     PROXY_CFDATA_CANDIDATES=300 \
-    PROXY_OFFICIAL_CANDIDATES=150
+    PROXY_OFFICIAL_CANDIDATES=150 \
+    PROXY_VLESS_PROBE=false \
+    PROXY_VLESS_TEMPLATE=/data/vless-probe-outbound.json \
+    PROXY_VLESS_TEST_URL=https://www.gstatic.com/generate_204 \
+    PROXY_VLESS_EXPECT_STATUS=204 \
+    PROXY_VLESS_TIMEOUT=15 \
+    PROXY_VLESS_MAX_CANDIDATES=20 \
+    SING_BOX_BIN=/usr/local/bin/sing-box
 
 WORKDIR /data
 EXPOSE 8080 1234

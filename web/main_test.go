@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"net"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -61,5 +65,140 @@ func TestProxyCandidateCacheRoundTrip(t *testing.T) {
 	}
 	if !got.UpdatedAt.Equal(want.UpdatedAt) || !got.NextRefresh.Equal(want.NextRefresh) {
 		t.Fatalf("loaded timestamps differ: %#v", got)
+	}
+}
+
+func TestVLESSOutboundTemplateAndProbeConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "template.json")
+	templateJSON := `{
+  "outbounds": [{
+    "type": "vless",
+    "tag": "original",
+    "server": "192.0.2.1",
+    "server_port": 1234,
+    "uuid": "11111111-2222-4333-8444-555555555555",
+    "tls": {"enabled": true, "server_name": "node.example.com"},
+    "transport": {"type": "ws", "path": "/probe?ed=2560", "headers": {"Host": "node.example.com"}}
+  }]
+}`
+	if err := os.WriteFile(path, []byte(templateJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	template, err := loadVLESSOutboundTemplate(path)
+	if err != nil {
+		t.Fatalf("loadVLESSOutboundTemplate: %v", err)
+	}
+	config, err := buildSingBoxProbeConfig(template, "1.1.1.1", 443, 2080)
+	if err != nil {
+		t.Fatalf("buildSingBoxProbeConfig: %v", err)
+	}
+	outbounds := config["outbounds"].([]any)
+	outbound := outbounds[0].(map[string]any)
+	if outbound["server"] != "1.1.1.1" || outbound["server_port"] != 443 {
+		t.Fatalf("candidate endpoint was not applied: %#v", outbound)
+	}
+	if template["server"] != "192.0.2.1" {
+		t.Fatalf("template was mutated: %#v", template)
+	}
+	encoded, err := json.Marshal(config)
+	if err != nil || !strings.Contains(string(encoded), `"final":"vless-probe"`) {
+		t.Fatalf("probe config is incomplete: %s, %v", encoded, err)
+	}
+}
+
+func TestVLESSOutboundTemplateValidation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "invalid.json")
+	if err := os.WriteFile(path, []byte(`{"type":"vless","uuid":"bad"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadVLESSOutboundTemplate(path); err == nil {
+		t.Fatal("invalid VLESS template was accepted")
+	}
+}
+
+func TestSanitizeProbeMessage(t *testing.T) {
+	template := map[string]any{
+		"uuid": "11111111-2222-4333-8444-555555555555",
+		"tls":  map[string]any{"server_name": "node.example.com"},
+		"transport": map[string]any{
+			"path":    "/secret-path",
+			"headers": map[string]any{"Host": "node.example.com"},
+		},
+	}
+	raw := "uuid=11111111-2222-4333-8444-555555555555 host=node.example.com path=/secret-path"
+	got := sanitizeProbeMessage(raw, template)
+	for _, secret := range []string{"11111111-2222-4333-8444-555555555555", "node.example.com", "/secret-path"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("secret %q remained in %q", secret, got)
+		}
+	}
+}
+
+func TestVLESSProbeConfigValidation(t *testing.T) {
+	valid := vlessProbeConfig{
+		Enabled:        true,
+		Binary:         "/usr/local/bin/sing-box",
+		TemplatePath:   "/data/vless.json",
+		TestURL:        "https://example.com/generate_204",
+		ExpectedStatus: 204,
+		Timeout:        15 * time.Second,
+		MaxCandidates:  20,
+	}
+	if err := valid.validate(); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+	invalid := valid
+	invalid.TestURL = "file:///etc/passwd"
+	if err := invalid.validate(); err == nil {
+		t.Fatal("non-HTTP VLESS test URL was accepted")
+	}
+}
+
+func TestConfiguredVLESSProbeTemplate(t *testing.T) {
+	path := os.Getenv("TEST_VLESS_TEMPLATE")
+	if path == "" {
+		t.Skip("TEST_VLESS_TEMPLATE is not set")
+	}
+	if _, err := loadVLESSOutboundTemplate(path); err != nil {
+		t.Fatalf("configured VLESS template is invalid: %v", err)
+	}
+}
+
+func TestVLESSProbeCandidateLimit(t *testing.T) {
+	dir := t.TempDir()
+	template := map[string]any{
+		"type": "vless",
+		"uuid": "11111111-2222-4333-8444-555555555555",
+		"tls":  map[string]any{"enabled": true, "server_name": "node.example.com"},
+		"transport": map[string]any{
+			"type":    "ws",
+			"path":    "/probe",
+			"headers": map[string]any{"Host": "node.example.com"},
+		},
+	}
+	results := []proxyScanResult{
+		{IP: "1.1.1.1", Stage: "WS_PASS"},
+		{IP: "1.0.0.1", Stage: "WS_PASS"},
+		{IP: "8.8.8.8", Stage: "WS_PASS"},
+	}
+	cfg := vlessProbeConfig{
+		Binary:         filepath.Join(dir, "missing-sing-box"),
+		TemplatePath:   filepath.Join(dir, "template.json"),
+		TestURL:        "https://example.com/generate_204",
+		ExpectedStatus: 204,
+		Timeout:        3 * time.Second,
+		MaxCandidates:  2,
+	}
+	passed := probeVLESSPool(context.Background(), results, 443, 3, cfg, template)
+	if len(passed) != 0 {
+		t.Fatalf("unexpected passes: %#v", passed)
+	}
+	if results[0].Stage != "VLESS_FAIL" || results[1].Stage != "VLESS_FAIL" {
+		t.Fatalf("first two candidates were not attempted: %#v", results)
+	}
+	if results[2].Stage != "WS_PASS" || results[2].Error != "" {
+		t.Fatalf("candidate limit was not enforced: %#v", results[2])
 	}
 }

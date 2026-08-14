@@ -38,7 +38,8 @@ function renderAutoCandidates(snapshot, loadIntoInput = false) {
   const next = snapshot.nextRefresh ? new Date(snapshot.nextRefresh).toLocaleString() : "--";
   const active = snapshot.active || {};
   const activeCount = active.ips?.length || 0;
-  const activeText = activeCount ? `生效 ${activeCount} 个` : "尚无生效池";
+  const vlessPassed = active.results?.filter((result) => result.stage === "VLESS_PASS").length || 0;
+  const activeText = activeCount ? `生效 ${activeCount} 个${vlessPassed ? ` · VLESS 已验 ${vlessPassed} 个` : ""}` : "尚无生效池";
   $("autoCandidateStatus").textContent = `${snapshot.ips?.length || 0} 个候选 · ${activeText} · 更新 ${updated}${active.error ? ` · ${active.error}` : ""}`;
   $("candidateCount").textContent = snapshot.ips?.length || 0;
   $("activePoolCount").textContent = activeCount;

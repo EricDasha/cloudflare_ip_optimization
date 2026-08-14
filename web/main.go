@@ -479,6 +479,7 @@ type proxyAutoConfig struct {
 	MaxLatency  int
 	PoolSize    int
 	MinPool     int
+	VLESS       vlessProbeConfig
 }
 
 func defaultProxyAutoConfig() proxyAutoConfig {
@@ -491,6 +492,7 @@ func defaultProxyAutoConfig() proxyAutoConfig {
 		MaxLatency:  envInt("PROXY_AUTO_MAX_LATENCY", 5000),
 		PoolSize:    envInt("PROXY_AUTO_POOL_SIZE", 5),
 		MinPool:     envInt("PROXY_AUTO_MIN_POOL", 3),
+		VLESS:       defaultVLESSProbeConfig(),
 	}
 }
 
@@ -625,28 +627,41 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 		log.Printf("proxy auto apply disabled: invalid configuration")
 		return
 	}
+	var vlessTemplate map[string]any
+	if cfg.VLESS.Enabled {
+		if err := cfg.VLESS.validate(); err != nil {
+			a.setProxyPoolError("VLESS 终审配置无效；保留旧池: "+err.Error(), nil)
+			return
+		}
+		var err error
+		vlessTemplate, err = loadVLESSOutboundTemplate(cfg.VLESS.TemplatePath)
+		if err != nil {
+			a.setProxyPoolError("VLESS 终审不可用；保留旧池: "+err.Error(), nil)
+			return
+		}
+	}
 	candidates := a.proxyCandidateSnapshot().IPs
 	if len(candidates) == 0 {
 		return
 	}
 	results := scanProxyWebSockets(parent, candidates, cfg)
 	passed := make([]string, 0, cfg.PoolSize)
-	for _, result := range results {
-		if result.Error == "" {
-			passed = append(passed, result.IP)
-			if len(passed) >= cfg.PoolSize {
-				break
+	finalStage := "WS"
+	if cfg.VLESS.Enabled {
+		finalStage = "VLESS"
+		passed = probeVLESSPool(parent, results, cfg.Port, cfg.PoolSize, cfg.VLESS, vlessTemplate)
+	} else {
+		for _, result := range results {
+			if result.Error == "" {
+				passed = append(passed, result.IP)
+				if len(passed) >= cfg.PoolSize {
+					break
+				}
 			}
 		}
 	}
 	if len(passed) < cfg.MinPool {
-		pool := a.proxyActivePoolSnapshot()
-		pool.Error = fmt.Sprintf("WS 终审仅 %d 个通过，低于最小池 %d；保留旧池", len(passed), cfg.MinPool)
-		pool.Results = results
-		a.activeMu.Lock()
-		a.activePool = pool
-		a.activeMu.Unlock()
-		log.Printf("proxy auto apply skipped: %s", pool.Error)
+		a.setProxyPoolError(fmt.Sprintf("%s 终审仅 %d 个通过，低于最小池 %d；保留旧池", finalStage, len(passed), cfg.MinPool), results)
 		return
 	}
 	current := a.proxyActivePoolSnapshot()
@@ -699,6 +714,18 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 	log.Printf("proxy active pool applied: %s", strings.Join(passed, ","))
 }
 
+func (a *app) setProxyPoolError(message string, results []proxyScanResult) {
+	pool := a.proxyActivePoolSnapshot()
+	pool.Error = message
+	if results != nil {
+		pool.Results = results
+	}
+	a.activeMu.Lock()
+	a.activePool = pool
+	a.activeMu.Unlock()
+	log.Printf("proxy auto apply skipped: %s", message)
+}
+
 func scanProxyWebSockets(parent context.Context, ips []string, cfg proxyAutoConfig) []proxyScanResult {
 	results := make([]proxyScanResult, len(ips))
 	sem := make(chan struct{}, cfg.Concurrency)
@@ -714,8 +741,9 @@ func scanProxyWebSockets(parent context.Context, ips []string, cfg proxyAutoConf
 			defer cancel()
 			err := probeProxyWebSocket(ctx, ip, cfg)
 			latency := time.Since(started).Milliseconds()
-			results[i] = proxyScanResult{IP: ip, Latency: latency}
+			results[i] = proxyScanResult{IP: ip, Latency: latency, Stage: "WS_PASS"}
 			if err != nil {
+				results[i].Stage = "WS_FAIL"
 				results[i].Error = err.Error()
 			}
 		}(i, ip)
@@ -1004,9 +1032,11 @@ func (a *app) handleProxyCandidates(w http.ResponseWriter, r *http.Request) {
 }
 
 type proxyScanResult struct {
-	IP      string `json:"ip"`
-	Latency int64  `json:"latency"`
-	Error   string `json:"error,omitempty"`
+	IP          string `json:"ip"`
+	Latency     int64  `json:"latency"`
+	DataLatency int64  `json:"dataLatency,omitempty"`
+	Stage       string `json:"stage,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
 func normalizeProxyScan(c proxyScanConfig) (proxyScanConfig, error) {
@@ -1166,8 +1196,9 @@ func scanProxyIPs(parent context.Context, ips []string, cfg proxyScanConfig) []p
 				_ = conn.Close()
 			}
 			latency := time.Since(started).Milliseconds()
-			results[i] = proxyScanResult{IP: ip, Latency: latency}
+			results[i] = proxyScanResult{IP: ip, Latency: latency, Stage: "TLS_PASS"}
 			if err != nil {
+				results[i].Stage = "TLS_FAIL"
 				results[i].Error = err.Error()
 				return
 			}

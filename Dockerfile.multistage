@@ -1,3 +1,5 @@
+FROM ghcr.io/sagernet/sing-box:v1.13.18 AS singbox
+
 FROM golang:1.25-alpine AS builder
 
 WORKDIR /src
@@ -20,6 +22,8 @@ RUN apk add --no-cache ca-certificates tzdata \
 COPY --from=builder /out/cfdata /usr/local/bin/cfdata
 COPY --from=builder /out/cfnat /usr/local/bin/cfnat
 COPY --from=builder /out/cloudflare-web /usr/local/bin/cloudflare-web
+COPY --from=singbox /usr/local/bin/sing-box /usr/local/bin/sing-box
+COPY third_party/sing-box/LICENSE /usr/share/licenses/sing-box/LICENSE
 
 ENV DATA_DIR=/data \
     WEB_ADDR=0.0.0.0:8080 \
@@ -36,7 +40,14 @@ ENV DATA_DIR=/data \
     CFNAT_PORT=443 \
     CFNAT_RANDOM=true \
     CFNAT_TASK=100 \
-    CFNAT_TLS=true
+    CFNAT_TLS=true \
+    PROXY_VLESS_PROBE=false \
+    PROXY_VLESS_TEMPLATE=/data/vless-probe-outbound.json \
+    PROXY_VLESS_TEST_URL=https://www.gstatic.com/generate_204 \
+    PROXY_VLESS_EXPECT_STATUS=204 \
+    PROXY_VLESS_TIMEOUT=15 \
+    PROXY_VLESS_MAX_CANDIDATES=20 \
+    SING_BOX_BIN=/usr/local/bin/sing-box
 
 WORKDIR /data
 USER app

@@ -44,6 +44,15 @@ services:
       PROXY_AUTO_CFDATA_TIMEOUT: "600"
       PROXY_CFDATA_CANDIDATES: "300"
       PROXY_OFFICIAL_CANDIDATES: "150"
+
+      # WS 101 通过后，使用 /data 中的本地 VLESS outbound 模板做真实数据面终审。
+      PROXY_VLESS_PROBE: "true"
+      PROXY_VLESS_TEMPLATE: /data/vless-probe-outbound.json
+      PROXY_VLESS_TEST_URL: https://www.gstatic.com/generate_204
+      PROXY_VLESS_EXPECT_STATUS: "204"
+      PROXY_VLESS_TIMEOUT: "15"
+      PROXY_VLESS_MAX_CANDIDATES: "20"
+      SING_BOX_BIN: /usr/local/bin/sing-box
     volumes:
       - ./data:/data
     logging:

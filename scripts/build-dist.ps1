@@ -5,6 +5,8 @@ $dist = Join-Path $root "dist"
 $linux = Join-Path $dist "linux-amd64"
 $cache = Join-Path $dist ".gocache"
 $staleTmp = Join-Path $dist ".gotmp"
+$singBoxVersion = if ($env:SING_BOX_VERSION) { $env:SING_BOX_VERSION.TrimStart("v") } else { "1.13.18" }
+$singBoxBuildID = "$singBoxVersion|with_utls|static-v1"
 New-Item -ItemType Directory -Force -Path $linux | Out-Null
 New-Item -ItemType Directory -Force -Path $cache | Out-Null
 if (Test-Path $staleTmp) {
@@ -23,16 +25,46 @@ function Invoke-Native {
 }
 
 Write-Host "==> build linux/amd64 binaries"
-$env:CGO_ENABLED = "0"
-$env:GOOS = "linux"
-$env:GOARCH = "amd64"
-$env:GOTELEMETRY = "off"
-$env:GOCACHE = $cache
-Remove-Item Env:\GOTMPDIR -ErrorAction SilentlyContinue
+$buildEnvNames = @("CGO_ENABLED", "GOOS", "GOARCH", "GOBIN", "GOTELEMETRY", "GOCACHE", "GOTMPDIR")
+$previousBuildEnv = @{}
+foreach ($name in $buildEnvNames) {
+  $previousBuildEnv[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+}
+try {
+  $env:CGO_ENABLED = "0"
+  $env:GOOS = "linux"
+  $env:GOARCH = "amd64"
+  $env:GOTELEMETRY = "off"
+  $env:GOCACHE = $cache
+  Remove-Item Env:\GOTMPDIR -ErrorAction SilentlyContinue
 
-Invoke-Native "go" @("build", "-trimpath", "-ldflags=-s -w", "-o", (Join-Path $linux "cfdata"), (Join-Path $root "cfdata.go"))
-Invoke-Native "go" @("build", "-trimpath", "-ldflags=-s -w", "-o", (Join-Path $linux "cfnat"), (Join-Path $root "cfnat.go"))
-Invoke-Native "go" @("build", "-trimpath", "-ldflags=-s -w", "-o", (Join-Path $linux "cloudflare-web"), (Join-Path $root "web"))
+  Invoke-Native "go" @("build", "-trimpath", "-ldflags=-s -w", "-o", (Join-Path $linux "cfdata"), (Join-Path $root "cfdata.go"))
+  Invoke-Native "go" @("build", "-trimpath", "-ldflags=-s -w", "-o", (Join-Path $linux "cfnat"), (Join-Path $root "cfnat.go"))
+  Invoke-Native "go" @("build", "-trimpath", "-ldflags=-s -w", "-o", (Join-Path $linux "cloudflare-web"), (Join-Path $root "web"))
+
+  $singBoxBinary = Join-Path $linux "sing-box"
+  $singBoxStamp = Join-Path $linux "sing-box.version"
+  $installedSingBoxBuild = if (Test-Path $singBoxStamp) { (Get-Content -LiteralPath $singBoxStamp -Raw).Trim() } else { "" }
+  if (-not (Test-Path $singBoxBinary) -or $installedSingBoxBuild -ne $singBoxBuildID) {
+    Write-Host "==> build static sing-box v$singBoxVersion (with_utls)"
+    Remove-Item Env:\GOBIN -ErrorAction SilentlyContinue
+    $ldflags = "-s -w -X github.com/sagernet/sing-box/constant.Version=$singBoxVersion"
+    Invoke-Native "go" @("install", "-trimpath", "-ldflags=$ldflags", "-tags", "with_utls", "github.com/sagernet/sing-box/cmd/sing-box@v$singBoxVersion")
+    $goPath = (& go env GOPATH).Trim()
+    if ($LASTEXITCODE -ne 0 -or $goPath -eq "") { throw "go env GOPATH failed" }
+    Copy-Item -Force (Join-Path $goPath "bin\linux_amd64\sing-box") $singBoxBinary
+    [IO.File]::WriteAllText($singBoxStamp, $singBoxBuildID, [Text.UTF8Encoding]::new($false))
+  }
+} finally {
+  foreach ($name in $buildEnvNames) {
+    $value = $previousBuildEnv[$name]
+    if ($null -eq $value) {
+      Remove-Item "Env:\$name" -ErrorAction SilentlyContinue
+    } else {
+      Set-Item "Env:\$name" $value
+    }
+  }
+}
 
 Write-Host "==> export Windows root CAs to dist/ca-certificates.crt"
 $certOut = Join-Path $dist "ca-certificates.crt"
