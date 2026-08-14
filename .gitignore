@@ -17,6 +17,9 @@
 /index.html
 
 # Editor and mechanical backup files
+.env
+.env.*
+!.env.example
 .vscode/
 .idea/
 web/main.go.*

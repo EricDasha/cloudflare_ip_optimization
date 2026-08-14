@@ -19,7 +19,7 @@ services:
       CFNAT_AUTO_START: "true"
       CFNAT_ADDR: 0.0.0.0:1234
       CFNAT_COLO: ""                 # 例如 HKG,SJC,LAX；留空则不过滤
-      CFNAT_DELAY: "300"
+      CFNAT_DELAY: "2000"
       CFNAT_DOMAIN: cloudflaremirrors.com/debian
       CFNAT_FIXED_IPS: 128.199.255.242,119.205.235.58,60.249.21.30
       CFNAT_IPNUM: "20"
@@ -33,8 +33,8 @@ services:
 
       # 每 6 小时以实际 Host + WebSocket path 终审候选；至少 3 个通过才替换固定池。
       PROXY_AUTO_APPLY: "true"
-      PROXY_AUTO_HOST: vlesdy.trojanjd.dpdns.org
-      PROXY_AUTO_PATH: "/city/proxyip=tw.william.us.ci?ed=2560"
+      PROXY_AUTO_HOST: "${PROXY_AUTO_HOST:?set PROXY_AUTO_HOST in .env}"
+      PROXY_AUTO_PATH: "${PROXY_AUTO_PATH:?set PROXY_AUTO_PATH in .env}"
       PROXY_AUTO_PORT: "443"
       PROXY_AUTO_CONCURRENCY: "20"
       PROXY_AUTO_MAX_LATENCY: "5000"

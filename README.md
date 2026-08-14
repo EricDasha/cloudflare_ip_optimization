@@ -66,6 +66,8 @@ Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新�
 
 ### VLESS 探针模板
 
+复制 `.env.example` 为 `.env`，填写与探针模板一致的 `PROXY_AUTO_HOST` 和 `PROXY_AUTO_PATH`。`.env` 已被 Git 忽略；Compose 会在缺少这两项时拒绝启动，避免误用仓库中的示例值筛选候选。
+
 将一个 sing-box VLESS outbound 保存为 `./data/vless-probe-outbound.json`。也可以放入完整 sing-box 配置，服务端会提取第一个 `type: "vless"` 的 outbound。文件应包含真实 `uuid`、TLS `server_name`、WebSocket `path` 与 `headers.Host`；`server` 和 `server_port` 会在每次探测时替换为候选 IP 与 `PROXY_AUTO_PORT`。
 
 `./data` 已被 Git 忽略，模板不会进入仓库。服务端不会通过 API 返回模板内容；每次生成的临时 sing-box 配置权限为 `0600`，进程退出后立即删除，错误文本会脱敏 UUID、Host、SNI 和 path。
@@ -80,7 +82,7 @@ Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新�
 |---|---|---|
 | `CFNAT_ADDR` | `-addr` | `0.0.0.0:1234` |
 | `CFNAT_COLO` | `-colo` | 空 |
-| `CFNAT_DELAY` | `-delay` | `300` |
+| `CFNAT_DELAY` | `-delay` | `2000` |
 | `CFNAT_DOMAIN` | `-domain` | `cloudflaremirrors.com/debian` |
 | `CFNAT_FIXED_IPS` | `-fixed` | 空 |
 | `CFNAT_IPNUM` | `-ipnum` | `20` |
