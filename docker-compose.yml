@@ -1,0 +1,59 @@
+services:
+  cloudflare-tools:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: local/cloudflare-tools:latest
+    pull_policy: build
+    container_name: cloudflare-tools
+    restart: unless-stopped
+    ports:
+      - "8080:8080"   # Web 控制台
+      - "1234:1234"   # CFnat 本地转发入口
+    environment:
+      TZ: Asia/Shanghai
+      DATA_DIR: /data
+      WEB_ADDR: 0.0.0.0:8080
+
+      # 与 cmliu/CFnat-Docker 思路一致：用环境变量生成 cfnat 运行参数；Web 页面也可覆盖后重启。
+      CFNAT_AUTO_START: "true"
+      CFNAT_ADDR: 0.0.0.0:1234
+      CFNAT_COLO: ""                 # 例如 HKG,SJC,LAX；留空则不过滤
+      CFNAT_DELAY: "300"
+      CFNAT_DOMAIN: cloudflaremirrors.com/debian
+      CFNAT_FIXED_IPS: 128.199.255.242,119.205.235.58,60.249.21.30
+      CFNAT_IPNUM: "20"
+      CFNAT_IPS: "4"                 # 4 或 6
+      CFNAT_NUM: "1"
+      CFNAT_PORT: "443"
+      CFNAT_RANDOM: "true"
+      CFNAT_TASK: "100"
+      CFNAT_TLS: "true"
+      CFNAT_CODE: "200"
+
+      # 每 6 小时以实际 Host + WebSocket path 终审候选；至少 3 个通过才替换固定池。
+      PROXY_AUTO_APPLY: "true"
+      PROXY_AUTO_HOST: vlesdy.trojanjd.dpdns.org
+      PROXY_AUTO_PATH: "/city/proxyip=tw.william.us.ci?ed=2560"
+      PROXY_AUTO_PORT: "443"
+      PROXY_AUTO_CONCURRENCY: "20"
+      PROXY_AUTO_MAX_LATENCY: "5000"
+      PROXY_AUTO_POOL_SIZE: "5"
+      PROXY_AUTO_MIN_POOL: "3"
+      PROXY_AUTO_CFDATA: "true"
+      PROXY_AUTO_CFDATA_TIMEOUT: "600"
+      PROXY_CFDATA_CANDIDATES: "300"
+      PROXY_OFFICIAL_CANDIDATES: "150"
+    volumes:
+      - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/cloudflare-web", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

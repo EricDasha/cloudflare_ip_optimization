@@ -1,0 +1,26 @@
+# Build artifacts and downloaded tool bundles
+/build/
+/dist/
+/cfdata/
+/.code-abyss/
+*.exe
+
+# Runtime state and scan output
+/data/
+*.log
+*.csv
+/ip.txt
+/cfnat.txt
+/ips-v4.txt
+/ips-v6.txt
+/locations.json
+/index.html
+
+# Editor and mechanical backup files
+.vscode/
+.idea/
+web/main.go.*
+
+# Platform noise
+.DS_Store
+Thumbs.db

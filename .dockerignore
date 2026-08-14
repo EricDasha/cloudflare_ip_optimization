@@ -1,0 +1,14 @@
+.git
+build
+data
+*.exe
+*.log
+*.csv
+ip.txt
+ip.csv
+ips-v4.txt
+ips-v6.txt
+locations.json
+dist/.gocache
+dist/.gotmp
+index.html

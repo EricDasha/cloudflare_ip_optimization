@@ -1,0 +1,47 @@
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /src
+COPY go.mod ./
+COPY cfdata.go cfnat.go ./
+COPY web ./web
+
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/cfdata ./cfdata.go
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/cfnat ./cfnat.go
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/cloudflare-web ./web
+
+FROM alpine:3.22
+
+RUN apk add --no-cache ca-certificates tzdata \
+  && addgroup -S app \
+  && adduser -S -G app app \
+  && mkdir -p /data \
+  && chown -R app:app /data
+
+COPY --from=builder /out/cfdata /usr/local/bin/cfdata
+COPY --from=builder /out/cfnat /usr/local/bin/cfnat
+COPY --from=builder /out/cloudflare-web /usr/local/bin/cloudflare-web
+
+ENV DATA_DIR=/data \
+    WEB_ADDR=0.0.0.0:8080 \
+    HEALTHCHECK_URL=http://127.0.0.1:8080/api/health \
+    CFNAT_AUTO_START=true \
+    CFNAT_ADDR=0.0.0.0:1234 \
+    CFNAT_CODE=200 \
+    CFNAT_COLO="" \
+    CFNAT_DELAY=300 \
+    CFNAT_DOMAIN=cloudflaremirrors.com/debian \
+    CFNAT_IPNUM=20 \
+    CFNAT_IPS=4 \
+    CFNAT_NUM=5 \
+    CFNAT_PORT=443 \
+    CFNAT_RANDOM=true \
+    CFNAT_TASK=100 \
+    CFNAT_TLS=true
+
+WORKDIR /data
+USER app
+EXPOSE 8080 1234
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD ["/usr/local/bin/cloudflare-web", "healthcheck"]
+
+ENTRYPOINT ["/usr/local/bin/cloudflare-web"]

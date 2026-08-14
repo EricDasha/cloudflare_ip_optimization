@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="data:," />
+    <title>Cloudflare Tools</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="/" data-route="/" aria-label="Cloudflare Tools">
+          <span class="brand-glyph">CF</span>
+          <span><strong>Cloudflare</strong><small>Tools Console</small></span>
+        </a>
+        <nav class="nav" aria-label="主导航">
+          <a href="/" data-route="/" class="nav-item active"><span aria-hidden="true">◫</span>总览</a>
+          <a href="/cfnat" data-route="/cfnat" class="nav-item"><span aria-hidden="true">⇄</span>转发</a>
+          <a href="/cfdata" data-route="/cfdata" class="nav-item"><span aria-hidden="true">⌁</span>扫描</a>
+          <a href="/files" data-route="/files" class="nav-item"><span aria-hidden="true">▤</span>文件</a>
+        </nav>
+        <div class="sidebar-foot">
+          <span class="health-dot" id="healthDot"></span>
+          <span id="sidebarHealth">正在连接</span>
+        </div>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <p class="overline" id="pageOverline">CONTROL PLANE</p>
+            <h1 id="pageTitle">运行总览</h1>
+          </div>
+          <button class="icon-button" id="refreshBtn" type="button" title="刷新全部" aria-label="刷新全部">↻</button>
+        </header>
+
+        <div class="route-page active" data-page="/">
+          <section class="operation-band">
+            <div class="operation-copy">
+              <div class="status-line">
+                <span class="status-pill" id="cfnatChip">CFnat --</span>
+                <span class="status-pill" id="cfdataChip">CFdata --</span>
+              </div>
+              <h2>自动优选池</h2>
+              <p class="pool-ips mono" id="activePoolIPs">等待生效池...</p>
+              <div class="operation-progress" aria-live="polite">
+                <span id="optimizationStage">就绪</span>
+                <span class="progress-track"><span id="optimizationProgress"></span></span>
+              </div>
+            </div>
+            <button class="button primary command-button" id="runFullOptimization" type="button">
+              <span aria-hidden="true">▶</span>
+              <span>完整优选</span>
+            </button>
+          </section>
+
+          <section class="metrics" aria-label="运行指标">
+            <article class="metric"><span>生效池</span><strong id="activePoolCount">0</strong><small>IPs</small></article>
+            <article class="metric"><span>候选池</span><strong id="candidateCount">0</strong><small>IPs</small></article>
+            <article class="metric"><span>CFnat PID</span><strong id="cfnatPid">--</strong><small>runtime</small></article>
+            <article class="metric"><span>CFdata PID</span><strong id="cfdataPid">--</strong><small>runtime</small></article>
+            <article class="metric wide-metric"><span>下次刷新</span><strong id="nextRefresh">--</strong><small>每 6 小时</small></article>
+          </section>
+
+          <section class="quick-actions">
+            <div class="section-title"><div><p class="overline">QUICK ACTIONS</p><h2>常用动作</h2></div></div>
+            <div class="action-row">
+              <button class="button secondary" id="quickRestartCfnat" type="button"><span aria-hidden="true">↻</span>重启 CFnat</button>
+              <button class="button secondary" id="quickRunCfdata" type="button"><span aria-hidden="true">⌁</span>运行 CFdata</button>
+              <a class="button ghost" href="/cfnat" data-route="/cfnat">转发设置 <span aria-hidden="true">→</span></a>
+              <a class="button ghost" href="/cfdata" data-route="/cfdata">扫描结果 <span aria-hidden="true">→</span></a>
+            </div>
+          </section>
+
+          <section class="log-workspace" id="logs">
+            <div class="section-title log-title">
+              <div><p class="overline">LIVE OUTPUT</p><h2>运行日志</h2></div>
+              <span class="log-state"><span class="live-dot"></span><span id="logStateText">实时</span></span>
+            </div>
+            <div class="log-toolbar">
+              <select id="logTarget" aria-label="日志进程">
+                <option value="cfnat">CFnat</option>
+                <option value="cfdata">CFdata</option>
+              </select>
+              <input id="logQuery" type="search" placeholder="筛选日志" aria-label="筛选日志" />
+              <select id="logLevel" aria-label="日志级别">
+                <option value="all">全部</option>
+                <option value="error">错误</option>
+                <option value="success">成功</option>
+              </select>
+              <select id="logLines" aria-label="日志行数">
+                <option value="120">120 行</option>
+                <option value="320" selected>320 行</option>
+                <option value="1000">1000 行</option>
+              </select>
+              <label class="toggle"><input id="logPaused" type="checkbox" />暂停</label>
+              <label class="toggle"><input id="logAutoscroll" type="checkbox" checked />跟随</label>
+              <button class="icon-button small" id="copyLogs" type="button" title="复制日志" aria-label="复制日志">⧉</button>
+            </div>
+            <div id="logBox" class="terminal" role="log" aria-live="polite">等待日志...</div>
+          </section>
+        </div>
+
+        <div class="route-page" data-page="/cfnat">
+          <section class="runtime-strip">
+            <div><span class="health-dot"></span><strong>CFnat 转发入口</strong><small>0.0.0.0:1234</small></div>
+            <div class="actions">
+              <button class="button danger" id="stopCfnat" type="button">■ 停止</button>
+              <button class="button primary" id="startCfnat" type="button">↻ 启动 / 重启</button>
+            </div>
+          </section>
+
+          <section class="panel" id="cfnat">
+            <div class="section-title"><div><p class="overline">FORWARDING</p><h2>转发配置</h2></div></div>
+            <div class="form-grid compact-form">
+              <label>本地监听<input id="natAddr" value="0.0.0.0:1234" /></label>
+              <label>固定转发 IP<input id="natFixedIPs" placeholder="留空时自动扫描" /></label>
+              <label>检测域名<input id="natDomain" value="cloudflaremirrors.com/debian" /></label>
+              <label>目标端口<input id="natPort" type="number" value="443" min="1" max="65535" /></label>
+            </div>
+            <details class="advanced" id="cfnatAdvanced">
+              <summary>高级参数 <span>CFnat 完整能力</span></summary>
+              <div class="form-grid">
+                <label>筛选机房<input id="natColo" placeholder="HKG,SJC,LAX" /></label>
+                <label>状态码<input id="natCode" type="number" value="200" /></label>
+                <label>有效延迟 (ms)<input id="natDelay" type="number" value="300" /></label>
+                <label>有效 IP 数量<input id="natIPNum" type="number" value="20" /></label>
+                <label>负载目标数<input id="natNum" type="number" value="5" /></label>
+                <label>并发任务<input id="natTask" type="number" value="100" /></label>
+                <label>IP 类型<select id="natIPs"><option value="4">IPv4</option><option value="6">IPv6</option></select></label>
+                <label class="toggle field-toggle"><input id="natTLS" type="checkbox" checked />TLS 端口</label>
+                <label class="toggle field-toggle"><input id="natRandom" type="checkbox" checked />随机生成 IP</label>
+              </div>
+            </details>
+          </section>
+
+          <section class="panel" id="proxyScanner">
+            <div class="section-title split-title">
+              <div><p class="overline">CANDIDATE POOL</p><h2>候选与终审</h2><p class="inline-status" id="autoCandidateStatus">正在读取候选...</p></div>
+              <div class="actions">
+                <button class="button secondary" id="refreshAutoCandidates" type="button">↻ 刷新候选并终审</button>
+                <button class="button primary" id="loadAutoCandidates" type="button">↓ 载入候选</button>
+              </div>
+            </div>
+            <details class="advanced">
+              <summary>手动扫描 <span>自定义候选、并发与延迟</span></summary>
+              <div class="form-grid">
+                <label class="wide">候选 IPv4<textarea id="proxyScanIPs" rows="5" placeholder="每行或逗号分隔"></textarea></label>
+                <label class="wide">社区候选源<select id="proxyScanSources" multiple size="3"><option value="zhaobo" selected>Zhaobo 聚合池</option><option value="william">William 台湾 / 韩国</option><option value="euorg">EU.org 社区池</option></select></label>
+                <label>SNI / Host<input id="proxyScanHost" value="vlesdy.trojanjd.dpdns.org" /></label>
+                <label>目标端口<input id="proxyScanPort" type="number" value="443" min="1" max="65535" /></label>
+                <label>扫描并发<input id="proxyScanConcurrency" type="number" value="50" min="1" max="500" /></label>
+                <label>延迟上限 (ms)<input id="proxyScanLatency" type="number" value="300" min="1" max="10000" /></label>
+                <label>扫描数量<input id="proxyScanLimit" type="number" value="100" min="1" max="10000" /></label>
+                <label class="toggle field-toggle"><input id="proxyScanTLS" type="checkbox" checked />TLS 握手</label>
+              </div>
+              <div class="actions advanced-actions"><button class="button secondary" id="useProxyScanResults" type="button">采用通过 IP</button><button class="button primary" id="runProxyScan" type="button">▶ 开始扫描</button></div>
+              <div id="proxyScanSummary" class="inline-status">尚未扫描</div>
+              <pre id="proxyScanResults" class="result-console">等待扫描结果...</pre>
+            </details>
+          </section>
+        </div>
+
+        <div class="route-page cfdata-page" data-page="/cfdata">
+          <section class="runtime-strip">
+            <div><span class="health-dot"></span><strong id="cfdataStatusText">CFdata 状态读取中</strong><small>ip.csv / result.csv</small></div>
+            <div class="actions"><button class="button danger" id="stopCfdata" type="button">■ 停止</button><button class="button primary" id="runCfdata" type="button">▶ 运行扫描</button></div>
+          </section>
+
+          <section class="panel" id="cfdata">
+            <div class="section-title"><div><p class="overline">SCAN PROFILE</p><h2>扫描配置</h2></div><button class="icon-button small" id="refreshBtnCfdata" type="button" title="刷新结果" aria-label="刷新结果">↻</button></div>
+            <div class="form-grid compact-form">
+              <label>IP 类型<select id="dataIPType"><option value="4">IPv4</option><option value="6">IPv6</option></select></label>
+              <label>数据中心<input id="dataCenter" list="dataCenters" placeholder="全部数据中心" /></label>
+              <datalist id="dataCenters"></datalist>
+              <label>延迟阈值 (ms)<input id="dataDelay" type="number" value="500" /></label>
+            </div>
+            <details class="advanced">
+              <summary>高级参数 <span>CFdata 完整能力</span></summary>
+              <div class="form-grid">
+                <label>扫描并发<input id="dataScan" type="number" value="100" /></label>
+                <label>测试并发<input id="dataTest" type="number" value="50" /></label>
+                <label>测试端口<input id="dataPort" type="number" value="443" /></label>
+                <label class="toggle field-toggle"><input id="dataForce" type="checkbox" />强制更新 ip.csv</label>
+              </div>
+            </details>
+          </section>
+
+          <section class="results-surface" id="cfdata-results">
+            <div class="section-title split-title">
+              <div><p class="overline">RESULTS</p><h2>扫描结果</h2><p class="inline-status" id="ipSourceHint">正在读取来源...</p></div>
+              <div class="actions"><select id="detailFileSelect" title="详细结果文件"></select><button class="button secondary" id="refreshCfdataResults" type="button">↻ 刷新</button></div>
+            </div>
+            <div class="tabs" role="tablist">
+              <button class="tab active" data-panel="dcPanel" type="button">数据中心 <span id="dcCount" class="badge">0</span></button>
+              <button class="tab" data-panel="livePanel" type="button">实时扫描 <span id="liveCount" class="badge">0</span></button>
+              <button class="tab" data-panel="scanPanel" type="button">扫描结果 <span id="scanCount" class="badge">0</span></button>
+              <button class="tab" data-panel="detailPanel" type="button">详细测试 <span id="detailCount" class="badge">0</span></button>
+            </div>
+            <div class="result-panel active" id="dcPanel"><div class="table-wrap"><table><thead><tr><th>机场</th><th>名称</th><th>区域</th><th>城市</th><th>IP 数</th><th>最低延迟</th><th>动作</th></tr></thead><tbody id="dcTableBody"></tbody></table></div></div>
+            <div class="result-panel" id="livePanel"><div class="panel-toolbar"><span class="inline-status">运行日志实时解析</span><button class="button secondary small-button" id="toggleLiveExpand" type="button">展开全部</button></div><div class="table-wrap large"><table><thead><tr><th>IP</th><th>机场</th><th>名称</th><th>区域</th><th>城市</th><th>延迟</th></tr></thead><tbody id="liveTableBody"></tbody></table></div></div>
+            <div class="result-panel" id="scanPanel"><div class="panel-toolbar"><span class="inline-status">ip.csv</span><button class="button secondary small-button" id="toggleScanExpand" type="button">展开全部</button></div><div class="table-wrap large"><table><thead><tr><th>IP</th><th>机场</th><th>名称</th><th>区域</th><th>城市</th><th>延迟</th></tr></thead><tbody id="scanTableBody"></tbody></table></div></div>
+            <div class="result-panel" id="detailPanel"><div class="panel-toolbar"><div class="cfdata-progress"><span id="cfdataProgressText">等待详细测试</span><span class="progress-track"><span id="cfdataProgressFill"></span></span></div></div><div class="table-wrap large"><table><thead><tr><th>IP</th><th>最低延迟</th><th>最高延迟</th><th>平均延迟</th><th>丢包率</th><th>下载测速</th></tr></thead><tbody id="detailTableBody"></tbody></table></div></div>
+          </section>
+        </div>
+
+        <div class="route-page" data-page="/files">
+          <section class="results-surface" id="files">
+            <div class="section-title split-title"><div><p class="overline">ARTIFACTS</p><h2>数据文件</h2></div><button class="button secondary" id="refreshFiles" type="button">↻ 刷新</button></div>
+            <div class="file-list" id="fileList"></div>
+          </section>
+        </div>
+      </main>
+    </div>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="/runtime.js"></script>
+    <script src="/app.js"></script>
+    <script src="/events.js"></script>
+  </body>
+</html>

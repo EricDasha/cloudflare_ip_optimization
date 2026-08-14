@@ -1,0 +1,139 @@
+# Cloudflare Tools Console
+
+本项目把 `cfdata.go` 与 `cfnat.go` 打进同一个本地 Docker 镜像，并提供一个 Web 控制台：
+
+架构与故障边界见 [`DESIGN.md`](DESIGN.md)。
+
+- Web UI：`http://localhost:8080`
+- CFnat 转发入口：`localhost:1234`
+- 数据与扫描产物：`./data`
+
+## 启动（无 Docker Hub 拉取）
+
+先在本机编译 Linux 静态产物：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-dist.ps1
+```
+
+再构建并启动容器：
+
+```bash
+docker compose up -d --build
+```
+
+默认 `Dockerfile` 使用 `FROM scratch`，不会拉取 `golang` / `alpine` 基础镜像，适合 Docker Hub 或镜像站不可用的环境。
+
+如果你的 Docker Hub 可用，也可以改用传统多阶段构建：
+
+```bash
+docker compose build --build-arg BUILDKIT_INLINE_CACHE=1
+docker build -f Dockerfile.multistage -t local/cloudflare-tools:multistage .
+```
+
+打开 `http://localhost:8080` 后可以：
+
+1. 在 `/` 查看进程、生效池和候选池，或点击“完整优选”依次运行 CFdata、候选汇合、WebSocket 终审与 CFnat 换池。
+2. 在 `/` 的日志工作面切换进程、搜索、筛选成功/错误、调整行数、暂停、跟随或复制日志。
+3. 在 `/cfnat` 启动、停止、重启 `cfnat`；常用参数直接显示，完整 flags 收在“高级参数”。
+4. 在 `/cfdata` 发起扫描、查看实时扫描表、数据中心汇总、`ip.csv` 扫描结果、丢包率与下载测速；并发、端口和强制更新收在“高级参数”。
+5. 在 `/files` 下载 `/data` 中的 `.csv`、`.txt`、`.json`、`.log` 文件。
+
+### 反代 IP 维护
+
+在 `/cfnat` 展开“手动扫描”后选择社区候选源，也可以粘贴自己的 IPv4 列表。候选源通过 DNS 解析读取，不执行第三方脚本，也不会修改 DNS。
+
+推荐的手动维护流程：
+
+1. 填写实际节点使用的 `SNI / Host` 和目标端口。
+2. 选择候选源，按网络情况设置扫描并发、延迟上限和扫描数量。
+3. 点击“开始扫描”，检查 `PASS` 结果与来源错误。
+4. 点击“采用通过 IP”，确认“固定转发 IP”已更新。
+5. 点击“启动 / 重启”，再用实际 VLESS/WS 节点请求 `https://www.gstatic.com/generate_204` 复验。
+6. 只有真实节点返回 `204` 才保留该 IP；单纯 TCP/TLS 通过不能证明业务可用。
+
+内置候选源：
+
+- `proxyip.zhaobo.org`：社区聚合池，上游项目 `kouzhaobo/proxyip-scanner`。
+- `tw.william.us.ci`、`kr.william.us.ci`：台湾和韩国候选。
+- `cdn.xn--b6gac.eu.org`：EU.org 社区候选池。
+
+服务端只允许上述固定候选源，不接受任意 URL，并拒绝私网、回环、链路本地与组播地址。扫描接口限制请求体为 1 MiB、并发为 `1-500`、扫描数量为 `1-10000`，同一时刻只运行一个扫描任务。
+
+Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新解析全部内置源。成功结果以原子替换方式写入 `/data/proxy-candidates.json`；刷新失败时保留上一次成功候选。页面会显示上次成功时间、下次刷新时间，并提供“立即拉取候选”和“载入自动候选”。
+
+启用 `PROXY_AUTO_APPLY` 后，后台会用配置的实际 `Host + WebSocket path` 对全部候选执行 TLS 与 WebSocket `101 Switching Protocols` 终审。只有通过数量达到 `PROXY_AUTO_MIN_POOL`，才把最快的 `PROXY_AUTO_POOL_SIZE` 个地址原子写入 `/data/proxy-active.json`，随后重启 CFnat；终审不足时保留旧池。容器重启时优先载入上次成功的自动池。
+
+## Compose 参数
+
+`docker-compose.yml` 内的 `CFNAT_*` 环境变量会作为默认启动参数：
+
+| 变量 | 对应 cfnat 参数 | 默认 |
+|---|---|---|
+| `CFNAT_ADDR` | `-addr` | `0.0.0.0:1234` |
+| `CFNAT_COLO` | `-colo` | 空 |
+| `CFNAT_DELAY` | `-delay` | `300` |
+| `CFNAT_DOMAIN` | `-domain` | `cloudflaremirrors.com/debian` |
+| `CFNAT_FIXED_IPS` | `-fixed` | 空 |
+| `CFNAT_IPNUM` | `-ipnum` | `20` |
+| `CFNAT_IPS` | `-ips` | `4` |
+| `CFNAT_NUM` | `-num` | `5` |
+| `CFNAT_PORT` | `-port` | `443` |
+| `CFNAT_RANDOM` | `-random` | `true` |
+| `CFNAT_TASK` | `-task` | `100` |
+| `CFNAT_TLS` | `-tls` | `true` |
+| `CFNAT_CODE` | `-code` | `200` |
+
+自动候选池相关变量：
+
+| 变量 | 说明 | 默认 |
+|---|---|---|
+| `PROXY_AUTO_APPLY` | 是否自动 WS 终审并替换固定池 | `false` |
+| `PROXY_AUTO_HOST` | 实际 VLESS/WS 节点 Host 与 TLS SNI | 空 |
+| `PROXY_AUTO_PATH` | 实际 WebSocket path | `/` |
+| `PROXY_AUTO_PORT` | 候选目标端口 | `443` |
+| `PROXY_AUTO_CONCURRENCY` | WS 终审并发 | `20` |
+| `PROXY_AUTO_MAX_LATENCY` | 单 IP 终审超时，毫秒 | `5000` |
+| `PROXY_AUTO_POOL_SIZE` | 自动生效池最大数量 | `5` |
+| `PROXY_AUTO_MIN_POOL` | 允许替换旧池的最少通过数量 | `3` |
+| `PROXY_AUTO_CFDATA` | 每轮自动候选维护前运行一次 CFdata | `false` |
+| `PROXY_AUTO_CFDATA_TIMEOUT` | CFdata 最长运行秒数 | `600` |
+| `PROXY_CFDATA_CANDIDATES` | 从 `ip.csv` 读取的候选上限 | `300` |
+| `PROXY_OFFICIAL_CANDIDATES` | 从 Cloudflare 官方 CIDR 均匀抽样的候选数 | `150` |
+
+## IP 列表获取方式
+
+`cfdata.go` 与 `cfnat.go` 都是同一套取数逻辑：
+
+1. 优先读取工作目录本地缓存：
+   - `ips-v4.txt`
+   - `ips-v6.txt`
+   - `locations.json`
+2. 如果缓存不存在，才联网下载并保存：
+   - IPv4：`https://www.baipiao.eu.org/cloudflare/ips-v4`
+   - IPv6：`https://www.baipiao.eu.org/cloudflare/ips-v6`
+   - 数据中心位置：`https://www.baipiao.eu.org/cloudflare/locations`
+
+所以联网正常时无需把作者包里的 IP 列表强行塞进镜像；需要离线运行时再预置到 `./data` 即可。
+
+注意：本地 `ips-v4.txt` 当前是数千个 `/24` 的广义 CDN/合作网络候选，不等同于 Cloudflare 官方公布的 15 个 IPv4 CIDR。自动维护会分别使用三类输入：社区 ProxyIP DNS、CFdata 已扫描的 `ip.csv`、`https://www.cloudflare.com/ips-v4` 官方段抽样；三者最终都必须通过实际 Host + WebSocket path 的 `101` 终审。
+
+## 日志上限
+
+Compose 已限制 Docker `json-file` 日志：
+
+```yaml
+logging:
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+```
+
+容器内进程日志仍会写入 `./data/cfnat.log` 与 `./data/cfdata.log`，Web 内存日志只保留最近片段用于页面展示。
+
+## 注意
+
+- `x-tunnel.go` 当前只作为参考，不参与镜像构建。
+- `cfdata` 已补 `-auto` / `-no-wait` / `-dc` 等参数；Web 控制台不再依赖交互式 stdin。
+- 如果手动填写数据中心，必须是 `ip.csv` 里已经存在的机房代号；留空表示提取全部。
