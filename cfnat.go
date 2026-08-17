@@ -38,6 +38,7 @@ type IPManager struct {
 	currentIP     string
 	ipAddresses   []string
 	currentIndex  int
+	dispatchIndex int
 	allIPsChecked bool
 }
 
@@ -50,7 +51,28 @@ func (m *IPManager) SetIPAddresses(ips []string) {
 	defer m.mu.Unlock()
 	m.ipAddresses = ips
 	m.currentIndex = 0
+	m.dispatchIndex = 0
 	m.allIPsChecked = false
+}
+
+// nextTargets returns a round-robin slice for a new client connection.
+// currentIndex remains dedicated to health-check failover.
+func (m *IPManager) nextTargets(port, count int) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if count <= 0 || len(m.ipAddresses) == 0 {
+		return nil
+	}
+	if count > len(m.ipAddresses) {
+		count = len(m.ipAddresses)
+	}
+
+	ips := make([]string, count)
+	for i := range ips {
+		ips[i] = m.ipAddresses[(m.dispatchIndex+i)%len(m.ipAddresses)]
+	}
+	m.dispatchIndex = (m.dispatchIndex + count) % len(m.ipAddresses)
+	return generateTargets(ips, port)
 }
 
 func (m *IPManager) GetCurrentIP() string {
@@ -354,8 +376,7 @@ func main() {
 					atomic.AddInt32(&activeConnections, 1)
 					log.Printf("客户端来源: %s 连接建立，当前活跃连接数: %d", clientAddr, atomic.LoadInt32(&activeConnections))
 
-					currIP := ipManager.GetCurrentIP()
-					go handleConnection(conn, generateTargets(currIP, *port, *num), time.Duration(*Delay)*time.Millisecond)
+					go handleConnection(conn, ipManager.nextTargets(*port, *num), time.Duration(*Delay)*time.Millisecond)
 				}
 			}
 		}()
@@ -692,13 +713,13 @@ func incrementIP(ip net.IP) {
 	}
 }
 
-func generateTargets(ip string, port int, num int) []string {
-	targets := make([]string, num)
-	address := ip
-	if strings.Contains(ip, ":") {
-		address = fmt.Sprintf("[%s]", ip)
-	}
-	for i := 0; i < num; i++ {
+func generateTargets(ips []string, port int) []string {
+	targets := make([]string, len(ips))
+	for i, ip := range ips {
+		address := ip
+		if strings.Contains(ip, ":") {
+			address = fmt.Sprintf("[%s]", ip)
+		}
 		targets[i] = fmt.Sprintf("%s:%d", address, port)
 	}
 	return targets
