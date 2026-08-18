@@ -53,6 +53,10 @@ func TestThirdPartyProxySourcesAreHTTPSAllowlisted(t *testing.T) {
 			}
 		}
 	}
+	source := proxyCandidateSources["090227"]
+	if len(source.Domains) < 10 || len(source.URLs) != 4 {
+		t.Fatalf("090227 source was not expanded: %#v", source)
+	}
 }
 
 func TestSampleIPv4CIDRs(t *testing.T) {

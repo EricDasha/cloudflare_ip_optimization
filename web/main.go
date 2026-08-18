@@ -526,8 +526,20 @@ var proxyCandidateSources = map[string]proxyCandidateSource{
 		},
 	},
 	"090227": {
-		Name: "090227 优选域名",
-		URLs: []string{"https://cf.090227.xyz/"},
+		Name: "090227 优选域名与 API",
+		Domains: []string{
+			"cf.090227.xyz", "youxuan.cf.090227.xyz", "123.cf.090227.xyz",
+			"www.visa.cn", "mfa.gov.ua", "www.shopify.com", "store.ubi.com",
+			"staticdelivery.nexusmods.com", "tencentapp.cn", "cloudflare-dl.byoip.top",
+			"cf.877774.xyz", "saas.sin.fan", "bestcf.030101.xyz", "cloudflare.182682.xyz",
+			"ipdb.api.030101.xyz", "wetest.vip", "ip.164746.xyz",
+		},
+		URLs: []string{
+			"https://cf.090227.xyz/",
+			"https://cf.090227.xyz/ct?ips=6",
+			"https://cf.090227.xyz/cu",
+			"https://cf.090227.xyz/cmcc?ips=8",
+		},
 	},
 }
 
