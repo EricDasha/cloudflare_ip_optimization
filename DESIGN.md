@@ -16,7 +16,7 @@ The Web layer orchestrates these binaries. It does not duplicate their scanning 
 Candidate generation and business acceptance are separate stages:
 
 1. CFdata reads the local broad CDN ranges and writes `ip.csv`.
-2. The candidate cache merges allowlisted community DNS pools, bounded HTTPS subscription pages, CFdata output and sampled official Cloudflare CIDRs. HTTPS pages are fetched without script execution, capped at 512 KiB and cannot follow cross-origin redirects.
+2. The candidate cache merges allowlisted community DNS pools, bounded HTTPS IP pages, CFdata output and sampled official Cloudflare CIDRs. HTTPS pages are fetched without script execution, capped at 512 KiB and cannot follow cross-origin redirects. Subscription converter frontends are not automatic sources; manually pasted output accepts hostnames only from recognized node URIs or server fields, capped at 64 names under a shared three-second deadline.
 3. The first active-pool stage validates the configured TLS SNI, HTTP Host and WebSocket path in parallel.
 4. If VLESS probing is enabled, only the fastest WS passes are tested sequentially through a short-lived sing-box process until the target pool is full.
 5. The VLESS probe replaces only the candidate server and port; UUID, TLS/ECH/uTLS and WebSocket settings come from the local outbound template. A configured `generate_204` response is the business acceptance signal.

@@ -58,10 +58,11 @@ docker build -f Dockerfile.multistage -t local/cloudflare-tools:multistage .
 - `tw.william.us.ci`、`kr.william.us.ci`：台湾和韩国候选。
 - `cdn.xn--b6gac.eu.org`：EU.org 社区候选池。
 - `ProxyIP.*.CMLiussss.net`：CMLiussss 全球、亚洲、欧洲和北美 ProxyIP DNS 池。
-- `sub.cmliussss.net`、`owo.o00o.ooo`、`cm.soso.edu.kg`、`zrf.zrf.me`：第三方订阅入口，仅提取内容中的公网 IPv4。
 - `cf.090227.xyz`：第三方优选目录；同时抓取 `/ct?ips=6`、`/cu`、`/cmcc?ips=8` API，并解析目录列出的固定优选域名 DNS。
 
-服务端只允许上述固定候选源，不接受任意 URL；第三方 HTTPS 源禁止跨域跳转，正文限制为 512 KiB，不执行脚本或订阅内容。所有结果仍拒绝私网、回环、链路本地与组播地址。扫描接口限制请求体为 1 MiB、并发为 `1-500`、扫描数量为 `1-10000`，同一时刻只运行一个扫描任务。
+`sub.cmliussss.net`、`owo.o00o.ooo`、`cm.soso.edu.kg`、`zrf.zrf.me` 是订阅转换器，不是候选数据源。需要使用时，将转换后的 VLESS/Trojan/SS/VMess 或 Clash 内容粘贴到手动扫描的“订阅内容”；服务端只从明确的节点 URI、JSON 或 Clash `server` 字段提取节点域名，不保存或记录原文。
+
+服务端只允许上述固定候选源，不接受任意 URL；第三方 HTTPS 源禁止跨域跳转，正文限制为 512 KiB，不执行脚本。手动导入的节点域名最多 64 个 hostname、共享 3 秒解析期限，并只接受公网 IPv4。所有结果仍拒绝私网、回环、链路本地与组播地址。扫描接口限制请求体为 1 MiB、并发为 `1-500`、扫描数量为 `1-10000`，同一时刻只运行一个扫描任务。
 
 Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新解析全部内置源。成功结果以原子替换方式写入 `/data/proxy-candidates.json`；刷新失败时保留上一次成功候选。页面会显示上次成功时间、下次刷新时间，并提供“立即拉取候选”和“载入自动候选”。
 

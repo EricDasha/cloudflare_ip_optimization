@@ -439,14 +439,15 @@ func main() {
 }
 
 type proxyScanConfig struct {
-	IPs         string   `json:"ips"`
-	Sources     []string `json:"sources"`
-	Host        string   `json:"host"`
-	Port        int      `json:"port"`
-	Concurrency int      `json:"concurrency"`
-	MaxLatency  int      `json:"maxLatency"`
-	Limit       int      `json:"limit"`
-	TLS         bool     `json:"tls"`
+	IPs          string   `json:"ips"`
+	Subscription string   `json:"subscription"`
+	Sources      []string `json:"sources"`
+	Host         string   `json:"host"`
+	Port         int      `json:"port"`
+	Concurrency  int      `json:"concurrency"`
+	MaxLatency   int      `json:"maxLatency"`
+	Limit        int      `json:"limit"`
+	TLS          bool     `json:"tls"`
 }
 
 type proxyCandidateSource struct {
@@ -516,15 +517,6 @@ var proxyCandidateSources = map[string]proxyCandidateSource{
 			"ProxyIP.LV.CMLiussss.net", "ProxyIP.US.CMLiussss.net", "ProxyIP.CA.CMLiussss.net",
 		},
 	},
-	"third-party-subscriptions": {
-		Name: "第三方订阅入口",
-		URLs: []string{
-			"https://sub.cmliussss.net",
-			"https://owo.o00o.ooo",
-			"https://cm.soso.edu.kg",
-			"https://zrf.zrf.me",
-		},
-	},
 	"090227": {
 		Name: "090227 优选域名与 API",
 		Domains: []string{
@@ -544,7 +536,7 @@ var proxyCandidateSources = map[string]proxyCandidateSource{
 }
 
 var defaultProxyCandidateSourceIDs = []string{
-	"zhaobo", "william", "euorg", "cmliussss-proxyip", "third-party-subscriptions", "090227",
+	"zhaobo", "william", "euorg", "cmliussss-proxyip", "090227",
 }
 
 func (a *app) runProxyCandidateRefreshLoop() {
@@ -1150,6 +1142,12 @@ func (a *app) handleProxyScan(w http.ResponseWriter, r *http.Request) {
 		ips = append(ips, key)
 	}
 	for _, raw := range strings.FieldsFunc(cfg.IPs, func(r rune) bool { return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t' }) {
+		addIP(raw)
+	}
+	for _, raw := range extractPublicIPv4(cfg.Subscription) {
+		addIP(raw)
+	}
+	for _, raw := range resolveSubscriptionHostnames(r.Context(), extractSubscriptionHostnames(cfg.Subscription), cfg.Limit-len(ips)) {
 		addIP(raw)
 	}
 	resolved, sourceErrors, err := resolveProxySources(r.Context(), cfg.Sources, cfg.Limit-len(ips))

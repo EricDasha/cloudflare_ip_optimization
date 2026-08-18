@@ -42,7 +42,7 @@ func TestExtractPublicIPv4FromTextAndBase64(t *testing.T) {
 }
 
 func TestThirdPartyProxySourcesAreHTTPSAllowlisted(t *testing.T) {
-	for _, id := range []string{"cmliussss-proxyip", "third-party-subscriptions", "090227"} {
+	for _, id := range []string{"cmliussss-proxyip", "090227"} {
 		source, ok := proxyCandidateSources[id]
 		if !ok {
 			t.Fatalf("missing source %q", id)
@@ -52,6 +52,9 @@ func TestThirdPartyProxySourcesAreHTTPSAllowlisted(t *testing.T) {
 				t.Fatalf("source %q contains non-HTTPS URL %q", id, rawURL)
 			}
 		}
+	}
+	if _, ok := proxyCandidateSources["third-party-subscriptions"]; ok {
+		t.Fatal("subscription converter frontends must not be automatic candidate sources")
 	}
 	source := proxyCandidateSources["090227"]
 	if len(source.Domains) < 10 || len(source.URLs) != 4 {

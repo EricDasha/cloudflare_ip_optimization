@@ -19,6 +19,7 @@ function cfnatPayload() {
 function proxyScanPayload() {
   return {
     ips: $("proxyScanIPs").value,
+    subscription: $("proxyScanSubscription").value,
     sources: Array.from($("proxyScanSources").selectedOptions, (option) => option.value),
     host: $("proxyScanHost").value.trim(),
     port: number("proxyScanPort"),
