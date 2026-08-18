@@ -230,3 +230,28 @@ func TestVLESSProbeCandidateLimit(t *testing.T) {
 		t.Fatalf("candidate limit was not enforced: %#v", results[2])
 	}
 }
+
+func TestVLESSProbeOrderUsesWebSocketLatency(t *testing.T) {
+	results := []proxyScanResult{
+		{IP: "198.51.100.1", Latency: 300},
+		{IP: "198.51.100.2", Latency: 100},
+		{IP: "198.51.100.3", Latency: 200, Error: "failed"},
+	}
+	order := vlessProbeOrder(results)
+	if !reflect.DeepEqual(order, []int{1, 0}) {
+		t.Fatalf("vlessProbeOrder() = %v, want [1 0]", order)
+	}
+}
+
+func TestFastestVLESSPassesUsesDataLatency(t *testing.T) {
+	results := []proxyScanResult{
+		{IP: "198.51.100.1", Latency: 100, DataLatency: 900, Stage: "VLESS_PASS"},
+		{IP: "198.51.100.2", Latency: 200, DataLatency: 300, Stage: "VLESS_PASS"},
+		{IP: "198.51.100.3", Latency: 50, DataLatency: 600, Stage: "VLESS_PASS"},
+	}
+	got := fastestVLESSPasses(results, 2)
+	want := []string{"198.51.100.2", "198.51.100.3"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("fastestVLESSPasses() = %v, want %v", got, want)
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -172,14 +173,11 @@ func buildSingBoxProbeConfig(template map[string]any, candidateIP string, candid
 }
 
 func probeVLESSPool(parent context.Context, results []proxyScanResult, candidatePort, poolSize int, cfg vlessProbeConfig, template map[string]any) []string {
-	passed := make([]string, 0, poolSize)
+	order := vlessProbeOrder(results)
 	attempts := 0
-	for i := range results {
-		if len(passed) >= poolSize || attempts >= cfg.MaxCandidates {
+	for _, i := range order {
+		if attempts >= cfg.MaxCandidates {
 			break
-		}
-		if results[i].Error != "" {
-			continue
 		}
 		attempts++
 		ctx, cancel := context.WithTimeout(parent, cfg.Timeout)
@@ -193,9 +191,44 @@ func probeVLESSPool(parent context.Context, results []proxyScanResult, candidate
 			continue
 		}
 		results[i].Stage = "VLESS_PASS"
-		passed = append(passed, results[i].IP)
 	}
-	return passed
+	return fastestVLESSPasses(results, poolSize)
+}
+
+func vlessProbeOrder(results []proxyScanResult) []int {
+	order := make([]int, 0, len(results))
+	for i := range results {
+		if results[i].Error == "" {
+			order = append(order, i)
+		}
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		return results[order[i]].Latency < results[order[j]].Latency
+	})
+	return order
+}
+
+func fastestVLESSPasses(results []proxyScanResult, poolSize int) []string {
+	passed := make([]int, 0, poolSize)
+	for i := range results {
+		if results[i].Stage == "VLESS_PASS" {
+			passed = append(passed, i)
+		}
+	}
+	sort.SliceStable(passed, func(i, j int) bool {
+		if results[passed[i]].DataLatency == results[passed[j]].DataLatency {
+			return results[passed[i]].Latency < results[passed[j]].Latency
+		}
+		return results[passed[i]].DataLatency < results[passed[j]].DataLatency
+	})
+	if len(passed) > poolSize {
+		passed = passed[:poolSize]
+	}
+	result := make([]string, len(passed))
+	for i, index := range passed {
+		result[i] = results[index].IP
+	}
+	return result
 }
 
 func probeVLESSCandidate(ctx context.Context, candidateIP string, candidatePort int, cfg vlessProbeConfig, template map[string]any) error {
