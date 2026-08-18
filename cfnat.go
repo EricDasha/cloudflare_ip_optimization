@@ -874,7 +874,67 @@ func statusCheck(ctx context.Context, localAddr string, useTLS bool, port int, d
 	}
 }
 
-// 处理客户端连接，尝试连接到指定的转发地址，并选择延迟最低的连接
+type connResult struct {
+	conn  net.Conn
+	addr  string
+	delay time.Duration
+	err   error
+}
+
+// dialFirstAvailable races all targets and returns as soon as one connects.
+// Remaining attempts are canceled and any connections that still win the race are closed.
+func dialFirstAvailable(
+	ctx context.Context,
+	forwardAddrs []string,
+	dial func(context.Context, string, string) (net.Conn, error),
+) (net.Conn, string, time.Duration, error) {
+	if len(forwardAddrs) == 0 {
+		return nil, "", 0, fmt.Errorf("没有可用的转发地址")
+	}
+
+	dialCtx, cancel := context.WithCancel(ctx)
+	results := make(chan connResult, len(forwardAddrs))
+	for _, addr := range forwardAddrs {
+		go func(targetAddr string) {
+			start := time.Now()
+			forwardConn, err := dial(dialCtx, "tcp", targetAddr)
+			results <- connResult{conn: forwardConn, addr: targetAddr, delay: time.Since(start), err: err}
+		}(addr)
+	}
+
+	var lastErr error
+	for received := 0; received < len(forwardAddrs); received++ {
+		res := <-results
+		if res.err != nil || res.conn == nil {
+			if res.conn != nil {
+				_ = res.conn.Close()
+			}
+			if res.err == nil {
+				res.err = fmt.Errorf("拨号器未返回连接")
+			}
+			lastErr = res.err
+			log.Printf("连接到 %s 失败: %v", res.addr, res.err)
+			continue
+		}
+
+		cancel()
+		remaining := len(forwardAddrs) - received - 1
+		go func() {
+			for i := 0; i < remaining; i++ {
+				loser := <-results
+				if loser.conn != nil {
+					_ = loser.conn.Close()
+				}
+			}
+		}()
+		return res.conn, res.addr, res.delay, nil
+	}
+
+	cancel()
+	return nil, "", 0, fmt.Errorf("所有转发地址均连接失败: %w", lastErr)
+}
+
+// 处理客户端连接，并发竞速后立即使用首个可达的转发地址。
 func handleConnection(conn net.Conn, forwardAddrs []string, delay time.Duration) {
 	defer func() {
 		clientAddr := conn.RemoteAddr().String()
@@ -883,69 +943,15 @@ func handleConnection(conn net.Conn, forwardAddrs []string, delay time.Duration)
 		conn.Close()
 	}()
 
-	type connResult struct {
-		conn   net.Conn
-		addr   string
-		delay  time.Duration
-		errMsg string
+	dialer := &net.Dialer{Timeout: delay}
+	bestConn, bestAddr, bestDelay, err := dialFirstAvailable(context.Background(), forwardAddrs, dialer.DialContext)
+	if err != nil {
+		log.Printf("未找到可用的转发连接: %v", err)
+		return
 	}
 
-	results := make(chan connResult, len(forwardAddrs))
-
-	// 并发尝试连接每个转发地址
-	for _, addr := range forwardAddrs {
-		go func(targetAddr string) {
-			start := time.Now()
-			forwardConn, err := net.DialTimeout("tcp", targetAddr, delay)
-			elapsed := time.Since(start)
-
-			if err != nil {
-				results <- connResult{nil, targetAddr, elapsed, fmt.Sprintf("连接到 %s 的延迟超过有效值 %d ms", targetAddr, delay.Milliseconds())}
-				return
-			}
-
-			results <- connResult{forwardConn, targetAddr, elapsed, ""}
-		}(addr)
-	}
-
-	var validConns []connResult
-	var bestConn net.Conn
-	var bestDelay time.Duration
-	var bestAddr string
-
-	// 收集结果并找到延迟最低的有效连接
-	for i := 0; i < len(forwardAddrs); i++ {
-		res := <-results
-		if res.conn != nil {
-			validConns = append(validConns, res)
-
-			if bestConn == nil || res.delay < bestDelay {
-				if bestConn != nil {
-					bestConn.Close()
-				}
-				bestConn = res.conn
-				bestDelay = res.delay
-				bestAddr = res.addr
-			} else {
-				res.conn.Close()
-			}
-		} else {
-			log.Printf("错误: %s", res.errMsg)
-		}
-	}
-
-	log.Println("符合要求的连接:")
-	for _, vc := range validConns {
-		log.Printf("地址: %s 延迟: %d ms", vc.addr, vc.delay.Milliseconds())
-	}
-
-	// 如果找到最佳连接，开始转发数据
-	if bestConn != nil {
-		log.Printf("选择最佳连接: 地址: %s 延迟: %d ms", bestAddr, bestDelay.Milliseconds())
-		pipeConnections(conn, bestConn)
-	} else {
-		log.Println("未找到符合延迟要求的连接，关闭客户端连接")
-	}
+	log.Printf("选择首个可达连接: 地址: %s 延迟: %d ms", bestAddr, bestDelay.Milliseconds())
+	pipeConnections(conn, bestConn)
 }
 
 func pipeConnections(src, dst net.Conn) {
