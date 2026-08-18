@@ -17,6 +17,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -451,6 +452,7 @@ type proxyScanConfig struct {
 type proxyCandidateSource struct {
 	Name    string
 	Domains []string
+	URLs    []string
 }
 
 type proxyCandidateSnapshot struct {
@@ -497,12 +499,41 @@ func defaultProxyAutoConfig() proxyAutoConfig {
 }
 
 var proxyCandidateSources = map[string]proxyCandidateSource{
-	"zhaobo":  {Name: "Zhaobo 聚合池", Domains: []string{"proxyip.zhaobo.org"}},
-	"william": {Name: "William 台湾/韩国", Domains: []string{"tw.william.us.ci", "kr.william.us.ci"}},
-	"euorg":   {Name: "EU.org 社区池", Domains: []string{"cdn.xn--b6gac.eu.org"}},
+	"zhaobo": {Name: "Zhaobo 聚合池", Domains: []string{"proxyip.zhaobo.org"}},
+	"william": {
+		Name:    "William 台湾/韩国",
+		Domains: []string{"tw.william.us.ci", "kr.william.us.ci"},
+	},
+	"euorg": {Name: "EU.org 社区池", Domains: []string{"cdn.xn--b6gac.eu.org"}},
+	"cmliussss-proxyip": {
+		Name: "CMLiussss ProxyIP",
+		Domains: []string{
+			"ProxyIP.CMLiussss.net", "ProxyIP.HK.CMLiussss.net", "ProxyIP.SG.CMLiussss.net",
+			"ProxyIP.JP.CMLiussss.net", "ProxyIP.KR.CMLiussss.net", "ProxyIP.IN.CMLiussss.net",
+			"ProxyIP.GB.CMLiussss.net", "ProxyIP.FR.CMLiussss.net", "ProxyIP.DE.CMLiussss.net",
+			"ProxyIP.NL.CMLiussss.net", "ProxyIP.SE.CMLiussss.net", "ProxyIP.FI.CMLiussss.net",
+			"ProxyIP.PL.CMLiussss.net", "ProxyIP.RU.CMLiussss.net", "ProxyIP.CH.CMLiussss.net",
+			"ProxyIP.LV.CMLiussss.net", "ProxyIP.US.CMLiussss.net", "ProxyIP.CA.CMLiussss.net",
+		},
+	},
+	"third-party-subscriptions": {
+		Name: "第三方订阅入口",
+		URLs: []string{
+			"https://sub.cmliussss.net",
+			"https://owo.o00o.ooo",
+			"https://cm.soso.edu.kg",
+			"https://zrf.zrf.me",
+		},
+	},
+	"090227": {
+		Name: "090227 优选域名",
+		URLs: []string{"https://cf.090227.xyz/"},
+	},
 }
 
-var defaultProxyCandidateSourceIDs = []string{"zhaobo", "william", "euorg"}
+var defaultProxyCandidateSourceIDs = []string{
+	"zhaobo", "william", "euorg", "cmliussss-proxyip", "third-party-subscriptions", "090227",
+}
 
 func (a *app) runProxyCandidateRefreshLoop() {
 	a.refreshAndApplyProxyPool(context.Background())
@@ -1129,6 +1160,80 @@ func isPublicIPv4(ip net.IP) bool {
 	return ip != nil && ip.To4() != nil && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsUnspecified() && !ip.IsMulticast() && !ip.IsLinkLocalUnicast()
 }
 
+const maxCandidateSourceBody = 512 * 1024
+
+func extractPublicIPv4(text string) []string {
+	seen := make(map[string]struct{})
+	result := make([]string, 0)
+	add := func(raw string) {
+		if ip := net.ParseIP(raw); isPublicIPv4(ip) {
+			key := ip.To4().String()
+			if _, ok := seen[key]; !ok {
+				seen[key] = struct{}{}
+				result = append(result, key)
+			}
+		}
+	}
+	parseText := func(value string) {
+		for _, token := range strings.FieldsFunc(value, func(r rune) bool {
+			return !(r == '.' || r >= '0' && r <= '9')
+		}) {
+			add(token)
+		}
+	}
+	parseText(text)
+	for _, line := range strings.Fields(text) {
+		compact := strings.TrimSpace(line)
+		if len(compact) < 16 || len(compact) > maxCandidateSourceBody {
+			continue
+		}
+		for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+			decoded, err := encoding.DecodeString(compact)
+			if err == nil {
+				parseText(string(decoded))
+				break
+			}
+		}
+	}
+	return result
+}
+
+func fetchProxyCandidateURL(parent context.Context, rawURL string) ([]string, error) {
+	target, err := url.Parse(rawURL)
+	if err != nil || target.Scheme != "https" || target.Hostname() == "" {
+		return nil, errors.New("候选源 URL 必须是 HTTPS")
+	}
+	client := &http.Client{
+		Timeout: 8 * time.Second,
+		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			if !strings.EqualFold(req.URL.Hostname(), target.Hostname()) {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
+	request, err := http.NewRequestWithContext(parent, http.MethodGet, target.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("HTTP 状态码 %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxCandidateSourceBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxCandidateSourceBody {
+		return nil, errors.New("候选源内容超过 512 KiB")
+	}
+	return extractPublicIPv4(string(body)), nil
+}
+
 func resolveProxySources(parent context.Context, sourceIDs []string, remaining int) ([]string, []string, error) {
 	if remaining <= 0 || len(sourceIDs) == 0 {
 		return []string{}, []string{}, nil
@@ -1164,6 +1269,17 @@ func resolveProxySources(parent context.Context, sourceIDs []string, remaining i
 					}
 				}
 			}
+		}
+		for _, sourceURL := range source.URLs {
+			if len(ips) >= remaining {
+				return ips, errorsFound, nil
+			}
+			found, err := fetchProxyCandidateURL(parent, sourceURL)
+			if err != nil {
+				errorsFound = append(errorsFound, fmt.Sprintf("%s: %v", source.Name, err))
+				continue
+			}
+			ips = append(ips, found...)
 		}
 	}
 	return ips, errorsFound, nil

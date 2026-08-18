@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net"
 	"os"
@@ -27,6 +28,29 @@ func TestIsPublicIPv4(t *testing.T) {
 	for _, tt := range tests {
 		if got := isPublicIPv4(net.ParseIP(tt.ip)); got != tt.want {
 			t.Fatalf("isPublicIPv4(%q) = %v, want %v", tt.ip, got, tt.want)
+		}
+	}
+}
+
+func TestExtractPublicIPv4FromTextAndBase64(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString([]byte("vless://id@8.8.8.8:443?host=example.com"))
+	got := extractPublicIPv4("1.1.1.1 192.168.1.1 invalid\n" + encoded)
+	want := []string{"1.1.1.1", "8.8.8.8"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("extractPublicIPv4() = %v, want %v", got, want)
+	}
+}
+
+func TestThirdPartyProxySourcesAreHTTPSAllowlisted(t *testing.T) {
+	for _, id := range []string{"cmliussss-proxyip", "third-party-subscriptions", "090227"} {
+		source, ok := proxyCandidateSources[id]
+		if !ok {
+			t.Fatalf("missing source %q", id)
+		}
+		for _, rawURL := range source.URLs {
+			if !strings.HasPrefix(rawURL, "https://") {
+				t.Fatalf("source %q contains non-HTTPS URL %q", id, rawURL)
+			}
 		}
 	}
 }
