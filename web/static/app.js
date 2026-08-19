@@ -20,7 +20,7 @@ function proxyScanPayload() {
   return {
     ips: $("proxyScanIPs").value,
     subscription: $("proxyScanSubscription").value,
-    sources: Array.from($("proxyScanSources").selectedOptions, (option) => option.value),
+    sources: Array.from(document.querySelectorAll("#proxyScanSources input:checked"), (input) => input.value),
     host: $("proxyScanHost").value.trim(),
     port: number("proxyScanPort"),
     concurrency: number("proxyScanConcurrency"),
@@ -28,6 +28,34 @@ function proxyScanPayload() {
     limit: number("proxyScanLimit"),
     tls: $("proxyScanTLS").checked,
   };
+}
+
+function updateProxySourceSummary() {
+  const select = $("proxyScanSources");
+  const hint = $("proxySourceHint");
+  if (!select || !hint) return;
+  const selected = Array.from(select.querySelectorAll("input:checked"), (input) => input.nextElementSibling.textContent.trim());
+  hint.textContent = selected.length
+    ? `已选择 ${selected.length} 个社区源：${selected.join("、")}。`
+    : "未选择社区源；本次只使用手动 IP / 订阅内容。";
+}
+
+function activateWorkspace(workspaceId) {
+  document.querySelectorAll("[data-workspace]").forEach((tab) => {
+    const active = tab.dataset.workspace === workspaceId;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+  });
+  document.querySelectorAll(".workspace-panel").forEach((panel) => {
+    const active = panel.id === workspaceId;
+    panel.classList.toggle("active", active);
+    panel.hidden = !active;
+  });
+  sessionStorage.setItem("cfnatWorkspace", workspaceId);
+  if (window.location.pathname === "/cfnat") {
+    const hash = workspaceId === "candidateWorkspace" ? "#candidates" : "#forward";
+    history.replaceState({}, "", `${window.location.pathname}${hash}`);
+  }
 }
 
 let latestProxyScanResults = [];
@@ -60,6 +88,8 @@ async function loadAutoCandidates(loadIntoInput = false) {
 function renderProxyScanResults(data) {
   latestProxyScanResults = data.results || [];
   const passed = latestProxyScanResults.filter((r) => !r.error);
+  const adopt = $("useProxyScanResults");
+  if (adopt) adopt.disabled = passed.length === 0;
   const sourceErrors = data.sourceErrors || [];
   $("proxyScanSummary").textContent = `已扫描 ${data.scanned} 个，${passed.length} 个通过延迟筛选${sourceErrors.length ? `；${sourceErrors.length} 个候选源解析失败` : ""}`;
   $("proxyScanResults").textContent = latestProxyScanResults.length

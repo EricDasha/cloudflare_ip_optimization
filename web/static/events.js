@@ -21,6 +21,20 @@ $("runProxyScan").addEventListener("click", async () => {
   } catch (e) { toast(`扫描失败：${e.message}`); }
 });
 
+document.querySelectorAll("[data-workspace]").forEach((tab) => {
+  tab.addEventListener("click", () => activateWorkspace(tab.dataset.workspace));
+});
+
+$("proxyScanSources").addEventListener("change", updateProxySourceSummary);
+$("selectAllProxySources").addEventListener("click", () => {
+  $("proxyScanSources").querySelectorAll("input").forEach((input) => { input.checked = true; });
+  updateProxySourceSummary();
+});
+$("clearProxySources").addEventListener("click", () => {
+  $("proxyScanSources").querySelectorAll("input").forEach((input) => { input.checked = false; });
+  updateProxySourceSummary();
+});
+
 $("useProxyScanResults").addEventListener("click", () => {
   const ips = latestProxyScanResults.filter((r) => !r.error).map((r) => r.ip);
   if (!ips.length) { toast("没有可采用的通过 IP"); return; }
@@ -141,6 +155,9 @@ document.querySelectorAll("[data-route]").forEach((link) => {
 window.addEventListener("popstate", () => applyRoute());
 
 loadDefaults().then(() => {
+  updateProxySourceSummary();
+  const workspaceFromHash = window.location.hash === "#candidates" ? "candidateWorkspace" : null;
+  activateWorkspace(workspaceFromHash || sessionStorage.getItem("cfnatWorkspace") || "forwardWorkspace");
   applyRoute();
   refreshStatus();
   refreshFiles();

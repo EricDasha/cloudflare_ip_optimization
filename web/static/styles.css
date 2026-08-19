@@ -59,6 +59,67 @@ button, a, input, select, textarea, summary { -webkit-tap-highlight-color: trans
   min-height: 100vh;
 }
 
+.subnav {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 var(--s4);
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.subnav-item {
+  flex: 0 0 auto;
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-2);
+  background: transparent;
+  cursor: pointer;
+}
+
+.subnav-item:hover, .subnav-item.active {
+  color: var(--text);
+  background: var(--surface-3);
+}
+
+.workspace-panel { display: none; }
+.workspace-panel.active { display: block; }
+
+.field-hint {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.source-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.scan-workflow[open] > summary { border-bottom: 1px solid var(--line); }
+.workflow-section { padding: var(--s5) 0; border-bottom: 1px solid var(--line); }
+.workflow-section:last-child { padding-bottom: 0; border-bottom: 0; }
+.workflow-heading { display: flex; align-items: flex-start; gap: var(--s3); margin-bottom: var(--s4); }
+.workflow-heading h3 { margin: 0; color: var(--text); font-size: 15px; }
+.workflow-heading p { margin: 4px 0 0; color: var(--text-3); font-size: 12px; font-weight: 500; }
+.step-index { display: grid; place-items: center; flex: 0 0 26px; width: 26px; height: 26px; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--accent); background: var(--surface-2); font: 700 12px var(--font-mono); }
+.source-fieldset { min-width: 0; margin: 0 0 var(--s4); padding: var(--s4); border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.source-fieldset legend { padding: 0 var(--s2); color: var(--text-2); font-size: 12px; font-weight: 700; }
+.source-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s2); }
+.source-grid label { display: flex; align-items: center; gap: var(--s2); min-width: 0; min-height: 38px; padding: 0 var(--s3); border: 1px solid var(--line); border-radius: var(--radius-sm); color: var(--text-2); background: var(--surface-2); cursor: pointer; }
+.source-grid label:has(input:checked) { color: var(--text); border-color: var(--line-strong); background: var(--surface-3); }
+.source-grid input { flex: 0 0 16px; width: 16px; min-height: 16px; margin: 0; accent-color: var(--accent); }
+.source-grid span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-footer { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); margin-top: var(--s3); }
+.source-footer .field-hint { margin: 0; }
+.input-pair { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.result-heading { align-items: center; }
+.result-heading .actions { margin-left: auto; }
+
 .sidebar {
   position: sticky;
   top: 0;
@@ -504,6 +565,10 @@ td .sub { display: block; margin-top: 3px; color: var(--text-3); font-size: 11px
   .runtime-strip, .section-title.split-title { align-items: flex-start; flex-direction: column; }
   .runtime-strip { display: flex; }
   .form-grid, .form-grid.compact-form { grid-template-columns: 1fr; }
+  .source-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .input-pair { grid-template-columns: 1fr; }
+  .result-heading { flex-wrap: wrap; }
+  .result-heading .actions { width: 100%; margin-left: 38px; }
   .field-toggle { margin-top: 0; }
   .advanced summary span { display: none; }
   .cfdata-progress { grid-template-columns: 1fr; width: 100%; }
@@ -520,6 +585,10 @@ td .sub { display: block; margin-top: 3px; color: var(--text-3); font-size: 11px
   .action-row .button { flex: 1 1 calc(50% - 4px); }
   .actions { width: 100%; }
   .actions .button { flex: 1 1 auto; }
+  .subnav-item { flex: 1 1 50%; padding: 8px; }
+  .source-grid { grid-template-columns: 1fr; }
+  .source-footer { align-items: flex-start; flex-direction: column; }
+  .result-heading .actions { margin-left: 0; }
   .log-toolbar { grid-template-columns: 1fr 1fr; }
   .log-toolbar select { min-width: 0; }
   .tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; overflow-x: visible; }

@@ -104,6 +104,11 @@
         </div>
 
         <div class="route-page" data-page="/cfnat">
+          <div class="subnav" role="tablist" aria-label="转发工作区">
+            <button class="subnav-item active" type="button" role="tab" aria-selected="true" aria-controls="forwardWorkspace" data-workspace="forwardWorkspace">转发配置</button>
+            <button class="subnav-item" type="button" role="tab" aria-selected="false" aria-controls="candidateWorkspace" data-workspace="candidateWorkspace">候选池与扫描</button>
+          </div>
+          <div id="forwardWorkspace" class="workspace-panel active">
           <section class="runtime-strip">
             <div><span class="health-dot"></span><strong>CFnat 转发入口</strong><small>0.0.0.0:1234</small></div>
             <div class="actions">
@@ -111,7 +116,6 @@
               <button class="button primary" id="startCfnat" type="button">↻ 启动 / 重启</button>
             </div>
           </section>
-
           <section class="panel" id="cfnat">
             <div class="section-title"><div><p class="overline">FORWARDING</p><h2>转发配置</h2></div></div>
             <div class="form-grid compact-form">
@@ -136,6 +140,9 @@
             </details>
           </section>
 
+          </div>
+          <div id="candidateWorkspace" class="workspace-panel">
+
           <section class="panel" id="proxyScanner">
             <div class="section-title split-title">
               <div><p class="overline">CANDIDATE POOL</p><h2>候选与终审</h2><p class="inline-status" id="autoCandidateStatus">正在读取候选...</p></div>
@@ -144,24 +151,43 @@
                 <button class="button primary" id="loadAutoCandidates" type="button">↓ 载入候选</button>
               </div>
             </div>
-            <details class="advanced">
-              <summary>手动扫描 <span>自定义候选、并发与延迟</span></summary>
+            <details class="advanced scan-workflow" open>
+              <summary>自定义扫描 <span>选择候选，再设置验活规则</span></summary>
+              <div class="workflow-section">
+                <div class="workflow-heading"><span class="step-index">1</span><div><h3>候选输入</h3><p>社区源、手动 IP 和订阅内容会合并去重。</p></div></div>
+                <fieldset class="source-fieldset" aria-describedby="proxySourceHint"><legend>社区候选源</legend>
+                  <div class="source-grid" id="proxyScanSources">
+                    <label><input type="checkbox" value="zhaobo" checked /><span>Zhaobo 聚合池</span></label>
+                    <label><input type="checkbox" value="william" /><span>William 台湾 / 韩国</span></label>
+                    <label><input type="checkbox" value="euorg" /><span>EU.org 社区池</span></label>
+                    <label><input type="checkbox" value="cmliussss-proxyip" checked /><span>CMLiussss ProxyIP</span></label>
+                    <label><input type="checkbox" value="090227" checked /><span>090227 优选域名</span></label>
+                  </div>
+                  <div class="source-footer"><span class="field-hint" id="proxySourceHint">已选择 3 个社区源。</span><span class="source-actions"><button type="button" class="button ghost small-button" id="selectAllProxySources">全选</button><button type="button" class="button ghost small-button" id="clearProxySources">清空</button></span></div>
+                </fieldset>
+                <div class="form-grid input-pair">
+                  <label>手动 IPv4<textarea id="proxyScanIPs" rows="5" placeholder="每行或逗号分隔；没有可留空"></textarea></label>
+                  <label>订阅内容<textarea id="proxyScanSubscription" rows="5" placeholder="VLESS / Trojan / SS / VMess 或 Clash；没有可留空"></textarea></label>
+                </div>
+              </div>
+              <div class="workflow-section">
+                <div class="workflow-heading"><span class="step-index">2</span><div><h3>验活规则</h3><p>最多测试“扫描数量”个去重候选，通过真实连接后才会显示为可采用。</p></div></div>
               <div class="form-grid">
-                <label class="wide">候选 IPv4<textarea id="proxyScanIPs" rows="5" placeholder="每行或逗号分隔"></textarea></label>
-                <label class="wide">订阅内容<textarea id="proxyScanSubscription" rows="4" placeholder="粘贴转换后的 VLESS / Trojan / SS / VMess 或 Clash 内容"></textarea></label>
-                <label class="wide">社区候选源<select id="proxyScanSources" multiple size="5"><option value="zhaobo" selected>Zhaobo 聚合池</option><option value="william">William 台湾 / 韩国</option><option value="euorg">EU.org 社区池</option><option value="cmliussss-proxyip" selected>CMLiussss ProxyIP</option><option value="090227" selected>090227 优选域名</option></select></label>
                 <label>SNI / Host<input id="proxyScanHost" value="vlesdy.trojanjd.dpdns.org" /></label>
                 <label>目标端口<input id="proxyScanPort" type="number" value="443" min="1" max="65535" /></label>
-                <label>扫描并发<input id="proxyScanConcurrency" type="number" value="50" min="1" max="500" /></label>
-                <label>延迟上限 (ms)<input id="proxyScanLatency" type="number" value="300" min="1" max="10000" /></label>
                 <label>扫描数量<input id="proxyScanLimit" type="number" value="100" min="1" max="10000" /></label>
+                <label>并发数<input id="proxyScanConcurrency" type="number" value="50" min="1" max="500" /></label>
+                <label>延迟上限 (ms)<input id="proxyScanLatency" type="number" value="300" min="1" max="10000" /></label>
                 <label class="toggle field-toggle"><input id="proxyScanTLS" type="checkbox" checked />TLS 握手</label>
               </div>
-              <div class="actions advanced-actions"><button class="button secondary" id="useProxyScanResults" type="button">采用通过 IP</button><button class="button primary" id="runProxyScan" type="button">▶ 开始扫描</button></div>
-              <div id="proxyScanSummary" class="inline-status">尚未扫描</div>
+              </div>
+              <div class="workflow-section workflow-result">
+                <div class="workflow-heading result-heading"><span class="step-index">3</span><div><h3>执行与结果</h3><p id="proxyScanSummary" class="inline-status" aria-live="polite">尚未扫描</p></div><div class="actions"><button class="button secondary" id="useProxyScanResults" type="button" disabled>采用通过 IP</button><button class="button primary" id="runProxyScan" type="button">▶ 开始扫描</button></div></div>
               <pre id="proxyScanResults" class="result-console">等待扫描结果...</pre>
+              </div>
             </details>
           </section>
+          </div>
         </div>
 
         <div class="route-page cfdata-page" data-page="/cfdata">
