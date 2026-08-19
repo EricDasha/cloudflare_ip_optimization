@@ -128,6 +128,7 @@
               <summary>高级参数 <span>CFnat 完整能力</span></summary>
               <div class="form-grid">
                 <label>筛选机房<input id="natColo" placeholder="HKG,SJC,LAX" /></label>
+                <label>优先 IP<input id="natPriorityIPs" placeholder="留空自动取最快前 2 个" /></label>
                 <label>状态码<input id="natCode" type="number" value="200" /></label>
                 <label>有效延迟 (ms)<input id="natDelay" type="number" value="300" /></label>
                 <label>有效 IP 数量<input id="natIPNum" type="number" value="20" /></label>
@@ -150,6 +151,10 @@
                 <button class="button secondary" id="refreshAutoCandidates" type="button">↻ 刷新候选并终审</button>
                 <button class="button primary" id="loadAutoCandidates" type="button">↓ 载入候选</button>
               </div>
+            </div>
+            <div class="optimizer-strip">
+              <div><strong>后台慢速优选</strong><span id="backgroundOptimizerStatus">每 15 分钟轮测 24 个候选，并发 4</span></div>
+              <label class="switch-control"><input id="backgroundOptimizerEnabled" type="checkbox" checked /><span aria-hidden="true"></span><b>自动运行</b></label>
             </div>
             <details class="advanced scan-workflow" open>
               <summary>自定义扫描 <span>选择候选，再设置验活规则</span></summary>

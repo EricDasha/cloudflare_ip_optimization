@@ -99,6 +99,18 @@ func TestProxyCandidateCacheRoundTrip(t *testing.T) {
 	}
 }
 
+func TestOptimizerSettingRoundTrip(t *testing.T) {
+	a := &app{dataDir: t.TempDir(), optimizerEnabled: true}
+	if err := a.saveOptimizerSettings(false); err != nil {
+		t.Fatalf("save optimizer setting: %v", err)
+	}
+	a.optimizerEnabled = true
+	a.loadOptimizerSettings()
+	if a.optimizerEnabled {
+		t.Fatal("optimizer setting was not restored")
+	}
+}
+
 func TestVLESSOutboundTemplateAndProbeConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "template.json")

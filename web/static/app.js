@@ -6,6 +6,7 @@ function cfnatPayload() {
     delay: number("natDelay"),
     domain: $("natDomain").value.trim(),
     fixed: $("natFixedIPs").value.trim(),
+    priority: $("natPriorityIPs").value.trim(),
     ipnum: number("natIPNum"),
     ips: $("natIPs").value,
     num: number("natNum"),
@@ -166,7 +167,21 @@ async function refreshStatus() {
   if (cfdataStatus) {
     cfdataStatus.textContent = st.cfdata.running ? "CFdata 运行中" : "CFdata 已停止";
   }
+  if (st.backgroundOptimizer) renderBackgroundOptimizer(st.backgroundOptimizer);
   return st;
+}
+
+function renderBackgroundOptimizer(status) {
+  const toggle = $("backgroundOptimizerEnabled");
+  const label = $("backgroundOptimizerStatus");
+  if (!toggle || !label) return;
+  toggle.checked = Boolean(status.enabled);
+  const lastRun = status.lastRun && !String(status.lastRun).startsWith("0001-")
+    ? new Date(status.lastRun).toLocaleString()
+    : "尚未运行";
+  label.textContent = status.enabled
+    ? `每 ${status.intervalMinutes} 分钟轮测 ${status.batchSize} 个候选，并发 ${status.concurrency} · ${lastRun}${status.lastError ? ` · ${status.lastError}` : ""}`
+    : "已关闭；现有生效池保持不变";
 }
 
 function filteredLogLines() {
@@ -453,6 +468,7 @@ async function loadDefaults() {
   $("natCode").value = n.code;
   $("natDomain").value = n.domain;
   $("natFixedIPs").value = n.fixed || "";
+  $("natPriorityIPs").value = n.priority || "";
   $("natDelay").value = n.delay;
   $("natIPNum").value = n.ipnum;
   $("natNum").value = n.num;
@@ -460,6 +476,7 @@ async function loadDefaults() {
   $("natIPs").value = n.ips;
   $("natTLS").checked = n.tls;
   $("natRandom").checked = n.random;
+  if (cfg.backgroundOptimizer) renderBackgroundOptimizer(cfg.backgroundOptimizer);
 }
 
 async function refreshAll() {

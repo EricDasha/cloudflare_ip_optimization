@@ -35,6 +35,24 @@ $("clearProxySources").addEventListener("click", () => {
   updateProxySourceSummary();
 });
 
+$("backgroundOptimizerEnabled").addEventListener("change", async (event) => {
+  const input = event.currentTarget;
+  input.disabled = true;
+  try {
+    const status = await api("/api/cfnat/background-optimizer", {
+      method: "POST",
+      body: JSON.stringify({ enabled: input.checked }),
+    });
+    renderBackgroundOptimizer(status);
+    toast(input.checked ? "后台慢速优选已开启" : "后台慢速优选已关闭");
+  } catch (error) {
+    input.checked = !input.checked;
+    toast(`设置失败：${error.message}`);
+  } finally {
+    input.disabled = false;
+  }
+});
+
 $("useProxyScanResults").addEventListener("click", () => {
   const ips = latestProxyScanResults.filter((r) => !r.error).map((r) => r.ip);
   if (!ips.length) { toast("没有可采用的通过 IP"); return; }

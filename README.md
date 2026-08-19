@@ -68,6 +68,8 @@ Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新�
 
 启用 `PROXY_AUTO_APPLY` 后，后台先用实际 `Host + WebSocket path` 对全部候选并发执行 TLS 与 WebSocket `101 Switching Protocols` 初筛。启用 `PROXY_VLESS_PROBE` 后，再按 WS 延迟从快到慢启动短生命周期 sing-box，以候选 `IP:PROXY_AUTO_PORT` 覆盖模板的服务器地址，并通过真实 VLESS 链路请求 `generate_204`。探针凑满 `PROXY_AUTO_POOL_SIZE` 即停止；只有 VLESS 通过数量达到 `PROXY_AUTO_MIN_POOL` 才替换 `/data/proxy-active.json` 并重启 CFnat。模板、sing-box 或数据面失败均保留旧池。
 
+后台慢速优选默认开启：启动 90 秒后执行首轮，此后每 15 分钟从候选缓存轮转抽取 24 个 IP，以并发 4、单 IP 1500 ms 上限进行初筛；启用 VLESS probe 时仍须通过真实数据面终审。每轮失败保留旧池，且不会与手动扫描或六小时全量维护并发。GUI 开关会写入 `/data/proxy-optimizer.json`，容器重启后保持用户选择。
+
 ### VLESS 探针模板
 
 复制 `.env.example` 为 `.env`，填写与探针模板一致的 `PROXY_AUTO_HOST` 和 `PROXY_AUTO_PATH`。`.env` 已被 Git 忽略；Compose 会在缺少这两项时拒绝启动，避免误用仓库中的示例值筛选候选。
@@ -89,6 +91,7 @@ Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新�
 | `CFNAT_DELAY` | `-delay` | `2000` |
 | `CFNAT_DOMAIN` | `-domain` | `cloudflaremirrors.com/debian` |
 | `CFNAT_FIXED_IPS` | `-fixed` | 空 |
+| `CFNAT_PRIORITY_IPS` | `-priority` | 空；自动池取延迟排序前 2 个 |
 | `CFNAT_IPNUM` | `-ipnum` | `20` |
 | `CFNAT_IPS` | `-ips` | `4` |
 | `CFNAT_NUM` | `-num` | `5` |
@@ -99,6 +102,8 @@ Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新�
 | `CFNAT_CODE` | `-code` | `200` |
 
 启用固定转发 IP 池后，CFnat 会按新连接轮询池中的 IP。`CFNAT_NUM` 表示单个连接并发尝试的连续轮询目标数；设为 `1` 时每个连接只使用一个 IP，设为更大值时会在首个目标建连成功后立即开始转发，并取消其余拨号，不会等待慢 IP 超时。
+
+优先 IP 以 3 倍有限权重加入新连接轮询，其余 IP 仍会稳定轮到，避免最快节点被永久独占。这里的“优先”依据后台实测排序，不识别应用流量类型；如需严格按业务分流，应在 v2rayN/Mihomo 路由层按域名或进程配置。
 
 自动候选池相关变量：
 
@@ -116,6 +121,7 @@ Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新�
 | `PROXY_AUTO_CFDATA_TIMEOUT` | CFdata 最长运行秒数 | `600` |
 | `PROXY_CFDATA_CANDIDATES` | 从 `ip.csv` 读取的候选上限 | `300` |
 | `PROXY_OFFICIAL_CANDIDATES` | 从 Cloudflare 官方 CIDR 均匀抽样的候选数 | `150` |
+| `PROXY_BACKGROUND_OPTIMIZER` | 是否启用低占用后台轮转优选；GUI 可覆盖并持久化 | `true` |
 | `PROXY_VLESS_PROBE` | 是否在 WS 初筛后运行真实 VLESS 数据面终审 | `false` |
 | `PROXY_VLESS_TEMPLATE` | 本地 VLESS outbound 或完整 sing-box 配置 | `/data/vless-probe-outbound.json` |
 | `PROXY_VLESS_TEST_URL` | 经 VLESS 请求的轻量验活地址 | `https://www.gstatic.com/generate_204` |

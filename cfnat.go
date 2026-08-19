@@ -40,6 +40,7 @@ type IPManager struct {
 	currentIndex  int
 	dispatchIndex int
 	allIPsChecked bool
+	priorityIPs   []string
 }
 
 func NewIPManager() *IPManager {
@@ -55,6 +56,12 @@ func (m *IPManager) SetIPAddresses(ips []string) {
 	m.allIPsChecked = false
 }
 
+func (m *IPManager) SetPriorityIPs(ips []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.priorityIPs = append([]string(nil), ips...)
+}
+
 // nextTargets returns a round-robin slice for a new client connection.
 // currentIndex remains dedicated to health-check failover.
 func (m *IPManager) nextTargets(port, count int) []string {
@@ -67,11 +74,35 @@ func (m *IPManager) nextTargets(port, count int) []string {
 		count = len(m.ipAddresses)
 	}
 
+	ordered := make([]string, 0, len(m.ipAddresses)+len(m.priorityIPs)*2)
+	for _, priority := range m.priorityIPs {
+		for i := 0; i < 3; i++ {
+			ordered = append(ordered, priority)
+		}
+	}
+	for _, ip := range m.ipAddresses {
+		found := false
+		for _, priority := range m.priorityIPs {
+			if ip == priority {
+				found = true
+				break
+			}
+		}
+		if !found {
+			ordered = append(ordered, ip)
+		}
+	}
+	if len(ordered) == 0 {
+		return nil
+	}
+	if count > len(ordered) {
+		count = len(ordered)
+	}
 	ips := make([]string, count)
 	for i := range ips {
-		ips[i] = m.ipAddresses[(m.dispatchIndex+i)%len(m.ipAddresses)]
+		ips[i] = ordered[(m.dispatchIndex+i)%len(ordered)]
 	}
-	m.dispatchIndex = (m.dispatchIndex + count) % len(m.ipAddresses)
+	m.dispatchIndex = (m.dispatchIndex + count) % len(ordered)
 	return generateTargets(ips, port)
 }
 
@@ -160,6 +191,7 @@ func main() {
 	Delay := flag.Int("delay", 300, "有效延迟（毫秒），超过此延迟将断开连接")
 	domain := flag.String("domain", "cloudflaremirrors.com/debian", "响应状态码检查的域名地址")
 	fixedIPs := flag.String("fixed", "", "固定转发 IP，多个地址用逗号分隔；留空时自动扫描")
+	priorityIPs := flag.String("priority", "", "优先转发 IP，多个地址逗号分隔；优先 IP 以有限权重参与轮询")
 	ipCount := flag.Int("ipnum", 20, "提取的有效IP数量")
 	ipsType := flag.String("ips", "4", "指定生成IPv4还是IPv6地址 (4或6)")
 	num := flag.Int("num", 5, "目标负载 IP 数量")
@@ -196,6 +228,9 @@ func main() {
 			results = make([]result, 0, len(ips))
 			for _, ip := range ips {
 				results = append(results, result{ip: ip})
+			}
+			if priorities, err := parseFixedIPs(*priorityIPs); err == nil {
+				ipManager.SetPriorityIPs(priorities)
 			}
 			log.Printf("使用 %d 个固定转发 IP，跳过官方段扫描", len(results))
 		} else {
@@ -317,6 +352,9 @@ func main() {
 			ips = append(ips, r.ip)
 		}
 		ipManager.SetIPAddresses(ips)
+		if priorities, err := parseFixedIPs(*priorityIPs); err == nil {
+			ipManager.SetPriorityIPs(priorities)
+		}
 
 		// 选择一个有效 IP
 		currentIP := ""

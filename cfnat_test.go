@@ -41,6 +41,24 @@ func TestIPManagerNextTargetsLimitsToPool(t *testing.T) {
 	}
 }
 
+func TestIPManagerPriorityTargetsRemainFair(t *testing.T) {
+	m := NewIPManager()
+	m.SetIPAddresses([]string{"192.0.2.1", "192.0.2.2", "192.0.2.3"})
+	m.SetPriorityIPs([]string{"192.0.2.1"})
+
+	var got []string
+	for range 5 {
+		got = append(got, m.nextTargets(443, 1)...)
+	}
+	want := []string{
+		"192.0.2.1:443", "192.0.2.1:443", "192.0.2.1:443",
+		"192.0.2.2:443", "192.0.2.3:443",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("weighted targets = %v, want %v", got, want)
+	}
+}
+
 func TestDialFirstAvailableDoesNotWaitForSlowCandidate(t *testing.T) {
 	started := make(chan string, 2)
 	releaseFast := make(chan struct{})

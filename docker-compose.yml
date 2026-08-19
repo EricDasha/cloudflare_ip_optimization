@@ -22,6 +22,7 @@ services:
       CFNAT_DELAY: "2000"
       CFNAT_DOMAIN: cloudflaremirrors.com/debian
       CFNAT_FIXED_IPS: 128.199.255.242,119.205.235.58,60.249.21.30
+      CFNAT_PRIORITY_IPS: ""
       CFNAT_IPNUM: "20"
       CFNAT_IPS: "4"                 # 4 或 6
       CFNAT_NUM: "1"
@@ -44,6 +45,8 @@ services:
       PROXY_AUTO_CFDATA_TIMEOUT: "600"
       PROXY_CFDATA_CANDIDATES: "300"
       PROXY_OFFICIAL_CANDIDATES: "150"
+      # 低占用后台轮测：每 15 分钟取 24 个候选，并发 4；GUI 可关闭并持久化。
+      PROXY_BACKGROUND_OPTIMIZER: "true"
 
       # WS 101 通过后，使用 /data 中的本地 VLESS outbound 模板做真实数据面终审。
       PROXY_VLESS_PROBE: "true"

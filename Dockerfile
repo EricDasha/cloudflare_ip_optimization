@@ -54,6 +54,7 @@ ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     PROXY_VLESS_EXPECT_STATUS=204 \
     PROXY_VLESS_TIMEOUT=15 \
     PROXY_VLESS_MAX_CANDIDATES=20 \
+    PROXY_BACKGROUND_OPTIMIZER=true \
     SING_BOX_BIN=/usr/local/bin/sing-box
 
 WORKDIR /data

@@ -37,19 +37,25 @@ const (
 	proxyCandidateRefreshInterval = 6 * time.Hour
 	proxyCandidateCacheFile       = "proxy-candidates.json"
 	proxyActivePoolFile           = "proxy-active.json"
+	proxyOptimizerSettingsFile    = "proxy-optimizer.json"
 )
 
 type app struct {
-	dataDir     string
-	cfnat       *managedProcess
-	cfdata      *managedProcess
-	proxyScanMu sync.Mutex
-	cfnatCtlMu  sync.Mutex
-	candidateMu sync.RWMutex
-	refreshMu   sync.Mutex
-	candidates  proxyCandidateSnapshot
-	activeMu    sync.RWMutex
-	activePool  proxyActivePool
+	dataDir            string
+	cfnat              *managedProcess
+	cfdata             *managedProcess
+	proxyScanMu        sync.Mutex
+	cfnatCtlMu         sync.Mutex
+	candidateMu        sync.RWMutex
+	refreshMu          sync.Mutex
+	candidates         proxyCandidateSnapshot
+	activeMu           sync.RWMutex
+	activePool         proxyActivePool
+	optimizerMu        sync.RWMutex
+	optimizerEnabled   bool
+	optimizerCursor    int
+	optimizerLastRun   time.Time
+	optimizerLastError string
 }
 
 type managedProcess struct {
@@ -230,19 +236,20 @@ func (p *managedProcess) stop() error {
 }
 
 type cfnatConfig struct {
-	Addr   string `json:"addr"`
-	Code   int    `json:"code"`
-	Colo   string `json:"colo"`
-	Delay  int    `json:"delay"`
-	Domain string `json:"domain"`
-	Fixed  string `json:"fixed"`
-	IPNum  int    `json:"ipnum"`
-	IPs    string `json:"ips"`
-	Num    int    `json:"num"`
-	Port   int    `json:"port"`
-	Random bool   `json:"random"`
-	Task   int    `json:"task"`
-	TLS    bool   `json:"tls"`
+	Addr     string `json:"addr"`
+	Code     int    `json:"code"`
+	Colo     string `json:"colo"`
+	Delay    int    `json:"delay"`
+	Domain   string `json:"domain"`
+	Fixed    string `json:"fixed"`
+	Priority string `json:"priority"`
+	IPNum    int    `json:"ipnum"`
+	IPs      string `json:"ips"`
+	Num      int    `json:"num"`
+	Port     int    `json:"port"`
+	Random   bool   `json:"random"`
+	Task     int    `json:"task"`
+	TLS      bool   `json:"tls"`
 }
 
 type cfdataConfig struct {
@@ -257,19 +264,20 @@ type cfdataConfig struct {
 
 func defaultCFnatConfig() cfnatConfig {
 	return cfnatConfig{
-		Addr:   env("CFNAT_ADDR", "0.0.0.0:1234"),
-		Code:   envInt("CFNAT_CODE", 200),
-		Colo:   env("CFNAT_COLO", ""),
-		Delay:  envInt("CFNAT_DELAY", 300),
-		Domain: env("CFNAT_DOMAIN", "cloudflaremirrors.com/debian"),
-		Fixed:  env("CFNAT_FIXED_IPS", ""),
-		IPNum:  envInt("CFNAT_IPNUM", 20),
-		IPs:    env("CFNAT_IPS", "4"),
-		Num:    envInt("CFNAT_NUM", 5),
-		Port:   envInt("CFNAT_PORT", 443),
-		Random: envBool("CFNAT_RANDOM", true),
-		Task:   envInt("CFNAT_TASK", 100),
-		TLS:    envBool("CFNAT_TLS", true),
+		Addr:     env("CFNAT_ADDR", "0.0.0.0:1234"),
+		Code:     envInt("CFNAT_CODE", 200),
+		Colo:     env("CFNAT_COLO", ""),
+		Delay:    envInt("CFNAT_DELAY", 300),
+		Domain:   env("CFNAT_DOMAIN", "cloudflaremirrors.com/debian"),
+		Fixed:    env("CFNAT_FIXED_IPS", ""),
+		Priority: env("CFNAT_PRIORITY_IPS", ""),
+		IPNum:    envInt("CFNAT_IPNUM", 20),
+		IPs:      env("CFNAT_IPS", "4"),
+		Num:      envInt("CFNAT_NUM", 5),
+		Port:     envInt("CFNAT_PORT", 443),
+		Random:   envBool("CFNAT_RANDOM", true),
+		Task:     envInt("CFNAT_TASK", 100),
+		TLS:      envBool("CFNAT_TLS", true),
 	}
 }
 
@@ -289,6 +297,9 @@ func normalizeCFnat(c cfnatConfig) cfnatConfig {
 	}
 	if c.Fixed == "" {
 		c.Fixed = d.Fixed
+	}
+	if c.Priority == "" {
+		c.Priority = d.Priority
 	}
 	if c.IPNum == 0 {
 		c.IPNum = d.IPNum
@@ -316,6 +327,7 @@ func (c cfnatConfig) args() []string {
 		"-delay", strconv.Itoa(c.Delay),
 		"-domain", c.Domain,
 		"-fixed", c.Fixed,
+		"-priority", c.Priority,
 		"-ipnum", strconv.Itoa(c.IPNum),
 		"-ips", c.IPs,
 		"-num", strconv.Itoa(c.Num),
@@ -401,12 +413,14 @@ func main() {
 	}
 
 	a := &app{
-		dataDir: dataDir,
-		cfnat:   newManagedProcess("cfnat", env("CFNAT_BIN", "/usr/local/bin/cfnat")),
-		cfdata:  newManagedProcess("cfdata", env("CFDATA_BIN", "/usr/local/bin/cfdata")),
+		dataDir:          dataDir,
+		cfnat:            newManagedProcess("cfnat", env("CFNAT_BIN", "/usr/local/bin/cfnat")),
+		cfdata:           newManagedProcess("cfdata", env("CFDATA_BIN", "/usr/local/bin/cfdata")),
+		optimizerEnabled: envBool("PROXY_BACKGROUND_OPTIMIZER", true),
 	}
 	a.loadProxyCandidateCache()
 	a.loadProxyActivePool()
+	a.loadOptimizerSettings()
 	if envBool("CFNAT_AUTO_START", true) {
 		cfg := a.cfnatStartupConfig()
 		if err := a.cfnat.start(a.dataDir, cfg.args(), ""); err != nil {
@@ -414,6 +428,7 @@ func main() {
 		}
 	}
 	go a.runProxyCandidateRefreshLoop()
+	go a.runBackgroundOptimizerLoop()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", a.handleHealth)
@@ -423,6 +438,7 @@ func main() {
 	mux.HandleFunc("/api/cfnat/stop", a.handleCFnatStop)
 	mux.HandleFunc("/api/cfnat/proxy-scan", a.handleProxyScan)
 	mux.HandleFunc("/api/cfnat/proxy-candidates", a.handleProxyCandidates)
+	mux.HandleFunc("/api/cfnat/background-optimizer", a.handleBackgroundOptimizer)
 	mux.HandleFunc("/api/cfdata/run", a.handleCFdataRun)
 	mux.HandleFunc("/api/cfdata/stop", a.handleCFdataStop)
 	mux.HandleFunc("/api/cfdata/results", a.handleCFdataResults)
@@ -548,6 +564,164 @@ func (a *app) runProxyCandidateRefreshLoop() {
 	}
 }
 
+// The background pass deliberately samples a small rotating slice. It must never
+// compete with a manual scan or the six-hour source refresh.
+func (a *app) runBackgroundOptimizerLoop() {
+	initial := time.NewTimer(90 * time.Second)
+	defer initial.Stop()
+	<-initial.C
+	a.backgroundOptimizeProxyPool(context.Background())
+	ticker := time.NewTicker(15 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		a.backgroundOptimizeProxyPool(context.Background())
+	}
+}
+
+func (a *app) backgroundOptimizeProxyPool(parent context.Context) {
+	if !a.proxyScanMu.TryLock() {
+		return
+	}
+	defer a.proxyScanMu.Unlock()
+	a.optimizerMu.RLock()
+	enabled := a.optimizerEnabled
+	a.optimizerMu.RUnlock()
+	if !enabled || !defaultProxyAutoConfig().Enabled {
+		return
+	}
+	cfg := defaultProxyAutoConfig()
+	cfg.Concurrency = 4
+	cfg.MaxLatency = 1500
+	candidates := a.proxyCandidateSnapshot().IPs
+	if len(candidates) == 0 {
+		return
+	}
+	const batchSize = 24
+	a.optimizerMu.Lock()
+	start := a.optimizerCursor % len(candidates)
+	a.optimizerCursor = (start + batchSize) % len(candidates)
+	a.optimizerLastRun = time.Now()
+	a.optimizerLastError = ""
+	a.optimizerMu.Unlock()
+	batch := make([]string, 0, batchSize)
+	for i := 0; i < batchSize && i < len(candidates); i++ {
+		batch = append(batch, candidates[(start+i)%len(candidates)])
+	}
+	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
+	defer cancel()
+	results := scanProxyWebSockets(ctx, batch, cfg)
+	passed := make([]string, 0, len(results))
+	if cfg.VLESS.Enabled {
+		if err := cfg.VLESS.validate(); err != nil {
+			a.optimizerMu.Lock()
+			a.optimizerLastError = "VLESS 配置无效"
+			a.optimizerMu.Unlock()
+			return
+		}
+		template, err := loadVLESSOutboundTemplate(cfg.VLESS.TemplatePath)
+		if err != nil {
+			a.optimizerMu.Lock()
+			a.optimizerLastError = "VLESS 模板不可用"
+			a.optimizerMu.Unlock()
+			return
+		}
+		passed = probeVLESSPool(ctx, results, cfg.Port, cfg.PoolSize, cfg.VLESS, template)
+		passed = rankVLESSPassesBySpeed(ctx, passed, results, cfg.Port, cfg.VLESS, template)
+	} else {
+		for _, result := range results {
+			if result.Error == "" {
+				passed = append(passed, result.IP)
+			}
+		}
+	}
+	if len(passed) == 0 {
+		a.optimizerMu.Lock()
+		a.optimizerLastError = "本轮无低延迟候选"
+		a.optimizerMu.Unlock()
+		return
+	}
+	current := a.proxyActivePoolSnapshot()
+	merged := append([]string{}, passed...)
+	merged = append(merged, current.IPs...)
+	seen := make(map[string]bool, len(merged))
+	ordered := merged[:0]
+	for _, ip := range merged {
+		if !seen[ip] {
+			seen[ip] = true
+			ordered = append(ordered, ip)
+		}
+	}
+	if len(ordered) > cfg.PoolSize {
+		ordered = ordered[:cfg.PoolSize]
+	}
+	if len(ordered) < cfg.MinPool {
+		if len(current.IPs) >= cfg.MinPool {
+			return
+		}
+		if len(passed) < cfg.MinPool {
+			return
+		}
+	}
+	if len(current.IPs) == 0 && len(ordered) < cfg.MinPool {
+		return
+	}
+	pool := current
+	pool.UpdatedAt = time.Now()
+	pool.Host, pool.Path = cfg.Host, cfg.Path
+	pool.IPs = ordered
+	pool.Results = results
+	if strings.Join(current.IPs, ",") == strings.Join(ordered, ",") {
+		_ = a.saveProxyActivePool(pool)
+		a.activeMu.Lock()
+		a.activePool = pool
+		a.activeMu.Unlock()
+		return
+	}
+	a.applyProxyPool(pool, current)
+}
+
+func rankVLESSPassesBySpeed(parent context.Context, passed []string, results []proxyScanResult, port int, base vlessProbeConfig, template map[string]any) []string {
+	if len(passed) < 2 {
+		return passed
+	}
+	speedCfg := base
+	speedCfg.TestURL = "https://speed.cloudflare.com/__down?bytes=262144"
+	speedCfg.ExpectedStatus = http.StatusOK
+	speedCfg.ReadLimit = 262144
+	speedCfg.Timeout = 10 * time.Second
+	times := make(map[string]int64, len(passed))
+	for _, ip := range passed {
+		started := time.Now()
+		ctx, cancel := context.WithTimeout(parent, speedCfg.Timeout)
+		err := probeVLESSCandidate(ctx, ip, port, speedCfg, template)
+		cancel()
+		if err == nil {
+			times[ip] = time.Since(started).Milliseconds()
+		}
+	}
+	sort.SliceStable(passed, func(i, j int) bool {
+		left, lok := times[passed[i]]
+		right, rok := times[passed[j]]
+		if lok != rok {
+			return lok
+		}
+		if lok {
+			return left < right
+		}
+		return proxyResultLatency(results, passed[i]) < proxyResultLatency(results, passed[j])
+	})
+	return passed
+}
+
+func proxyResultLatency(results []proxyScanResult, ip string) int64 {
+	for _, result := range results {
+		if result.IP == ip {
+			return result.Latency
+		}
+	}
+	return int64(^uint64(0) >> 1)
+}
+
 func (a *app) refreshAndApplyProxyPool(ctx context.Context) {
 	a.runScheduledCFdata(ctx)
 	if a.refreshProxyCandidates(ctx) {
@@ -602,6 +776,7 @@ func (a *app) cfnatStartupConfig() cfnatConfig {
 	defer a.activeMu.RUnlock()
 	if len(a.activePool.IPs) > 0 {
 		cfg.Fixed = strings.Join(a.activePool.IPs, ",")
+		cfg.Priority = strings.Join(poolPriorityIPs(a.activePool.IPs), ",")
 	}
 	return cfg
 }
@@ -650,6 +825,11 @@ func (a *app) proxyActivePoolSnapshot() proxyActivePool {
 }
 
 func (a *app) autoApplyProxyPool(parent context.Context) {
+	if !a.proxyScanMu.TryLock() {
+		log.Printf("proxy auto apply skipped: another proxy scan is running")
+		return
+	}
+	defer a.proxyScanMu.Unlock()
 	cfg := defaultProxyAutoConfig()
 	if !cfg.Enabled || cfg.Host == "" || cfg.Path == "" {
 		return
@@ -713,13 +893,20 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 		log.Printf("proxy active pool reverified: %d IPs", len(passed))
 		return
 	}
+	a.applyProxyPool(pool, current)
+}
+
+func (a *app) applyProxyPool(pool, current proxyActivePool) {
 	a.cfnatCtlMu.Lock()
 	defer a.cfnatCtlMu.Unlock()
+	passed := pool.IPs
 	cfnatCfg := defaultCFnatConfig()
 	cfnatCfg.Fixed = strings.Join(passed, ",")
+	cfnatCfg.Priority = strings.Join(poolPriorityIPs(passed), ",")
 	rollbackCfg := defaultCFnatConfig()
 	if len(current.IPs) > 0 {
 		rollbackCfg.Fixed = strings.Join(current.IPs, ",")
+		rollbackCfg.Priority = strings.Join(poolPriorityIPs(current.IPs), ",")
 	}
 	if err := a.cfnat.stop(); err != nil {
 		log.Printf("stop cfnat for auto pool: %v", err)
@@ -747,6 +934,13 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 	a.activePool = pool
 	a.activeMu.Unlock()
 	log.Printf("proxy active pool applied: %s", strings.Join(passed, ","))
+}
+
+func poolPriorityIPs(ips []string) []string {
+	if len(ips) > 2 {
+		return append([]string(nil), ips[:2]...)
+	}
+	return append([]string(nil), ips...)
 }
 
 func (a *app) setProxyPoolError(message string, results []proxyScanResult) {
@@ -1380,11 +1574,77 @@ func (a *app) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"cfnat": a.cfnatStartupConfig(), "cfdata": defaultCFdataConfig()})
+	writeJSON(w, map[string]any{"cfnat": a.cfnatStartupConfig(), "cfdata": defaultCFdataConfig(), "backgroundOptimizer": a.backgroundOptimizerStatus()})
 }
 
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"cfnat": a.cfnat.status(), "cfdata": a.cfdata.status(), "proxyAuto": a.proxyActivePoolSnapshot()})
+	writeJSON(w, map[string]any{"cfnat": a.cfnat.status(), "cfdata": a.cfdata.status(), "proxyAuto": a.proxyActivePoolSnapshot(), "backgroundOptimizer": a.backgroundOptimizerStatus()})
+}
+
+func (a *app) backgroundOptimizerStatus() map[string]any {
+	a.optimizerMu.RLock()
+	defer a.optimizerMu.RUnlock()
+	return map[string]any{
+		"enabled":         a.optimizerEnabled,
+		"lastRun":         a.optimizerLastRun,
+		"lastError":       a.optimizerLastError,
+		"intervalMinutes": 15,
+		"batchSize":       24,
+		"concurrency":     4,
+	}
+}
+
+func (a *app) loadOptimizerSettings() {
+	data, err := os.ReadFile(filepath.Join(a.dataDir, proxyOptimizerSettingsFile))
+	if err != nil {
+		return
+	}
+	var setting struct {
+		Enabled bool `json:"enabled"`
+	}
+	if json.Unmarshal(data, &setting) != nil {
+		return
+	}
+	a.optimizerMu.Lock()
+	a.optimizerEnabled = setting.Enabled
+	a.optimizerMu.Unlock()
+}
+
+func (a *app) saveOptimizerSettings(enabled bool) error {
+	data, _ := json.Marshal(map[string]bool{"enabled": enabled})
+	path := filepath.Join(a.dataDir, proxyOptimizerSettingsFile)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func (a *app) handleBackgroundOptimizer(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		writeJSON(w, a.backgroundOptimizerStatus())
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "GET or POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	var request struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&request); err != nil {
+		http.Error(w, "invalid optimizer setting", http.StatusBadRequest)
+		return
+	}
+	a.optimizerMu.Lock()
+	a.optimizerEnabled = request.Enabled
+	a.optimizerMu.Unlock()
+	if err := a.saveOptimizerSettings(request.Enabled); err != nil {
+		http.Error(w, "save optimizer setting failed", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("background proxy optimizer enabled=%t", request.Enabled)
+	writeJSON(w, a.backgroundOptimizerStatus())
 }
 
 func (a *app) handleCFnatStart(w http.ResponseWriter, r *http.Request) {

@@ -29,6 +29,7 @@ type vlessProbeConfig struct {
 	ExpectedStatus int
 	Timeout        time.Duration
 	MaxCandidates  int
+	ReadLimit      int64
 }
 
 func defaultVLESSProbeConfig() vlessProbeConfig {
@@ -44,6 +45,7 @@ func defaultVLESSProbeConfig() vlessProbeConfig {
 		ExpectedStatus: envInt("PROXY_VLESS_EXPECT_STATUS", http.StatusNoContent),
 		Timeout:        time.Duration(timeoutSeconds) * time.Second,
 		MaxCandidates:  envInt("PROXY_VLESS_MAX_CANDIDATES", 20),
+		ReadLimit:      4096,
 	}
 }
 
@@ -326,7 +328,7 @@ func probeVLESSCandidate(ctx context.Context, candidateIP string, candidatePort 
 		return fmt.Errorf("VLESS 数据面请求失败: %w", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, cfg.ReadLimit))
 	if resp.StatusCode != cfg.ExpectedStatus {
 		return fmt.Errorf("VLESS 数据面状态码 %d，预期 %d", resp.StatusCode, cfg.ExpectedStatus)
 	}
