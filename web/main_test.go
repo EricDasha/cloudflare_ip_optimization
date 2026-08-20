@@ -343,7 +343,7 @@ func TestRankVLESSPassesBySpeedUsesSourceThenThroughput(t *testing.T) {
 		nil,
 		probe,
 	)
-	want := []string{"198.51.100.3", "198.51.100.1", "198.51.100.2"}
+	want := []string{"198.51.100.2", "198.51.100.3"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("rankVLESSPassesBySpeedWithProbe() = %v, want %v", got, want)
 	}

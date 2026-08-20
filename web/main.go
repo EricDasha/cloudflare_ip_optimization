@@ -709,13 +709,13 @@ func rankVLESSPassesBySpeedWithProbe(
 		return passed
 	}
 	speedCfg := base
-	speedBytes := envInt("PROXY_VLESS_SPEED_BYTES", 1048576)
-	if speedBytes < 65536 || speedBytes > 8388608 {
-		speedBytes = 1048576
+	speedBytes := envInt("PROXY_VLESS_SPEED_BYTES", 8388608)
+	if speedBytes < 1048576 || speedBytes > 33554432 {
+		speedBytes = 8388608
 	}
-	speedTimeout := envInt("PROXY_VLESS_SPEED_TIMEOUT", 15)
-	if speedTimeout < 3 || speedTimeout > 60 {
-		speedTimeout = 15
+	speedTimeout := envInt("PROXY_VLESS_SPEED_TIMEOUT", 30)
+	if speedTimeout < 5 || speedTimeout > 120 {
+		speedTimeout = 30
 	}
 	speedCfg.TestURL = fmt.Sprintf("https://speed.cloudflare.com/__down?bytes=%d", speedBytes)
 	speedCfg.ExpectedStatus = http.StatusOK
@@ -724,27 +724,37 @@ func rankVLESSPassesBySpeedWithProbe(
 	speedCfg.Timeout = time.Duration(speedTimeout) * time.Second
 	times := make(map[string]int64, len(passed))
 	speeds := make(map[string]float64, len(passed))
+	minMbps := envFloat("PROXY_VLESS_MIN_DOWNLOAD_MBPS", 20)
+	if minMbps < 0 || minMbps > 10000 {
+		minMbps = 20
+	}
 	verified := make([]string, 0, len(passed))
 	for _, ip := range passed {
 		ctx, cancel := context.WithTimeout(parent, speedCfg.Timeout)
 		metrics, err := probe(ctx, ip, port, speedCfg, template)
 		cancel()
 		if err == nil {
-			times[ip] = metrics.Duration.Milliseconds()
-			speeds[ip] = metrics.Mbps
-			verified = append(verified, ip)
 			for i := range results {
 				if results[i].IP == ip {
 					results[i].DownloadMbps = metrics.Mbps
 					break
 				}
 			}
+		}
+		if err == nil && metrics.Mbps >= minMbps {
+			times[ip] = metrics.Duration.Milliseconds()
+			speeds[ip] = metrics.Mbps
+			verified = append(verified, ip)
 			continue
 		}
 		for i := range results {
 			if results[i].IP == ip {
 				results[i].Stage = "VLESS_SPEED_FAIL"
-				results[i].Error = err.Error()
+				if err != nil {
+					results[i].Error = err.Error()
+				} else {
+					results[i].Error = fmt.Sprintf("VLESS download speed %.2f Mbps below threshold %.2f Mbps", metrics.Mbps, minMbps)
+				}
 				break
 			}
 		}
@@ -753,12 +763,12 @@ func rankVLESSPassesBySpeedWithProbe(
 	sort.SliceStable(passed, func(i, j int) bool {
 		leftRank := proxyResultSourceRank(results, passed[i])
 		rightRank := proxyResultSourceRank(results, passed[j])
-		if leftRank != rightRank {
-			return leftRank < rightRank
-		}
 		leftSpeed, rightSpeed := speeds[passed[i]], speeds[passed[j]]
 		if leftSpeed != rightSpeed {
 			return leftSpeed > rightSpeed
+		}
+		if leftRank != rightRank {
+			return leftRank < rightRank
 		}
 		left, lok := times[passed[i]]
 		right, rok := times[passed[j]]
@@ -2579,6 +2589,14 @@ func env(key, def string) string {
 
 func envInt(key string, def int) int {
 	v, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key)))
+	if err != nil {
+		return def
+	}
+	return v
+}
+
+func envFloat(key string, def float64) float64 {
+	v, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv(key)), 64)
 	if err != nil {
 		return def
 	}
