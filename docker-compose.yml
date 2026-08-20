@@ -48,6 +48,10 @@ services:
       PROXY_USER_CANDIDATES: "${PROXY_USER_CANDIDATES:-}"
       # 低占用后台轮测：每 15 分钟取 24 个候选，并发 4；GUI 可关闭并持久化。
       PROXY_BACKGROUND_OPTIMIZER: "true"
+      # 质量调度器：候选分批探测，Active 仅轻量探活；Promotion/Failover 由状态机决定
+      PROXY_SCHEDULER_PROBE_INTERVAL_SECONDS: "300"
+      PROXY_SCHEDULER_BATCH_SIZE: "12"
+      PROXY_SCHEDULER_APPLY: "true"
 
       # WS 101 通过后，使用 /data 中的本地 VLESS outbound 模板做真实数据面终审。
       PROXY_VLESS_PROBE: "true"

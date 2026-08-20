@@ -56,6 +56,7 @@ type app struct {
 	optimizerCursor    int
 	optimizerLastRun   time.Time
 	optimizerLastError string
+	quality            *qualitySchedulerRuntime
 }
 
 type managedProcess struct {
@@ -421,6 +422,10 @@ func main() {
 	a.loadProxyCandidateCache()
 	a.loadProxyActivePool()
 	a.loadOptimizerSettings()
+	a.quality = newQualitySchedulerRuntime(a.dataDir)
+	if pool := a.proxyActivePoolSnapshot(); len(pool.IPs) > 0 {
+		a.quality.seedActive(pool.IPs[0], pool.UpdatedAt)
+	}
 	if envBool("CFNAT_AUTO_START", true) {
 		cfg := a.cfnatStartupConfig()
 		if strings.TrimSpace(cfg.Fixed) == "" && defaultProxyAutoConfig().Enabled {
@@ -573,12 +578,98 @@ func (a *app) runBackgroundOptimizerLoop() {
 	initial := time.NewTimer(90 * time.Second)
 	defer initial.Stop()
 	<-initial.C
-	a.backgroundOptimizeProxyPool(context.Background())
-	ticker := time.NewTicker(15 * time.Minute)
+	a.runQualitySchedulerProbe(context.Background())
+	interval := 5 * time.Minute
+	if a.quality != nil {
+		interval = a.quality.interval
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for range ticker.C {
-		a.backgroundOptimizeProxyPool(context.Background())
+		a.runQualitySchedulerProbe(context.Background())
 	}
+}
+
+func (a *app) runQualitySchedulerProbe(parent context.Context) {
+	if a.quality == nil {
+		return
+	}
+	a.optimizerMu.RLock()
+	enabled := a.optimizerEnabled
+	a.optimizerMu.RUnlock()
+	if !enabled || !defaultProxyAutoConfig().Enabled {
+		return
+	}
+	if !a.proxyScanMu.TryLock() {
+		return
+	}
+	defer a.proxyScanMu.Unlock()
+	cfg := defaultProxyAutoConfig()
+	cfg.Concurrency = 4
+	cfg.MaxLatency = 1500
+	snapshot := a.proxyCandidateSnapshot()
+	if len(snapshot.IPs) == 0 {
+		return
+	}
+	active := make(map[string]struct{})
+	for _, ip := range a.proxyActivePoolSnapshot().IPs {
+		active[ip] = struct{}{}
+	}
+	a.optimizerMu.Lock()
+	start := a.optimizerCursor % len(snapshot.IPs)
+	a.optimizerCursor = (start + a.quality.batch) % len(snapshot.IPs)
+	a.optimizerLastRun = time.Now()
+	a.optimizerLastError = ""
+	a.optimizerMu.Unlock()
+	batch := make([]string, 0, a.quality.batch)
+	for i := 0; i < len(snapshot.IPs) && len(batch) < a.quality.batch; i++ {
+		ip := snapshot.IPs[(start+i)%len(snapshot.IPs)]
+		if _, ok := active[ip]; !ok {
+			batch = append(batch, ip)
+		}
+	}
+	if len(batch) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
+	defer cancel()
+	results := scanProxyWebSockets(ctx, batch, cfg)
+	applyCandidateSourcePriority(results, snapshot.SourceByIP)
+	passed := make([]string, 0, len(results))
+	if cfg.VLESS.Enabled {
+		template, err := loadVLESSOutboundTemplate(cfg.VLESS.TemplatePath)
+		if err != nil {
+			a.quality.setError(err.Error())
+			return
+		}
+		passed = probeVLESSPool(ctx, results, cfg.Port, len(results), cfg.VLESS, template)
+		passed = rankVLESSPassesBySpeed(ctx, passed, results, cfg.Port, cfg.VLESS, template)
+	} else {
+		for _, result := range results {
+			if result.Error == "" {
+				passed = append(passed, result.IP)
+			}
+		}
+	}
+	passedSet := make(map[string]struct{}, len(passed))
+	for _, ip := range passed {
+		passedSet[ip] = struct{}{}
+	}
+	now := time.Now()
+	for _, result := range results {
+		_, ok := passedSet[result.IP]
+		a.quality.observe(result.IP, snapshot.SourceByIP[result.IP], result.DownloadMbps, ok, now)
+	}
+	decision := a.quality.decide(now)
+	if decision.Event == switchNone || decision.ToIP == "" || !a.quality.apply {
+		return
+	}
+	current := a.proxyActivePoolSnapshot()
+	pool := current
+	pool.UpdatedAt, pool.Host, pool.Path = now, cfg.Host, cfg.Path
+	pool.IPs, pool.Results = []string{decision.ToIP}, results
+	a.applyProxyPool(pool, current)
+	a.quality.commitSwitch(decision, now)
 }
 
 func (a *app) backgroundOptimizeProxyPool(parent context.Context) {
@@ -1748,11 +1839,18 @@ func (a *app) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"cfnat": a.cfnatStartupConfig(), "cfdata": defaultCFdataConfig(), "backgroundOptimizer": a.backgroundOptimizerStatus()})
+	writeJSON(w, map[string]any{"cfnat": a.cfnatStartupConfig(), "cfdata": defaultCFdataConfig(), "backgroundOptimizer": a.backgroundOptimizerStatus(), "qualityScheduler": a.qualitySnapshot()})
 }
 
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"cfnat": a.cfnat.status(), "cfdata": a.cfdata.status(), "proxyAuto": a.proxyActivePoolSnapshot(), "backgroundOptimizer": a.backgroundOptimizerStatus()})
+	writeJSON(w, map[string]any{"cfnat": a.cfnat.status(), "cfdata": a.cfdata.status(), "proxyAuto": a.proxyActivePoolSnapshot(), "backgroundOptimizer": a.backgroundOptimizerStatus(), "qualityScheduler": a.qualitySnapshot()})
+}
+
+func (a *app) qualitySnapshot() map[string]any {
+	if a.quality == nil {
+		return map[string]any{"enabled": false}
+	}
+	return a.quality.snapshot()
 }
 
 func (a *app) backgroundOptimizerStatus() map[string]any {
@@ -1762,8 +1860,8 @@ func (a *app) backgroundOptimizerStatus() map[string]any {
 		"enabled":         a.optimizerEnabled,
 		"lastRun":         a.optimizerLastRun,
 		"lastError":       a.optimizerLastError,
-		"intervalMinutes": 15,
-		"batchSize":       24,
+		"intervalMinutes": 5,
+		"batchSize":       12,
 		"concurrency":     4,
 	}
 }
