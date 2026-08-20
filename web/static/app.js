@@ -177,7 +177,36 @@ async function refreshStatus() {
     cfdataStatus.textContent = st.cfdata.running ? "CFdata 运行中" : "CFdata 已停止";
   }
   if (st.backgroundOptimizer) renderBackgroundOptimizer(st.backgroundOptimizer);
+  if (st.qualityScheduler) renderQualityScheduler(st.qualityScheduler);
   return st;
+}
+
+function renderQualityScheduler(status) {
+  const summary = $("qualitySchedulerSummary");
+  const mode = $("qualitySchedulerMode");
+  const active = $("qualityActiveIP");
+  const standby = $("qualityStandbyCount");
+  const probe = $("qualityProbeInfo");
+  const decision = $("qualityDecisionInfo");
+  const error = $("qualitySchedulerError");
+  if (!summary || !mode || !active || !standby || !probe || !decision || !error) return;
+  const records = Array.isArray(status.records) ? status.records : [];
+  const standbyRecords = records.filter((item) => item.state === "STANDBY");
+  const lastProbe = status.lastProbeAt && !String(status.lastProbeAt).startsWith("0001-")
+    ? new Date(status.lastProbeAt).toLocaleString() : "not yet";
+  const event = status.lastDecision?.Event || status.lastDecision?.event || "NONE";
+  const reason = status.lastDecision?.Reason || status.lastDecision?.reason || "no decision";
+  const running = Boolean(status.enabled);
+  mode.textContent = running ? (status.apply ? "APPLY" : "SHADOW") : "OFF";
+  mode.classList.toggle("ok", running);
+  mode.classList.toggle("bad", !running || Boolean(status.lastError));
+  summary.textContent = running ? `每 ${Math.round((status.probeIntervalSeconds || 300) / 60)} 分钟探测 ${status.batchSize || 0} 个候选` : "调度器已关闭";
+  active.textContent = status.activeIp || "--";
+  standby.textContent = String(standbyRecords.length);
+  probe.textContent = `${lastProbe} · ${records.length} records`;
+  decision.textContent = event === "NONE" ? "none" : `${event} · ${reason}`;
+  error.hidden = !status.lastError;
+  error.textContent = status.lastError || "";
 }
 
 function renderBackgroundOptimizer(status) {

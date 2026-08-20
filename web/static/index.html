@@ -156,6 +156,16 @@
               <div><strong>后台慢速优选</strong><span id="backgroundOptimizerStatus">每 15 分钟轮测 24 个候选，并发 4</span></div>
               <label class="switch-control"><input id="backgroundOptimizerEnabled" type="checkbox" checked /><span aria-hidden="true"></span><b>自动运行</b></label>
             </div>
+            <section class="quality-strip" aria-live="polite">
+              <div class="quality-heading"><div><strong>线路质量调度</strong><span id="qualitySchedulerSummary">等待质量探测</span></div><span id="qualitySchedulerMode" class="quality-badge">--</span></div>
+              <div class="quality-grid">
+                <div><span class="quality-label">Active</span><strong id="qualityActiveIP">--</strong></div>
+                <div><span class="quality-label">Standby</span><strong id="qualityStandbyCount">0</strong></div>
+                <div><span class="quality-label">Probe</span><strong id="qualityProbeInfo">--</strong></div>
+                <div><span class="quality-label">Last decision</span><strong id="qualityDecisionInfo">--</strong></div>
+              </div>
+              <p id="qualitySchedulerError" class="quality-error" hidden></p>
+            </section>
             <details class="advanced scan-workflow" open>
               <summary>自定义扫描 <span>选择候选，再设置验活规则</span></summary>
               <div class="workflow-section">
