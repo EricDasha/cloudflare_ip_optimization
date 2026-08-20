@@ -34,13 +34,9 @@ var (
 
 // IPManager 用于安全管理 IP 地址状态
 type IPManager struct {
-	mu            sync.RWMutex
-	currentIP     string
+	mu            sync.Mutex
 	ipAddresses   []string
-	currentIndex  int
 	dispatchIndex int
-	allIPsChecked bool
-	priorityIPs   []string
 }
 
 func NewIPManager() *IPManager {
@@ -51,19 +47,17 @@ func (m *IPManager) SetIPAddresses(ips []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ipAddresses = ips
-	m.currentIndex = 0
 	m.dispatchIndex = 0
-	m.allIPsChecked = false
 }
 
 func (m *IPManager) SetPriorityIPs(ips []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.priorityIPs = append([]string(nil), ips...)
+	// 保留旧配置接口以兼容已有 Compose/API；数据面不再按 priority
+	// 加权，来源优先级只在控制面构建 active pool 时生效。
 }
 
 // nextTargets returns a round-robin slice for a new client connection.
-// currentIndex remains dedicated to health-check failover.
 func (m *IPManager) nextTargets(port, count int) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -74,96 +68,12 @@ func (m *IPManager) nextTargets(port, count int) []string {
 		count = len(m.ipAddresses)
 	}
 
-	ordered := make([]string, 0, len(m.ipAddresses)+len(m.priorityIPs)*2)
-	for _, priority := range m.priorityIPs {
-		for i := 0; i < 3; i++ {
-			ordered = append(ordered, priority)
-		}
-	}
-	for _, ip := range m.ipAddresses {
-		found := false
-		for _, priority := range m.priorityIPs {
-			if ip == priority {
-				found = true
-				break
-			}
-		}
-		if !found {
-			ordered = append(ordered, ip)
-		}
-	}
-	if len(ordered) == 0 {
-		return nil
-	}
-	if count > len(ordered) {
-		count = len(ordered)
-	}
 	ips := make([]string, count)
 	for i := range ips {
-		ips[i] = ordered[(m.dispatchIndex+i)%len(ordered)]
+		ips[i] = m.ipAddresses[(m.dispatchIndex+i)%len(m.ipAddresses)]
 	}
-	m.dispatchIndex = (m.dispatchIndex + count) % len(ordered)
+	m.dispatchIndex = (m.dispatchIndex + count) % len(m.ipAddresses)
 	return generateTargets(ips, port)
-}
-
-func (m *IPManager) GetCurrentIP() string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.currentIP
-}
-
-func (m *IPManager) SetCurrentIP(ip string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.currentIP = ip
-}
-
-func (m *IPManager) GetIPAddresses() []string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.ipAddresses
-}
-
-func (m *IPManager) IsAllIPsChecked() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.allIPsChecked
-}
-
-func (m *IPManager) Clear() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.ipAddresses = []string{}
-	m.currentIP = ""
-	m.currentIndex = 0
-	m.allIPsChecked = false
-}
-
-func (m *IPManager) switchToNextValidIP(useTLS bool, port int, domain string, code int) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// 尝试从当前索引的下一个 IP 开始检查
-	for i := m.currentIndex + 1; i < len(m.ipAddresses); i++ {
-		ip := m.ipAddresses[i]
-
-		// 跳过当前 IP
-		if ip == m.currentIP {
-			continue
-		}
-
-		if checkValidIP(ip, port, useTLS, domain, code) {
-			m.currentIP = ip
-			m.currentIndex = i
-			m.allIPsChecked = false
-			log.Printf("切换到新的有效 IP: %s 更新 IP 索引: %d", m.currentIP, m.currentIndex)
-			return true
-		}
-	}
-
-	m.allIPsChecked = true
-	log.Println("所有 IP 都已检查过，程序将退出")
-	return false
 }
 
 type result struct {
@@ -191,16 +101,18 @@ func main() {
 	Delay := flag.Int("delay", 300, "有效延迟（毫秒），超过此延迟将断开连接")
 	domain := flag.String("domain", "cloudflaremirrors.com/debian", "响应状态码检查的域名地址")
 	fixedIPs := flag.String("fixed", "", "固定转发 IP，多个地址用逗号分隔；留空时自动扫描")
-	priorityIPs := flag.String("priority", "", "优先转发 IP，多个地址逗号分隔；优先 IP 以有限权重参与轮询")
+	priorityIPs := flag.String("priority", "", "兼容旧配置保留；数据面不再按优先 IP 加权")
 	ipCount := flag.Int("ipnum", 20, "提取的有效IP数量")
 	ipsType := flag.String("ips", "4", "指定生成IPv4还是IPv6地址 (4或6)")
-	num := flag.Int("num", 5, "目标负载 IP 数量")
+	num := flag.Int("num", 1, "单连接拨号失败时按顺序尝试的目标数量")
 	port := flag.Int("port", 443, "转发的目标端口")
 	random := flag.Bool("random", true, "是否随机生成IP，如果为false，则从CIDR中拆分出所有IP")
 	maxThreads := flag.Int("task", 100, "并发请求最大协程数")
 	useTLS := flag.Bool("tls", true, "是否为 TLS 端口")
 
 	flag.Parse()
+	// 保留旧 flags，避免现有 Compose/Web 启动参数失效；固定池数据面不使用协议探针。
+	_, _, _ = code, domain, useTLS
 
 	// 创建 IP 管理器
 	ipManager := NewIPManager()
@@ -356,77 +268,32 @@ func main() {
 			ipManager.SetPriorityIPs(priorities)
 		}
 
-		// 选择一个有效 IP
-		currentIP := ""
-		if fixedMode {
-			currentIP = results[0].ip
-			log.Printf("固定模式选择 IP: %s，跳过通用 HTTP 健康探针", currentIP)
-		} else {
-			currentIP = selectValidIP(ipManager, *useTLS, *port, *domain, *code)
-		}
-		if currentIP == "" {
-			log.Printf("没有有效的 IP 可用")
-			continue
-		}
-		ipManager.SetCurrentIP(currentIP)
-
-		// 创建用于控制 goroutine 退出的 context
-		ctx, cancel := context.WithCancel(context.Background())
-
-		// 用于状态检查完成的信号
-		done := make(chan bool)
-
-		var loopWG sync.WaitGroup
-		loopWG.Add(2)
-
-		// 启动状态检查线程
-		go func() {
-			defer loopWG.Done()
-			statusCheck(ctx, *localAddr, *useTLS, *port, done, *domain, *code, time.Duration(*Delay)*time.Millisecond, ipManager)
-		}()
-
-		// 主循环，接收连接
-		go func() {
-			defer loopWG.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					log.Println("连接接受 goroutine 收到退出信号")
-					return
-				default:
-					// 设置接受连接的超时，以便能够检查 context
-					if tcpListener, ok := listener.(*net.TCPListener); ok {
-						tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
-					}
-					conn, err := listener.Accept()
-					if err != nil {
-						if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-							continue
-						}
-						if opErr, ok := err.(*net.OpError); ok && opErr.Err.Error() == "use of closed network connection" {
-							return
-						}
-						log.Printf("接受连接时发生错误: %v", err)
-						continue
-					}
-
-					clientAddr := conn.RemoteAddr().String()
-					atomic.AddInt32(&activeConnections, 1)
-					log.Printf("客户端来源: %s 连接建立，当前活跃连接数: %d", clientAddr, atomic.LoadInt32(&activeConnections))
-
-					go handleConnection(conn, ipManager.nextTargets(*port, *num), time.Duration(*Delay)*time.Millisecond)
-				}
+		// CFnat 数据面只负责在新 TCP 连接建立时轮换 IP。
+		// 不再主动连接自身监听口做“健康检查”：该探针会制造空的 TLS/WS
+		// 上游连接，GrainTCP/EdgeTunnel 可能将其视为异常会话并导致前端 -1。
+		for {
+			if tcpListener, ok := listener.(*net.TCPListener); ok {
+				_ = tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
 			}
-		}()
+			conn, err := listener.Accept()
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				if opErr, ok := err.(*net.OpError); ok && strings.Contains(opErr.Error(), "use of closed network connection") {
+					return
+				}
+				log.Printf("接受连接时发生错误: %v", err)
+				continue
+			}
 
-		<-done
-		cancel() // 取消 context，通知所有 goroutine 退出
-		loopWG.Wait()
-
-		// 清空 IP 地址
-		ipManager.Clear()
-		validIPClientCache = sync.Map{}
-		log.Println("主函数将退出当前循环，因为所有 IP 都已用尽")
+			clientAddr := conn.RemoteAddr().String()
+			atomic.AddInt32(&activeConnections, 1)
+			log.Printf("客户端来源: %s 连接建立，当前活跃连接数: %d", clientAddr, atomic.LoadInt32(&activeConnections))
+			// 多目标参数仅作为“失败时按顺序回退”，不再并发竞速，
+			// 从而保证一次前端逻辑连接只产生一个真实上游会话。
+			go handleConnection(conn, ipManager.nextTargets(*port, *num), time.Duration(*Delay)*time.Millisecond)
+		}
 	}
 }
 
@@ -815,165 +682,13 @@ func checkValidIP(ip string, port int, useTLS bool, domain string, code int) boo
 	return isValid
 }
 
-func selectValidIP(ipManager *IPManager, useTLS bool, port int, domain string, code int) string {
-	for _, ip := range ipManager.GetIPAddresses() {
-		if checkValidIP(ip, port, useTLS, domain, code) {
-			return ip
-		}
-	}
-	return ""
-}
-
-func statusCheck(ctx context.Context, localAddr string, useTLS bool, port int, done chan bool, domain string, code int, delay time.Duration, ipManager *IPManager) {
-	_, localPort, _ := net.SplitHostPort(localAddr)
-	checkAddr := fmt.Sprintf("127.0.0.1:%s", localPort)
-
-	for {
-		select {
-		case <-ctx.Done():
-			log.Println("状态检查收到退出信号")
-			return
-		default:
-		}
-
-		failCount := 0
-		log.Printf("开始状态检查，目标地址: %s", checkAddr)
-
-		for failCount < 2 {
-			select {
-			case <-ctx.Done():
-				log.Println("状态检查收到退出信号")
-				return
-			default:
-			}
-
-			conn, err := net.DialTimeout("tcp", checkAddr, delay)
-			if err != nil {
-				failCount++
-				log.Printf("状态检查失败 (%d/2): 无法连接到 %s 错误: %v", failCount, checkAddr, err)
-				time.Sleep(1 * time.Second)
-				continue
-			}
-
-			// 使用带超时的读取检查
-			checkSuccess := make(chan bool, 1)
-			go func() {
-				reader := bufio.NewReader(conn)
-				conn.SetReadDeadline(time.Now().Add(delay + 1*time.Second))
-				_, err := reader.ReadString('\n')
-				if err != nil {
-					if err == io.EOF {
-						checkSuccess <- false
-					} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-						// 超时说明连接保持正常
-						checkSuccess <- true
-					} else {
-						checkSuccess <- false
-					}
-				} else {
-					checkSuccess <- true
-				}
-			}()
-
-			select {
-			case success := <-checkSuccess:
-				if success {
-					log.Printf("状态检查成功: 连接到 %s 成功", checkAddr)
-					failCount = 0
-				} else {
-					failCount++
-					log.Printf("状态检查失败 (%d/2): 服务端断开连接", failCount)
-				}
-			case <-time.After(delay + 2*time.Second):
-				log.Printf("状态检查成功: 连接到 %s 保持稳定", checkAddr)
-				failCount = 0
-			case <-ctx.Done():
-				conn.Close()
-				log.Println("状态检查收到退出信号")
-				return
-			}
-
-			conn.Close()
-
-			if failCount == 0 {
-				time.Sleep(2 * time.Second)
-				break
-			}
-		}
-
-		if failCount >= 2 {
-			log.Println("连续两次状态检查失败，切换到下一个 IP")
-			if !ipManager.switchToNextValidIP(useTLS, port, domain, code) {
-				log.Println("所有 IP 都已检查过，状态检查停止")
-				done <- true
-				return
-			}
-		}
-	}
-}
-
-type connResult struct {
-	conn  net.Conn
-	addr  string
-	delay time.Duration
-	err   error
-}
-
-// dialFirstAvailable races all targets and returns as soon as one connects.
-// Remaining attempts are canceled and any connections that still win the race are closed.
-func dialFirstAvailable(
-	ctx context.Context,
-	forwardAddrs []string,
-	dial func(context.Context, string, string) (net.Conn, error),
-) (net.Conn, string, time.Duration, error) {
-	if len(forwardAddrs) == 0 {
-		return nil, "", 0, fmt.Errorf("没有可用的转发地址")
-	}
-
-	dialCtx, cancel := context.WithCancel(ctx)
-	results := make(chan connResult, len(forwardAddrs))
-	for _, addr := range forwardAddrs {
-		go func(targetAddr string) {
-			start := time.Now()
-			forwardConn, err := dial(dialCtx, "tcp", targetAddr)
-			results <- connResult{conn: forwardConn, addr: targetAddr, delay: time.Since(start), err: err}
-		}(addr)
-	}
-
-	var lastErr error
-	for received := 0; received < len(forwardAddrs); received++ {
-		res := <-results
-		if res.err != nil || res.conn == nil {
-			if res.conn != nil {
-				_ = res.conn.Close()
-			}
-			if res.err == nil {
-				res.err = fmt.Errorf("拨号器未返回连接")
-			}
-			lastErr = res.err
-			log.Printf("连接到 %s 失败: %v", res.addr, res.err)
-			continue
-		}
-
-		cancel()
-		remaining := len(forwardAddrs) - received - 1
-		go func() {
-			for i := 0; i < remaining; i++ {
-				loser := <-results
-				if loser.conn != nil {
-					_ = loser.conn.Close()
-				}
-			}
-		}()
-		return res.conn, res.addr, res.delay, nil
-	}
-
-	cancel()
-	return nil, "", 0, fmt.Errorf("所有转发地址均连接失败: %w", lastErr)
-}
-
-// 处理客户端连接，并发竞速后立即使用首个可达的转发地址。
+// 处理客户端连接；仅在拨号失败时按顺序尝试下一个地址。
 func handleConnection(conn net.Conn, forwardAddrs []string, delay time.Duration) {
+	dialer := &net.Dialer{Timeout: delay}
+	handleConnectionWithDial(conn, forwardAddrs, dialer.DialContext)
+}
+
+func handleConnectionWithDial(conn net.Conn, forwardAddrs []string, dial func(context.Context, string, string) (net.Conn, error)) {
 	defer func() {
 		clientAddr := conn.RemoteAddr().String()
 		atomic.AddInt32(&activeConnections, -1)
@@ -981,15 +696,24 @@ func handleConnection(conn net.Conn, forwardAddrs []string, delay time.Duration)
 		conn.Close()
 	}()
 
-	dialer := &net.Dialer{Timeout: delay}
-	bestConn, bestAddr, bestDelay, err := dialFirstAvailable(context.Background(), forwardAddrs, dialer.DialContext)
-	if err != nil {
-		log.Printf("未找到可用的转发连接: %v", err)
+	if len(forwardAddrs) == 0 {
+		log.Printf("未找到可用的转发地址")
 		return
 	}
-
-	log.Printf("选择首个可达连接: 地址: %s 延迟: %d ms", bestAddr, bestDelay.Milliseconds())
-	pipeConnections(conn, bestConn)
+	var lastErr error
+	for _, target := range forwardAddrs {
+		started := time.Now()
+		upstream, err := dial(context.Background(), "tcp", target)
+		if err != nil {
+			lastErr = err
+			log.Printf("连接到 %s 失败: %v", target, err)
+			continue
+		}
+		log.Printf("选择转发连接: 地址: %s，拨号耗时: %d ms", target, time.Since(started).Milliseconds())
+		pipeConnections(conn, upstream)
+		return
+	}
+	log.Printf("未找到可用的转发连接: %v", lastErr)
 }
 
 func pipeConnections(src, dst net.Conn) {

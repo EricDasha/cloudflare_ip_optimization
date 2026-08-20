@@ -6,7 +6,7 @@ The container owns four runtime surfaces:
 
 - `cloudflare-web`: HTTP API, static GUI, process lifecycle, candidate cache and active-pool commit.
 - `cfdata`: candidate discovery, data-center aggregation, latency/loss detail tests and CSV output.
-- `cfnat`: local TCP forwarding through the selected fixed or scanned IP pool.
+- `cfnat`: local TCP forwarding through the selected fixed or scanned IP pool. It performs no protocol probe and binds one client TCP connection to one upstream IP; fallback is sequential only when dialing fails.
 - `sing-box`: short-lived VLESS data-plane probes; it is not a persistent proxy service.
 
 The Web layer orchestrates these binaries. It does not duplicate their scanning algorithms.
@@ -16,14 +16,16 @@ The Web layer orchestrates these binaries. It does not duplicate their scanning 
 Candidate generation and business acceptance are separate stages:
 
 1. CFdata reads the local broad CDN ranges and writes `ip.csv`.
-2. The candidate cache merges allowlisted community DNS pools, bounded HTTPS IP pages, CFdata output and sampled official Cloudflare CIDRs. HTTPS pages are fetched without script execution, capped at 512 KiB and cannot follow cross-origin redirects. Subscription converter frontends are not automatic sources; manually pasted output accepts hostnames only from recognized node URIs or server fields, capped at 64 names under a shared three-second deadline.
+2. The candidate cache preserves source order: sampled official Cloudflare CIDRs, operator-supplied public IPv4 addresses, allowlisted community ProxyIP sources, then CFdata output. If the online official list is unavailable, a bundled official CIDR snapshot supplies candidates but does not bypass later business probes. HTTPS pages are fetched without script execution, capped at 512 KiB and cannot follow cross-origin redirects. Subscription converter frontends are not automatic sources; manually pasted output accepts hostnames only from recognized node URIs or server fields, capped at 64 names under a shared three-second deadline.
 3. The first active-pool stage validates the configured TLS SNI, HTTP Host and WebSocket path in parallel.
-4. If VLESS probing is enabled, only the fastest WS passes are tested sequentially through a short-lived sing-box process until the target pool is full.
-5. The VLESS probe replaces only the candidate server and port; UUID, TLS/ECH/uTLS and WebSocket settings come from the local outbound template. A configured `generate_204` response is the business acceptance signal.
+4. If VLESS probing is enabled, WS passes are tested sequentially through a short-lived sing-box process. Each pass must complete both the configured `generate_204` request and a bounded download through the same tunnel.
+5. The VLESS probe replaces only the candidate server and port; UUID, TLS/ECH/uTLS and WebSocket settings come from the local outbound template. Results preserve source priority and use measured Mbps, then data-plane latency, within each source tier.
 6. A new pool is committed only when it meets the configured minimum size and CFnat starts successfully.
 7. Any probe, template or process failure leaves the previous active pool and cache in place.
 
 `proxy-candidates.json` is discovery state. `proxy-active.json` is last-known-good forwarding state. They must not be treated as interchangeable.
+
+The CFnat data plane never launches these probes. It assigns one upstream IP to each new TCP connection using strict round-robin, keeps that session pinned, and only attempts the next target after a TCP dial failure.
 
 ## Web GUI
 

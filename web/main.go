@@ -273,7 +273,7 @@ func defaultCFnatConfig() cfnatConfig {
 		Priority: env("CFNAT_PRIORITY_IPS", ""),
 		IPNum:    envInt("CFNAT_IPNUM", 20),
 		IPs:      env("CFNAT_IPS", "4"),
-		Num:      envInt("CFNAT_NUM", 5),
+		Num:      envInt("CFNAT_NUM", 1),
 		Port:     envInt("CFNAT_PORT", 443),
 		Random:   envBool("CFNAT_RANDOM", true),
 		Task:     envInt("CFNAT_TASK", 100),
@@ -423,7 +423,9 @@ func main() {
 	a.loadOptimizerSettings()
 	if envBool("CFNAT_AUTO_START", true) {
 		cfg := a.cfnatStartupConfig()
-		if err := a.cfnat.start(a.dataDir, cfg.args(), ""); err != nil {
+		if strings.TrimSpace(cfg.Fixed) == "" && defaultProxyAutoConfig().Enabled {
+			log.Printf("auto-start cfnat deferred until the proxy control plane produces a verified fixed pool")
+		} else if err := a.cfnat.start(a.dataDir, cfg.args(), ""); err != nil {
 			log.Printf("auto-start cfnat failed: %v", err)
 		}
 	}
@@ -473,11 +475,12 @@ type proxyCandidateSource struct {
 }
 
 type proxyCandidateSnapshot struct {
-	UpdatedAt   time.Time `json:"updatedAt,omitempty"`
-	NextRefresh time.Time `json:"nextRefresh,omitempty"`
-	Sources     []string  `json:"sources"`
-	IPs         []string  `json:"ips"`
-	Errors      []string  `json:"errors"`
+	UpdatedAt   time.Time         `json:"updatedAt,omitempty"`
+	NextRefresh time.Time         `json:"nextRefresh,omitempty"`
+	Sources     []string          `json:"sources"`
+	IPs         []string          `json:"ips"`
+	SourceByIP  map[string]string `json:"sourceByIp,omitempty"`
+	Errors      []string          `json:"errors"`
 }
 
 type proxyActivePool struct {
@@ -592,9 +595,14 @@ func (a *app) backgroundOptimizeProxyPool(parent context.Context) {
 	cfg := defaultProxyAutoConfig()
 	cfg.Concurrency = 4
 	cfg.MaxLatency = 1500
-	candidates := a.proxyCandidateSnapshot().IPs
+	snapshot := a.proxyCandidateSnapshot()
+	candidates := snapshot.IPs
 	if len(candidates) == 0 {
 		return
+	}
+	maxPoolCandidates := cfg.PoolSize
+	if cfg.VLESS.Enabled && cfg.VLESS.MaxCandidates > maxPoolCandidates {
+		maxPoolCandidates = cfg.VLESS.MaxCandidates
 	}
 	const batchSize = 24
 	a.optimizerMu.Lock()
@@ -610,6 +618,7 @@ func (a *app) backgroundOptimizeProxyPool(parent context.Context) {
 	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
 	defer cancel()
 	results := scanProxyWebSockets(ctx, batch, cfg)
+	applyCandidateSourcePriority(results, snapshot.SourceByIP)
 	passed := make([]string, 0, len(results))
 	if cfg.VLESS.Enabled {
 		if err := cfg.VLESS.validate(); err != nil {
@@ -625,8 +634,11 @@ func (a *app) backgroundOptimizeProxyPool(parent context.Context) {
 			a.optimizerMu.Unlock()
 			return
 		}
-		passed = probeVLESSPool(ctx, results, cfg.Port, cfg.PoolSize, cfg.VLESS, template)
+		passed = probeVLESSPool(ctx, results, cfg.Port, maxPoolCandidates, cfg.VLESS, template)
 		passed = rankVLESSPassesBySpeed(ctx, passed, results, cfg.Port, cfg.VLESS, template)
+		if len(passed) > cfg.PoolSize {
+			passed = passed[:cfg.PoolSize]
+		}
 	} else {
 		for _, result := range results {
 			if result.Error == "" {
@@ -681,31 +693,76 @@ func (a *app) backgroundOptimizeProxyPool(parent context.Context) {
 }
 
 func rankVLESSPassesBySpeed(parent context.Context, passed []string, results []proxyScanResult, port int, base vlessProbeConfig, template map[string]any) []string {
-	if len(passed) < 2 {
+	return rankVLESSPassesBySpeedWithProbe(parent, passed, results, port, base, template, probeVLESSCandidateMetrics)
+}
+
+func rankVLESSPassesBySpeedWithProbe(
+	parent context.Context,
+	passed []string,
+	results []proxyScanResult,
+	port int,
+	base vlessProbeConfig,
+	template map[string]any,
+	probe func(context.Context, string, int, vlessProbeConfig, map[string]any) (vlessProbeMetrics, error),
+) []string {
+	if len(passed) == 0 {
 		return passed
 	}
 	speedCfg := base
-	speedCfg.TestURL = "https://speed.cloudflare.com/__down?bytes=262144"
+	speedBytes := envInt("PROXY_VLESS_SPEED_BYTES", 1048576)
+	if speedBytes < 65536 || speedBytes > 8388608 {
+		speedBytes = 1048576
+	}
+	speedTimeout := envInt("PROXY_VLESS_SPEED_TIMEOUT", 15)
+	if speedTimeout < 3 || speedTimeout > 60 {
+		speedTimeout = 15
+	}
+	speedCfg.TestURL = fmt.Sprintf("https://speed.cloudflare.com/__down?bytes=%d", speedBytes)
 	speedCfg.ExpectedStatus = http.StatusOK
-	speedCfg.ReadLimit = 262144
-	speedCfg.Timeout = 10 * time.Second
+	speedCfg.ReadLimit = int64(speedBytes)
+	speedCfg.MinBytes = int64(speedBytes)
+	speedCfg.Timeout = time.Duration(speedTimeout) * time.Second
 	times := make(map[string]int64, len(passed))
+	speeds := make(map[string]float64, len(passed))
+	verified := make([]string, 0, len(passed))
 	for _, ip := range passed {
-		started := time.Now()
 		ctx, cancel := context.WithTimeout(parent, speedCfg.Timeout)
-		err := probeVLESSCandidate(ctx, ip, port, speedCfg, template)
+		metrics, err := probe(ctx, ip, port, speedCfg, template)
 		cancel()
 		if err == nil {
-			times[ip] = time.Since(started).Milliseconds()
+			times[ip] = metrics.Duration.Milliseconds()
+			speeds[ip] = metrics.Mbps
+			verified = append(verified, ip)
+			for i := range results {
+				if results[i].IP == ip {
+					results[i].DownloadMbps = metrics.Mbps
+					break
+				}
+			}
+			continue
+		}
+		for i := range results {
+			if results[i].IP == ip {
+				results[i].Stage = "VLESS_SPEED_FAIL"
+				results[i].Error = err.Error()
+				break
+			}
 		}
 	}
+	passed = verified
 	sort.SliceStable(passed, func(i, j int) bool {
+		leftRank := proxyResultSourceRank(results, passed[i])
+		rightRank := proxyResultSourceRank(results, passed[j])
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		leftSpeed, rightSpeed := speeds[passed[i]], speeds[passed[j]]
+		if leftSpeed != rightSpeed {
+			return leftSpeed > rightSpeed
+		}
 		left, lok := times[passed[i]]
 		right, rok := times[passed[j]]
-		if lok != rok {
-			return lok
-		}
-		if lok {
+		if lok && rok && left != right {
 			return left < right
 		}
 		return proxyResultLatency(results, passed[i]) < proxyResultLatency(results, passed[j])
@@ -720,6 +777,15 @@ func proxyResultLatency(results []proxyScanResult, ip string) int64 {
 		}
 	}
 	return int64(^uint64(0) >> 1)
+}
+
+func proxyResultSourceRank(results []proxyScanResult, ip string) int {
+	for _, result := range results {
+		if result.IP == ip {
+			return result.SourceRank
+		}
+	}
+	return 4
 }
 
 func (a *app) refreshAndApplyProxyPool(ctx context.Context) {
@@ -776,7 +842,6 @@ func (a *app) cfnatStartupConfig() cfnatConfig {
 	defer a.activeMu.RUnlock()
 	if len(a.activePool.IPs) > 0 {
 		cfg.Fixed = strings.Join(a.activePool.IPs, ",")
-		cfg.Priority = strings.Join(poolPriorityIPs(a.activePool.IPs), ",")
 	}
 	return cfg
 }
@@ -855,16 +920,22 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 			return
 		}
 	}
-	candidates := a.proxyCandidateSnapshot().IPs
+	snapshot := a.proxyCandidateSnapshot()
+	candidates := snapshot.IPs
 	if len(candidates) == 0 {
 		return
 	}
 	results := scanProxyWebSockets(parent, candidates, cfg)
+	applyCandidateSourcePriority(results, snapshot.SourceByIP)
 	passed := make([]string, 0, cfg.PoolSize)
 	finalStage := "WS"
 	if cfg.VLESS.Enabled {
 		finalStage = "VLESS"
-		passed = probeVLESSPool(parent, results, cfg.Port, cfg.PoolSize, cfg.VLESS, vlessTemplate)
+		passed = probeVLESSPool(parent, results, cfg.Port, min(cfg.VLESS.MaxCandidates, len(results)), cfg.VLESS, vlessTemplate)
+		passed = rankVLESSPassesBySpeed(parent, passed, results, cfg.Port, cfg.VLESS, vlessTemplate)
+		if len(passed) > cfg.PoolSize {
+			passed = passed[:cfg.PoolSize]
+		}
 	} else {
 		for _, result := range results {
 			if result.Error == "" {
@@ -902,11 +973,9 @@ func (a *app) applyProxyPool(pool, current proxyActivePool) {
 	passed := pool.IPs
 	cfnatCfg := defaultCFnatConfig()
 	cfnatCfg.Fixed = strings.Join(passed, ",")
-	cfnatCfg.Priority = strings.Join(poolPriorityIPs(passed), ",")
 	rollbackCfg := defaultCFnatConfig()
 	if len(current.IPs) > 0 {
 		rollbackCfg.Fixed = strings.Join(current.IPs, ",")
-		rollbackCfg.Priority = strings.Join(poolPriorityIPs(current.IPs), ",")
 	}
 	if err := a.cfnat.stop(); err != nil {
 		log.Printf("stop cfnat for auto pool: %v", err)
@@ -934,13 +1003,6 @@ func (a *app) applyProxyPool(pool, current proxyActivePool) {
 	a.activePool = pool
 	a.activeMu.Unlock()
 	log.Printf("proxy active pool applied: %s", strings.Join(passed, ","))
-}
-
-func poolPriorityIPs(ips []string) []string {
-	if len(ips) > 2 {
-		return append([]string(nil), ips[:2]...)
-	}
-	return append([]string(nil), ips...)
 }
 
 func (a *app) setProxyPoolError(message string, results []proxyScanResult) {
@@ -985,6 +1047,40 @@ func scanProxyWebSockets(parent context.Context, ips []string, cfg proxyAutoConf
 		return results[i].Latency < results[j].Latency
 	})
 	return results
+}
+
+func applyCandidateSourcePriority(results []proxyScanResult, sourceByIP map[string]string) {
+	if len(sourceByIP) == 0 {
+		return
+	}
+	rank := func(ip string) int {
+		switch sourceByIP[ip] {
+		case "official":
+			return 0
+		case "user":
+			return 1
+		case "proxy":
+			return 2
+		case "cfdata":
+			return 3
+		default:
+			return 4
+		}
+	}
+	for i := range results {
+		results[i].SourceRank = rank(results[i].IP)
+	}
+	sort.SliceStable(results, func(i, j int) bool {
+		leftOK, rightOK := results[i].Error == "", results[j].Error == ""
+		if leftOK != rightOK {
+			return leftOK
+		}
+		leftRank, rightRank := results[i].SourceRank, results[j].SourceRank
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		return results[i].Latency < results[j].Latency
+	})
 }
 
 func probeProxyWebSocket(ctx context.Context, ip string, cfg proxyAutoConfig) error {
@@ -1034,9 +1130,25 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 	defer a.refreshMu.Unlock()
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
-	resolved, sourceErrors, err := resolveProxySources(ctx, defaultProxyCandidateSourceIDs, 1000)
-	if err != nil {
-		sourceErrors = append(sourceErrors, err.Error())
+	resolved := make([]string, 0, 1000)
+	sourceByIP := make(map[string]string)
+	sourceErrors := []string{}
+	appendGroup := func(source string, values []string) {
+		for _, raw := range values {
+			if len(resolved) >= 1000 {
+				return
+			}
+			ip := net.ParseIP(strings.TrimSpace(raw))
+			if !isPublicIPv4(ip) {
+				continue
+			}
+			key := ip.To4().String()
+			if _, ok := sourceByIP[key]; ok {
+				continue
+			}
+			sourceByIP[key] = source
+			resolved = append(resolved, key)
+		}
 	}
 	officialLimit := envInt("PROXY_OFFICIAL_CANDIDATES", 150)
 	if officialLimit < 0 || officialLimit > 1000 {
@@ -1046,10 +1158,18 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 		official, officialErr := fetchOfficialCloudflareCandidates(ctx, officialLimit)
 		if officialErr != nil {
 			sourceErrors = append(sourceErrors, "Cloudflare 官方段: "+officialErr.Error())
-		} else {
-			resolved = append(resolved, official...)
 		}
+		appendGroup("official", official)
 	}
+	appendGroup("user", strings.FieldsFunc(env("PROXY_USER_CANDIDATES", ""), func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t'
+	}))
+	community, communityErrors, err := resolveProxySources(ctx, defaultProxyCandidateSourceIDs, 1000-len(resolved))
+	sourceErrors = append(sourceErrors, communityErrors...)
+	if err != nil {
+		sourceErrors = append(sourceErrors, err.Error())
+	}
+	appendGroup("proxy", community)
 	cfdataLimit := envInt("PROXY_CFDATA_CANDIDATES", 300)
 	if cfdataLimit < 0 || cfdataLimit > 2000 {
 		cfdataLimit = 300
@@ -1059,7 +1179,7 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 		if cfdataErr != nil {
 			sourceErrors = append(sourceErrors, "CFdata: "+cfdataErr.Error())
 		} else {
-			resolved = append(resolved, cfdataIPs...)
+			appendGroup("cfdata", cfdataIPs)
 		}
 	}
 	seen := make(map[string]struct{})
@@ -1079,7 +1199,6 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 		seen[key] = struct{}{}
 		ips = append(ips, key)
 	}
-	sort.Strings(ips)
 	if len(ips) == 0 {
 		if len(sourceErrors) == 0 {
 			sourceErrors = append(sourceErrors, "候选源未返回公网 IPv4")
@@ -1097,8 +1216,9 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 	snapshot := proxyCandidateSnapshot{
 		UpdatedAt:   now,
 		NextRefresh: now.Add(proxyCandidateRefreshInterval),
-		Sources:     append(append([]string(nil), defaultProxyCandidateSourceIDs...), "cloudflare-official", "cfdata"),
+		Sources:     []string{"official", "user", "proxy", "cfdata"},
 		IPs:         ips,
+		SourceByIP:  sourceByIP,
 		Errors:      sourceErrors,
 	}
 	a.candidateMu.Lock()
@@ -1111,25 +1231,50 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 	return true
 }
 
+const bundledOfficialCloudflareIPv4CIDRs = `
+173.245.48.0/20
+103.21.244.0/22
+103.22.200.0/22
+103.31.4.0/22
+141.101.64.0/18
+108.162.192.0/18
+190.93.240.0/20
+188.114.96.0/20
+197.234.240.0/22
+198.41.128.0/17
+162.158.0.0/15
+104.16.0.0/13
+104.24.0.0/14
+172.64.0.0/13
+131.0.72.0/22
+`
+
 func fetchOfficialCloudflareCandidates(ctx context.Context, limit int) ([]string, error) {
+	fallback := func(err error) ([]string, error) {
+		return sampleIPv4CIDRs(bundledOfficialCloudflareIPv4CIDRs, limit), fmt.Errorf("在线列表不可用，已使用内置官方 CIDR snapshot: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.cloudflare.com/ips-v4", nil)
 	if err != nil {
-		return nil, err
+		return fallback(err)
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return fallback(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return fallback(fmt.Errorf("HTTP %d", resp.StatusCode))
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
-		return nil, err
+		return fallback(err)
 	}
-	return sampleIPv4CIDRs(string(data), limit), nil
+	candidates := sampleIPv4CIDRs(string(data), limit)
+	if len(candidates) == 0 {
+		return fallback(errors.New("在线列表未包含有效 IPv4 CIDR"))
+	}
+	return candidates, nil
 }
 
 func sampleIPv4CIDRs(content string, limit int) []string {
@@ -1200,6 +1345,13 @@ func (a *app) proxyCandidateSnapshot() proxyCandidateSnapshot {
 	snapshot := a.candidates
 	snapshot.Sources = append([]string(nil), snapshot.Sources...)
 	snapshot.IPs = append([]string(nil), snapshot.IPs...)
+	if snapshot.SourceByIP != nil {
+		copySource := make(map[string]string, len(snapshot.SourceByIP))
+		for ip, source := range snapshot.SourceByIP {
+			copySource[ip] = source
+		}
+		snapshot.SourceByIP = copySource
+	}
 	snapshot.Errors = append([]string(nil), snapshot.Errors...)
 	return snapshot
 }
@@ -1220,6 +1372,16 @@ func (a *app) loadProxyCandidateCache() {
 		}
 	}
 	snapshot.IPs = valid
+	if snapshot.SourceByIP == nil {
+		snapshot.SourceByIP = make(map[string]string, len(valid))
+	}
+	validSources := make(map[string]string, len(valid))
+	for _, ip := range valid {
+		if source := snapshot.SourceByIP[ip]; source != "" {
+			validSources[ip] = source
+		}
+	}
+	snapshot.SourceByIP = validSources
 	a.candidateMu.Lock()
 	a.candidates = snapshot
 	a.candidateMu.Unlock()
@@ -1261,11 +1423,13 @@ func (a *app) handleProxyCandidates(w http.ResponseWriter, r *http.Request) {
 }
 
 type proxyScanResult struct {
-	IP          string `json:"ip"`
-	Latency     int64  `json:"latency"`
-	DataLatency int64  `json:"dataLatency,omitempty"`
-	Stage       string `json:"stage,omitempty"`
-	Error       string `json:"error,omitempty"`
+	IP           string  `json:"ip"`
+	Latency      int64   `json:"latency"`
+	DataLatency  int64   `json:"dataLatency,omitempty"`
+	DownloadMbps float64 `json:"downloadMbps,omitempty"`
+	SourceRank   int     `json:"sourceRank,omitempty"`
+	Stage        string  `json:"stage,omitempty"`
+	Error        string  `json:"error,omitempty"`
 }
 
 func normalizeProxyScan(c proxyScanConfig) (proxyScanConfig, error) {

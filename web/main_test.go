@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -29,6 +30,13 @@ func TestIsPublicIPv4(t *testing.T) {
 		if got := isPublicIPv4(net.ParseIP(tt.ip)); got != tt.want {
 			t.Fatalf("isPublicIPv4(%q) = %v, want %v", tt.ip, got, tt.want)
 		}
+	}
+}
+
+func TestDefaultCFnatUsesSingleTargetPerConnection(t *testing.T) {
+	t.Setenv("CFNAT_NUM", "")
+	if got := defaultCFnatConfig().Num; got != 1 {
+		t.Fatalf("default CFnat target count = %d, want 1", got)
 	}
 }
 
@@ -75,6 +83,19 @@ func TestSampleIPv4CIDRs(t *testing.T) {
 	}
 }
 
+func TestBundledOfficialCloudflareCIDRsProvideFallback(t *testing.T) {
+	got := sampleIPv4CIDRs(bundledOfficialCloudflareIPv4CIDRs, 30)
+	if len(got) != 30 {
+		t.Fatalf("bundled official candidates = %d, want 30", len(got))
+	}
+	for _, raw := range got {
+		ip := net.ParseIP(raw)
+		if !isPublicIPv4(ip) {
+			t.Fatalf("bundled official candidate is not public IPv4: %q", raw)
+		}
+	}
+}
+
 func TestProxyCandidateCacheRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	want := proxyCandidateSnapshot{
@@ -82,6 +103,7 @@ func TestProxyCandidateCacheRoundTrip(t *testing.T) {
 		NextRefresh: time.Date(2026, 8, 9, 18, 0, 0, 0, time.UTC),
 		Sources:     []string{"zhaobo", "william"},
 		IPs:         []string{"1.1.1.1", "192.168.1.1"},
+		SourceByIP:  map[string]string{"1.1.1.1": "official", "192.168.1.1": "user"},
 		Errors:      []string{},
 	}
 	a := &app{dataDir: dir}
@@ -93,6 +115,9 @@ func TestProxyCandidateCacheRoundTrip(t *testing.T) {
 	got := b.proxyCandidateSnapshot()
 	if !reflect.DeepEqual(got.IPs, []string{"1.1.1.1"}) {
 		t.Fatalf("loaded IPs = %#v, want only public IPv4", got.IPs)
+	}
+	if !reflect.DeepEqual(got.SourceByIP, map[string]string{"1.1.1.1": "official"}) {
+		t.Fatalf("loaded source map = %#v", got.SourceByIP)
 	}
 	if !got.UpdatedAt.Equal(want.UpdatedAt) || !got.NextRefresh.Equal(want.NextRefresh) {
 		t.Fatalf("loaded timestamps differ: %#v", got)
@@ -261,12 +286,71 @@ func TestVLESSProbeOrderUsesWebSocketLatency(t *testing.T) {
 func TestFastestVLESSPassesUsesDataLatency(t *testing.T) {
 	results := []proxyScanResult{
 		{IP: "198.51.100.1", Latency: 100, DataLatency: 900, Stage: "VLESS_PASS"},
-		{IP: "198.51.100.2", Latency: 200, DataLatency: 300, Stage: "VLESS_PASS"},
+		{IP: "198.51.100.2", Latency: 200, DataLatency: 300, SourceRank: 1, Stage: "VLESS_PASS"},
 		{IP: "198.51.100.3", Latency: 50, DataLatency: 600, Stage: "VLESS_PASS"},
 	}
 	got := fastestVLESSPasses(results, 2)
-	want := []string{"198.51.100.2", "198.51.100.3"}
+	want := []string{"198.51.100.3", "198.51.100.1"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("fastestVLESSPasses() = %v, want %v", got, want)
+	}
+}
+
+func TestCandidateSourcePriorityKeepsFailuresOut(t *testing.T) {
+	results := []proxyScanResult{
+		{IP: "198.51.100.1", Latency: 20, Stage: "WS_PASS"},
+		{IP: "198.51.100.2", Latency: 10, Stage: "WS_PASS"},
+		{IP: "198.51.100.3", Latency: 5, Stage: "WS_FAIL", Error: "failed"},
+	}
+	applyCandidateSourcePriority(results, map[string]string{
+		"198.51.100.1": "official",
+		"198.51.100.2": "proxy",
+		"198.51.100.3": "official",
+	})
+	want := []string{"198.51.100.1", "198.51.100.2", "198.51.100.3"}
+	got := []string{results[0].IP, results[1].IP, results[2].IP}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("source priority = %v, want %v", got, want)
+	}
+}
+
+func TestRankVLESSPassesBySpeedUsesSourceThenThroughput(t *testing.T) {
+	results := []proxyScanResult{
+		{IP: "198.51.100.1", Latency: 100, SourceRank: 0, Stage: "VLESS_PASS"},
+		{IP: "198.51.100.2", Latency: 50, SourceRank: 1, Stage: "VLESS_PASS"},
+		{IP: "198.51.100.3", Latency: 150, SourceRank: 0, Stage: "VLESS_PASS"},
+		{IP: "198.51.100.4", Latency: 25, SourceRank: 0, Stage: "VLESS_PASS"},
+	}
+	metrics := map[string]vlessProbeMetrics{
+		"198.51.100.1": {Duration: 400 * time.Millisecond, Mbps: 12},
+		"198.51.100.2": {Duration: 200 * time.Millisecond, Mbps: 50},
+		"198.51.100.3": {Duration: 300 * time.Millisecond, Mbps: 30},
+	}
+	probe := func(_ context.Context, ip string, _ int, _ vlessProbeConfig, _ map[string]any) (vlessProbeMetrics, error) {
+		metric, ok := metrics[ip]
+		if !ok {
+			return vlessProbeMetrics{}, errors.New("download failed")
+		}
+		return metric, nil
+	}
+
+	got := rankVLESSPassesBySpeedWithProbe(
+		context.Background(),
+		[]string{"198.51.100.1", "198.51.100.2", "198.51.100.3", "198.51.100.4"},
+		results,
+		443,
+		vlessProbeConfig{Timeout: time.Second},
+		nil,
+		probe,
+	)
+	want := []string{"198.51.100.3", "198.51.100.1", "198.51.100.2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("rankVLESSPassesBySpeedWithProbe() = %v, want %v", got, want)
+	}
+	if results[2].DownloadMbps != 30 || results[0].DownloadMbps != 12 || results[1].DownloadMbps != 50 {
+		t.Fatalf("download metrics were not recorded: %#v", results)
+	}
+	if results[3].Stage != "VLESS_SPEED_FAIL" || results[3].Error == "" {
+		t.Fatalf("failed speed probe remained eligible: %#v", results[3])
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 )
@@ -41,7 +40,7 @@ func TestIPManagerNextTargetsLimitsToPool(t *testing.T) {
 	}
 }
 
-func TestIPManagerPriorityTargetsRemainFair(t *testing.T) {
+func TestIPManagerPriorityDoesNotChangeRoundRobin(t *testing.T) {
 	m := NewIPManager()
 	m.SetIPAddresses([]string{"192.0.2.1", "192.0.2.2", "192.0.2.3"})
 	m.SetPriorityIPs([]string{"192.0.2.1"})
@@ -50,117 +49,67 @@ func TestIPManagerPriorityTargetsRemainFair(t *testing.T) {
 	for range 5 {
 		got = append(got, m.nextTargets(443, 1)...)
 	}
-	want := []string{
-		"192.0.2.1:443", "192.0.2.1:443", "192.0.2.1:443",
-		"192.0.2.2:443", "192.0.2.3:443",
-	}
+	want := []string{"192.0.2.1:443", "192.0.2.2:443", "192.0.2.3:443", "192.0.2.1:443", "192.0.2.2:443"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("weighted targets = %v, want %v", got, want)
+		t.Fatalf("priority changed round-robin targets = %v, want %v", got, want)
 	}
 }
 
-func TestDialFirstAvailableDoesNotWaitForSlowCandidate(t *testing.T) {
-	started := make(chan string, 2)
-	releaseFast := make(chan struct{})
-	slowCanceled := make(chan struct{})
-	winnerClosed := make(chan struct{})
-	loserClosed := make(chan struct{})
+func TestHandleConnectionUsesOneUpstreamPerSession(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
 
-	dial := func(ctx context.Context, _, addr string) (net.Conn, error) {
-		started <- addr
-		switch addr {
-		case "fast":
-			<-releaseFast
-			client, peer := net.Pipe()
-			go func() {
-				buf := make([]byte, 1)
-				_, _ = peer.Read(buf)
-				_ = peer.Close()
-				close(winnerClosed)
-			}()
-			return client, nil
-		case "slow":
-			<-ctx.Done()
-			close(slowCanceled)
-			client, peer := net.Pipe()
-			go func() {
-				buf := make([]byte, 1)
-				_, _ = peer.Read(buf)
-				_ = peer.Close()
-				close(loserClosed)
-			}()
-			return client, nil
-		default:
-			return nil, errors.New("unexpected target")
-		}
+	calls := make([]string, 0, 2)
+	dial := func(_ context.Context, _, addr string) (net.Conn, error) {
+		calls = append(calls, addr)
+		upstream, peer := net.Pipe()
+		_ = peer.Close()
+		return upstream, nil
 	}
 
-	type result struct {
-		conn net.Conn
-		addr string
-		err  error
-	}
-	resultCh := make(chan result, 1)
+	done := make(chan struct{})
 	go func() {
-		conn, addr, _, err := dialFirstAvailable(context.Background(), []string{"fast", "slow"}, dial)
-		resultCh <- result{conn: conn, addr: addr, err: err}
+		handleConnectionWithDial(server, []string{"first:443", "second:443"}, dial)
+		close(done)
 	}()
 
-	for range 2 {
-		<-started
-	}
-	close(releaseFast)
-
 	select {
-	case got := <-resultCh:
-		if got.err != nil {
-			t.Fatalf("dialFirstAvailable() error = %v", got.err)
-		}
-		if got.addr != "fast" {
-			t.Fatalf("dialFirstAvailable() addr = %q, want fast", got.addr)
-		}
-		_ = got.conn.Close()
+	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("dialFirstAvailable() waited for the slow candidate")
+		t.Fatal("handleConnectionWithDial did not finish")
 	}
-
-	select {
-	case <-slowCanceled:
-	case <-time.After(time.Second):
-		t.Fatal("slow candidate was not canceled")
-	}
-	select {
-	case <-winnerClosed:
-	case <-time.After(time.Second):
-		t.Fatal("winning test connection was not closed")
-	}
-	select {
-	case <-loserClosed:
-	case <-time.After(time.Second):
-		t.Fatal("losing connection was not cleaned up")
+	if !reflect.DeepEqual(calls, []string{"first:443"}) {
+		t.Fatalf("dial calls = %v, want only the first upstream", calls)
 	}
 }
 
-func TestDialFirstAvailableReturnsErrorWhenAllCandidatesFail(t *testing.T) {
+func TestHandleConnectionFallsBackOnlyAfterDialFailure(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+
+	calls := make([]string, 0, 2)
 	dial := func(_ context.Context, _, addr string) (net.Conn, error) {
-		return nil, errors.New(addr + " failed")
+		calls = append(calls, addr)
+		if addr == "first:443" {
+			return nil, errors.New("unreachable")
+		}
+		upstream, peer := net.Pipe()
+		_ = peer.Close()
+		return upstream, nil
 	}
 
-	conn, addr, _, err := dialFirstAvailable(context.Background(), []string{"one", "two"}, dial)
-	if conn != nil {
-		t.Fatal("dialFirstAvailable() returned a connection when all candidates failed")
-	}
-	if addr != "" {
-		t.Fatalf("dialFirstAvailable() addr = %q, want empty", addr)
-	}
-	if err == nil || !strings.Contains(err.Error(), "所有转发地址均连接失败") {
-		t.Fatalf("dialFirstAvailable() error = %v", err)
-	}
-}
+	done := make(chan struct{})
+	go func() {
+		handleConnectionWithDial(server, []string{"first:443", "second:443"}, dial)
+		close(done)
+	}()
 
-func TestDialFirstAvailableRejectsEmptyTargets(t *testing.T) {
-	conn, addr, _, err := dialFirstAvailable(context.Background(), nil, nil)
-	if conn != nil || addr != "" || err == nil {
-		t.Fatalf("dialFirstAvailable() = (%v, %q, %v), want nil, empty, error", conn, addr, err)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handleConnectionWithDial did not finish")
+	}
+	if !reflect.DeepEqual(calls, []string{"first:443", "second:443"}) {
+		t.Fatalf("dial calls = %v, want ordered fallback", calls)
 	}
 }

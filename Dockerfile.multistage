@@ -36,7 +36,7 @@ ENV DATA_DIR=/data \
     CFNAT_DOMAIN=cloudflaremirrors.com/debian \
     CFNAT_IPNUM=20 \
     CFNAT_IPS=4 \
-    CFNAT_NUM=5 \
+    CFNAT_NUM=1 \
     CFNAT_PORT=443 \
     CFNAT_RANDOM=true \
     CFNAT_TASK=100 \
@@ -47,6 +47,8 @@ ENV DATA_DIR=/data \
     PROXY_VLESS_EXPECT_STATUS=204 \
     PROXY_VLESS_TIMEOUT=15 \
     PROXY_VLESS_MAX_CANDIDATES=20 \
+    PROXY_VLESS_SPEED_BYTES=1048576 \
+    PROXY_VLESS_SPEED_TIMEOUT=15 \
     SING_BOX_BIN=/usr/local/bin/sing-box
 
 WORKDIR /data

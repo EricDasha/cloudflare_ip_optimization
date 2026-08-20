@@ -30,6 +30,13 @@ type vlessProbeConfig struct {
 	Timeout        time.Duration
 	MaxCandidates  int
 	ReadLimit      int64
+	MinBytes       int64
+}
+
+type vlessProbeMetrics struct {
+	Bytes    int64
+	Duration time.Duration
+	Mbps     float64
 }
 
 func defaultVLESSProbeConfig() vlessProbeConfig {
@@ -205,6 +212,9 @@ func vlessProbeOrder(results []proxyScanResult) []int {
 		}
 	}
 	sort.SliceStable(order, func(i, j int) bool {
+		if results[order[i]].SourceRank != results[order[j]].SourceRank {
+			return results[order[i]].SourceRank < results[order[j]].SourceRank
+		}
 		return results[order[i]].Latency < results[order[j]].Latency
 	})
 	return order
@@ -218,6 +228,9 @@ func fastestVLESSPasses(results []proxyScanResult, poolSize int) []string {
 		}
 	}
 	sort.SliceStable(passed, func(i, j int) bool {
+		if results[passed[i]].SourceRank != results[passed[j]].SourceRank {
+			return results[passed[i]].SourceRank < results[passed[j]].SourceRank
+		}
 		if results[passed[i]].DataLatency == results[passed[j]].DataLatency {
 			return results[passed[i]].Latency < results[passed[j]].Latency
 		}
@@ -234,38 +247,44 @@ func fastestVLESSPasses(results []proxyScanResult, poolSize int) []string {
 }
 
 func probeVLESSCandidate(ctx context.Context, candidateIP string, candidatePort int, cfg vlessProbeConfig, template map[string]any) error {
+	_, err := probeVLESSCandidateMetrics(ctx, candidateIP, candidatePort, cfg, template)
+	return err
+}
+
+func probeVLESSCandidateMetrics(ctx context.Context, candidateIP string, candidatePort int, cfg vlessProbeConfig, template map[string]any) (vlessProbeMetrics, error) {
+	metrics := vlessProbeMetrics{}
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
-		return fmt.Errorf("分配本地探针端口失败: %w", err)
+		return metrics, fmt.Errorf("分配本地探针端口失败: %w", err)
 	}
 	inboundPort := listener.Addr().(*net.TCPAddr).Port
 	_ = listener.Close()
 
 	probeConfig, err := buildSingBoxProbeConfig(template, candidateIP, candidatePort, inboundPort)
 	if err != nil {
-		return fmt.Errorf("生成 sing-box 配置失败: %w", err)
+		return metrics, fmt.Errorf("生成 sing-box 配置失败: %w", err)
 	}
 	data, err := json.Marshal(probeConfig)
 	if err != nil {
-		return fmt.Errorf("生成 sing-box 配置失败: %w", err)
+		return metrics, fmt.Errorf("生成 sing-box 配置失败: %w", err)
 	}
 	tempFile, err := os.CreateTemp(filepath.Dir(cfg.TemplatePath), ".vless-probe-*.json")
 	if err != nil {
-		return fmt.Errorf("创建 sing-box 临时配置失败: %w", err)
+		return metrics, fmt.Errorf("创建 sing-box 临时配置失败: %w", err)
 	}
 	tempPath := tempFile.Name()
 	defer os.Remove(tempPath)
 	if err := tempFile.Chmod(0600); err != nil {
 		_ = tempFile.Close()
-		return fmt.Errorf("保护 sing-box 临时配置失败: %w", err)
+		return metrics, fmt.Errorf("保护 sing-box 临时配置失败: %w", err)
 	}
 	if _, err := tempFile.Write(data); err != nil {
 		_ = tempFile.Close()
-		return fmt.Errorf("写入 sing-box 临时配置失败: %w", err)
+		return metrics, fmt.Errorf("写入 sing-box 临时配置失败: %w", err)
 	}
 	closeErr := tempFile.Close()
 	if closeErr != nil {
-		return fmt.Errorf("关闭 sing-box 临时配置失败: %w", closeErr)
+		return metrics, fmt.Errorf("关闭 sing-box 临时配置失败: %w", closeErr)
 	}
 
 	processCtx, stopProcess := context.WithCancel(ctx)
@@ -276,7 +295,7 @@ func probeVLESSCandidate(ctx context.Context, candidateIP string, candidatePort 
 	cmd.Stdout = output
 	cmd.Stderr = output
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("启动 sing-box 失败: %w", err)
+		return metrics, fmt.Errorf("启动 sing-box 失败: %w", err)
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -304,9 +323,9 @@ func probeVLESSCandidate(ctx context.Context, candidateIP string, candidatePort 
 		select {
 		case processErr := <-done:
 			processFinished = true
-			return formatSingBoxExit(processErr, output, template)
+			return metrics, formatSingBoxExit(processErr, output, template)
 		case <-ctx.Done():
-			return errors.New("VLESS 探针启动超时")
+			return metrics, errors.New("VLESS 探针启动超时")
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
@@ -320,19 +339,32 @@ func probeVLESSCandidate(ctx context.Context, candidateIP string, candidatePort 
 	client := &http.Client{Transport: transport}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.TestURL, nil)
 	if err != nil {
-		return fmt.Errorf("创建 VLESS 测试请求失败: %w", err)
+		return metrics, fmt.Errorf("创建 VLESS 测试请求失败: %w", err)
 	}
 	req.Header.Set("User-Agent", "cloudflare-tools-vless-probe")
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("VLESS 数据面请求失败: %w", err)
+		return metrics, fmt.Errorf("VLESS 数据面请求失败: %w", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, cfg.ReadLimit))
-	if resp.StatusCode != cfg.ExpectedStatus {
-		return fmt.Errorf("VLESS 数据面状态码 %d，预期 %d", resp.StatusCode, cfg.ExpectedStatus)
+	started := time.Now()
+	n, readErr := io.Copy(io.Discard, io.LimitReader(resp.Body, cfg.ReadLimit))
+	metrics.Bytes = n
+	metrics.Duration = time.Since(started)
+	if metrics.Duration <= 0 {
+		metrics.Duration = time.Millisecond
 	}
-	return nil
+	metrics.Mbps = float64(n*8) / metrics.Duration.Seconds() / 1_000_000
+	if readErr != nil {
+		return metrics, fmt.Errorf("读取 VLESS 测试响应失败: %w", readErr)
+	}
+	if resp.StatusCode != cfg.ExpectedStatus {
+		return metrics, fmt.Errorf("VLESS 数据面状态码 %d，预期 %d", resp.StatusCode, cfg.ExpectedStatus)
+	}
+	if metrics.Bytes < cfg.MinBytes {
+		return metrics, fmt.Errorf("VLESS 下载数据不足: %d/%d bytes", metrics.Bytes, cfg.MinBytes)
+	}
+	return metrics, nil
 }
 
 func formatSingBoxExit(processErr error, output *logBuffer, template map[string]any) error {

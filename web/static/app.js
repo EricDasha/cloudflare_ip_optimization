@@ -74,7 +74,16 @@ function renderAutoCandidates(snapshot, loadIntoInput = false) {
   $("candidateCount").textContent = snapshot.ips?.length || 0;
   $("activePoolCount").textContent = activeCount;
   $("nextRefresh").textContent = next;
-  $("activePoolIPs").textContent = active.ips?.length ? active.ips.join("  ·  ") : "尚无自动生效池";
+  const activeResults = new Map((active.results || []).map((result) => [result.ip, result]));
+  $("activePoolIPs").textContent = active.ips?.length
+    ? active.ips.map((ip) => {
+        const result = activeResults.get(ip);
+        const metrics = [];
+        if (result?.downloadMbps) metrics.push(`${result.downloadMbps.toFixed(1)} Mbps`);
+        if (result?.dataLatency) metrics.push(`${result.dataLatency} ms`);
+        return metrics.length ? `${ip} (${metrics.join(" · ")})` : ip;
+      }).join("  ·  ")
+    : "尚无自动生效池";
   if (loadIntoInput && snapshot.ips?.length) {
     $("proxyScanIPs").value = snapshot.ips.join("\n");
   }

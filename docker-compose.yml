@@ -41,10 +41,11 @@ services:
       PROXY_AUTO_MAX_LATENCY: "5000"
       PROXY_AUTO_POOL_SIZE: "5"
       PROXY_AUTO_MIN_POOL: "3"
-      PROXY_AUTO_CFDATA: "true"
+      PROXY_AUTO_CFDATA: "false"
       PROXY_AUTO_CFDATA_TIMEOUT: "600"
       PROXY_CFDATA_CANDIDATES: "300"
       PROXY_OFFICIAL_CANDIDATES: "150"
+      PROXY_USER_CANDIDATES: "${PROXY_USER_CANDIDATES:-}"
       # 低占用后台轮测：每 15 分钟取 24 个候选，并发 4；GUI 可关闭并持久化。
       PROXY_BACKGROUND_OPTIMIZER: "true"
 
@@ -55,6 +56,8 @@ services:
       PROXY_VLESS_EXPECT_STATUS: "204"
       PROXY_VLESS_TIMEOUT: "15"
       PROXY_VLESS_MAX_CANDIDATES: "20"
+      PROXY_VLESS_SPEED_BYTES: "1048576"
+      PROXY_VLESS_SPEED_TIMEOUT: "15"
       SING_BOX_BIN: /usr/local/bin/sing-box
     volumes:
       - ./data:/data

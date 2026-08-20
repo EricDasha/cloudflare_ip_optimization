@@ -49,8 +49,8 @@ docker build -f Dockerfile.multistage -t local/cloudflare-tools:multistage .
 2. 选择候选源，按网络情况设置扫描并发、延迟上限和扫描数量。
 3. 点击“开始扫描”，检查 `PASS` 结果与来源错误。
 4. 点击“采用通过 IP”，确认“固定转发 IP”已更新。
-5. 自动池启用 VLESS probe 时，后台会用本地 sing-box 模板请求 `generate_204`；手动扫描仍只负责 TCP/TLS 粗筛。
-6. 只有真实节点返回 `204` 才进入自动池；单纯 TCP/TLS 或 WebSocket `101` 不能证明业务可用。
+5. 自动池启用 VLESS probe 时，后台会用本地 sing-box 模板先请求 `generate_204`，再读取固定大小的下载响应；手动扫描仍只负责 TCP/TLS 粗筛。
+6. 只有真实节点返回 `204` 且下载校验完成才进入自动池；单纯 TCP/TLS 或 WebSocket `101` 不能证明业务可用。
 
 内置候选源：
 
@@ -66,7 +66,7 @@ docker build -f Dockerfile.multistage -t local/cloudflare-tools:multistage .
 
 Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新解析全部内置源。成功结果以原子替换方式写入 `/data/proxy-candidates.json`；刷新失败时保留上一次成功候选。页面会显示上次成功时间、下次刷新时间，并提供“立即拉取候选”和“载入自动候选”。
 
-启用 `PROXY_AUTO_APPLY` 后，后台先用实际 `Host + WebSocket path` 对全部候选并发执行 TLS 与 WebSocket `101 Switching Protocols` 初筛。启用 `PROXY_VLESS_PROBE` 后，再按 WS 延迟从快到慢启动短生命周期 sing-box，以候选 `IP:PROXY_AUTO_PORT` 覆盖模板的服务器地址，并通过真实 VLESS 链路请求 `generate_204`。探针凑满 `PROXY_AUTO_POOL_SIZE` 即停止；只有 VLESS 通过数量达到 `PROXY_AUTO_MIN_POOL` 才替换 `/data/proxy-active.json` 并重启 CFnat。模板、sing-box 或数据面失败均保留旧池。
+启用 `PROXY_AUTO_APPLY` 后，后台先用实际 `Host + WebSocket path` 对全部候选并发执行 TLS 与 WebSocket `101 Switching Protocols` 初筛。启用 `PROXY_VLESS_PROBE` 后，再启动短生命周期 sing-box，以候选 `IP:PROXY_AUTO_PORT` 覆盖模板服务器地址，通过真实 VLESS 链路请求 `generate_204`，随后从 `speed.cloudflare.com` 读取固定大小响应并记录 Mbps。候选按 `official > user > proxy > cfdata` 分层，层内按下载 Mbps 降序、数据面延迟升序排列；下载失败的候选不会进入 active pool。只有最终通过数量达到 `PROXY_AUTO_MIN_POOL` 才替换 `/data/proxy-active.json` 并重启 CFnat。模板、sing-box 或数据面失败均保留旧池。
 
 后台慢速优选默认开启：启动 90 秒后执行首轮，此后每 15 分钟从候选缓存轮转抽取 24 个 IP，以并发 4、单 IP 1500 ms 上限进行初筛；启用 VLESS probe 时仍须通过真实数据面终审。每轮失败保留旧池，且不会与手动扫描或六小时全量维护并发。GUI 开关会写入 `/data/proxy-optimizer.json`，容器重启后保持用户选择。
 
@@ -91,19 +91,19 @@ Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新�
 | `CFNAT_DELAY` | `-delay` | `2000` |
 | `CFNAT_DOMAIN` | `-domain` | `cloudflaremirrors.com/debian` |
 | `CFNAT_FIXED_IPS` | `-fixed` | 空 |
-| `CFNAT_PRIORITY_IPS` | `-priority` | 空；自动池取延迟排序前 2 个 |
+| `CFNAT_PRIORITY_IPS` | `-priority` | 空；仅兼容旧配置，不参与数据面加权 |
 | `CFNAT_IPNUM` | `-ipnum` | `20` |
 | `CFNAT_IPS` | `-ips` | `4` |
-| `CFNAT_NUM` | `-num` | `5` |
+| `CFNAT_NUM` | `-num` | `1` |
 | `CFNAT_PORT` | `-port` | `443` |
 | `CFNAT_RANDOM` | `-random` | `true` |
 | `CFNAT_TASK` | `-task` | `100` |
 | `CFNAT_TLS` | `-tls` | `true` |
 | `CFNAT_CODE` | `-code` | `200` |
 
-启用固定转发 IP 池后，CFnat 会按新连接轮询池中的 IP。`CFNAT_NUM` 表示单个连接并发尝试的连续轮询目标数；设为 `1` 时每个连接只使用一个 IP，设为更大值时会在首个目标建连成功后立即开始转发，并取消其余拨号，不会等待慢 IP 超时。
+启用固定转发 IP 池后，CFnat 只在新 TCP 连接建立时按顺序轮换池中的 IP；一个前端连接从拨号到关闭始终绑定同一个上游，不会在数据面并发竞速，也不会主动连接自身监听口做协议健康检查。`CFNAT_NUM` 仅表示拨号失败后的顺序回退数量，建议保持 `1`，避免 EdgeTunnel/GrainTCP 的空连接与多上游竞速干扰真实 VLESS/WS 会话。
 
-优先 IP 以 3 倍有限权重加入新连接轮询，其余 IP 仍会稳定轮到，避免最快节点被永久独占。这里的“优先”依据后台实测排序，不识别应用流量类型；如需严格按业务分流，应在 v2rayN/Mihomo 路由层按域名或进程配置。
+`CFNAT_PRIORITY_IPS` 仅为兼容旧配置保留，不再在数据面重复加权；这样 active pool 才是严格 IP 轮换。候选控制面按 `official > user > proxy > cfdata` 保留来源顺序，但任何来源都必须先通过真实 Host/SNI/WebSocket/VLESS 验证才可进入 active pool。
 
 自动候选池相关变量：
 
@@ -121,6 +121,7 @@ Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新�
 | `PROXY_AUTO_CFDATA_TIMEOUT` | CFdata 最长运行秒数 | `600` |
 | `PROXY_CFDATA_CANDIDATES` | 从 `ip.csv` 读取的候选上限 | `300` |
 | `PROXY_OFFICIAL_CANDIDATES` | 从 Cloudflare 官方 CIDR 均匀抽样的候选数 | `150` |
+| `PROXY_USER_CANDIDATES` | 用户指定的公网 IPv4，逗号或空白分隔 | 空 |
 | `PROXY_BACKGROUND_OPTIMIZER` | 是否启用低占用后台轮转优选；GUI 可覆盖并持久化 | `true` |
 | `PROXY_VLESS_PROBE` | 是否在 WS 初筛后运行真实 VLESS 数据面终审 | `false` |
 | `PROXY_VLESS_TEMPLATE` | 本地 VLESS outbound 或完整 sing-box 配置 | `/data/vless-probe-outbound.json` |
@@ -128,6 +129,8 @@ Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新�
 | `PROXY_VLESS_EXPECT_STATUS` | 数据面成功状态码 | `204` |
 | `PROXY_VLESS_TIMEOUT` | 每个 VLESS probe 超时，秒 | `15` |
 | `PROXY_VLESS_MAX_CANDIDATES` | 每轮最多执行真实 VLESS probe 的候选数 | `20` |
+| `PROXY_VLESS_SPEED_BYTES` | 每个通过节点的下载测速字节数，64 KiB-8 MiB | `1048576` |
+| `PROXY_VLESS_SPEED_TIMEOUT` | 每个下载测速超时，秒 | `15` |
 | `SING_BOX_BIN` | sing-box 二进制路径 | `/usr/local/bin/sing-box` |
 
 ## IP 列表获取方式
@@ -145,7 +148,7 @@ Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新�
 
 所以联网正常时无需把作者包里的 IP 列表强行塞进镜像；需要离线运行时再预置到 `./data` 即可。
 
-注意：本地 `ips-v4.txt` 当前是数千个 `/24` 的广义 CDN/合作网络候选，不等同于 Cloudflare 官方公布的 15 个 IPv4 CIDR。自动维护会分别使用三类输入：社区 ProxyIP DNS、CFdata 已扫描的 `ip.csv`、`https://www.cloudflare.com/ips-v4` 官方段抽样；三者最终都必须通过实际 Host + WebSocket path 的 `101` 初筛，并在启用 VLESS probe 时完成真实数据面终审。
+注意：本地 `ips-v4.txt` 当前是数千个 `/24` 的广义 CDN/合作网络候选，不等同于 Cloudflare 官方公布的 15 个 IPv4 CIDR。自动维护会分别使用四类输入：在线 Cloudflare 官方段（不可达时回退到镜像内置的官方 CIDR snapshot）、用户输入、社区 ProxyIP DNS、CFdata 已扫描的 `ip.csv`；四者最终都必须通过实际 Host + WebSocket path 的 `101` 初筛，并在启用 VLESS probe 时完成真实数据面终审。内置 snapshot 只解决官方列表获取失败，不绕过业务验证。
 
 ## 日志上限
 
