@@ -445,6 +445,7 @@ func main() {
 	mux.HandleFunc("/api/cfnat/stop", a.handleCFnatStop)
 	mux.HandleFunc("/api/cfnat/proxy-scan", a.handleProxyScan)
 	mux.HandleFunc("/api/cfnat/proxy-candidates", a.handleProxyCandidates)
+	mux.HandleFunc("/api/cfnat/connections", a.handleCFnatConnections)
 	mux.HandleFunc("/api/cfnat/background-optimizer", a.handleBackgroundOptimizer)
 	mux.HandleFunc("/api/cfdata/run", a.handleCFdataRun)
 	mux.HandleFunc("/api/cfdata/stop", a.handleCFdataStop)

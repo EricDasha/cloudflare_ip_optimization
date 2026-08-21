@@ -107,6 +107,10 @@ $("quickRunCfdata").addEventListener("click", async () => {
 });
 
 $("refreshBtn").addEventListener("click", () => withButton($("refreshBtn"), "", refreshAll));
+$("refreshCfnatConnections").addEventListener("click", async () => {
+  try { await withButton($("refreshCfnatConnections"), "读取中", refreshCfnatConnections); }
+  catch (e) { toast(`连接读取失败：${e.message}`); }
+});
 $("refreshBtnCfdata").addEventListener("click", () => {
   refreshStatus();
   refreshCfdataResults();

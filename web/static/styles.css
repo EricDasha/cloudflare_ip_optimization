@@ -460,6 +460,8 @@ select[multiple] { min-height: 96px; padding: var(--s2); }
   border-radius: var(--radius);
   background: var(--surface);
 }
+.cfnat-connections-panel { margin-top: var(--s4); }
+.cfnat-connections-panel .table-wrap { max-height: 280px; overflow: auto; }
 .runtime-strip > div:first-child { display: grid; grid-template-columns: auto auto; align-items: center; column-gap: var(--s2); }
 .runtime-strip small { grid-column: 2; margin-top: 3px; color: var(--text-3); }
 

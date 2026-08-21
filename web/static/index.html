@@ -116,6 +116,10 @@
               <button class="button primary" id="startCfnat" type="button">↻ 启动 / 重启</button>
             </div>
           </section>
+          <section class="panel cfnat-connections-panel">
+            <div class="section-title split-title"><div><p class="overline">CONNECTIONS</p><h2>局域网连接</h2><p class="inline-status" id="cfnatConnectionsSummary">点击刷新查看当前连接 CFnat 的局域网 IP</p></div><button class="button secondary" id="refreshCfnatConnections" type="button">刷新连接</button></div>
+            <div class="table-wrap"><table><thead><tr><th>局域网 IP</th><th>连接数</th><th>TCP 状态</th></tr></thead><tbody id="cfnatConnectionsBody"><tr><td colspan="3" class="inline-status">尚未查询</td></tr></tbody></table></div>
+          </section>
           <section class="panel" id="cfnat">
             <div class="section-title"><div><p class="overline">FORWARDING</p><h2>转发配置</h2></div></div>
             <div class="form-grid compact-form">

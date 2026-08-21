@@ -181,6 +181,29 @@ async function refreshStatus() {
   return st;
 }
 
+async function refreshCfnatConnections() {
+  const data = await api("/api/cfnat/connections");
+  const body = $("cfnatConnectionsBody");
+  const summary = $("cfnatConnectionsSummary");
+  if (!body || !summary) return data;
+  const sources = Array.isArray(data.sources) ? data.sources : [];
+  summary.textContent = data.error ? `读取失败：${data.error}` : `端口 ${data.port} · ${data.total} 条连接 · ${data.updatedAt ? new Date(data.updatedAt).toLocaleString() : "刚刚"}`;
+  body.replaceChildren();
+  if (!sources.length) { const row = document.createElement("tr"); const cell = document.createElement("td"); cell.colSpan = 3; cell.className = "inline-status"; cell.textContent = "当前未发现局域网连接"; row.append(cell); body.append(row); return data; }
+  for (const source of sources) {
+    const row = document.createElement("tr");
+    const states = Object.entries(source.states || {}).map(([state, count]) => `${state} × ${count}`).join(" · ");
+    for (const [value, className] of [[source.ip || "--", "mono"], [source.connections || 0, ""], [states || "--", ""]]) {
+      const cell = document.createElement("td");
+      cell.textContent = String(value);
+      if (className) cell.className = className;
+      row.append(cell);
+    }
+    body.append(row);
+  }
+  return data;
+}
+
 function renderQualityScheduler(status) {
   const summary = $("qualitySchedulerSummary");
   const mode = $("qualitySchedulerMode");
