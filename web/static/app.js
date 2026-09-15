@@ -6,6 +6,7 @@ function cfnatPayload() {
     delay: number("natDelay"),
     domain: $("natDomain").value.trim(),
     fixed: $("natFixedIPs").value.trim(),
+    fallback: $("natFallback")?.value.trim() || "",
     priority: $("natPriorityIPs").value.trim(),
     ipnum: number("natIPNum"),
     ips: $("natIPs").value,
@@ -85,7 +86,7 @@ function renderAutoCandidates(snapshot, loadIntoInput = false) {
       }).join("  ·  ")
     : "";
   const domainText = active.domains?.length
-    ? active.domains.map((domain) => `${domain} (域名直连)`).join("  ·  ")
+    ? active.domains.map((domain) => `${domain} (兜底域名)`).join("  ·  ")
     : "";
   $("activePoolIPs").textContent = [ipText, domainText].filter(Boolean).join("  ·  ") || "尚无自动生效池";
   if (loadIntoInput && snapshot.ips?.length) {
@@ -533,6 +534,7 @@ async function loadDefaults() {
   $("natCode").value = n.code;
   $("natDomain").value = n.domain;
   $("natFixedIPs").value = n.fixed || "";
+  $("natFallback").value = n.fallback || "";
   $("natPriorityIPs").value = n.priority || "";
   $("natDelay").value = n.delay;
   $("natIPNum").value = n.ipnum;
@@ -603,4 +605,90 @@ async function runCFdata() {
   await api("/api/cfdata/run", { method: "POST", body: JSON.stringify(cfdataPayload()) });
   $("logTarget").value = "cfdata";
   await refreshAll();
+}
+
+// ---- 优选域名管控 ----
+let preferredDomainsState = { all: [], enabled: new Set(), status: {}, lastProbe: null, lastError: "" };
+
+async function loadPreferredDomains() {
+  const data = await api("/api/cfnat/preferred");
+  preferredDomainsState = {
+    all: data.all || [],
+    enabled: new Set(data.enabled || []),
+    status: data.status || {},
+    lastProbe: data.lastProbe || null,
+    lastError: data.lastError || "",
+  };
+  renderPreferredDomains();
+  return data;
+}
+
+function preferredDomainBadge(domain) {
+  const st = preferredDomainsState.status[domain];
+  if (!st || !st.stage) return "未测";
+  if (st.stage === "WS_PASS") return `${st.latency || 0} ms`;
+  if (st.stage === "WS_FAIL") return "WS 失败";
+  if (st.stage === "RESOLVE_FAIL") return "DNS 失败";
+  return st.stage;
+}
+
+function renderPreferredDomains() {
+  const grid = $("preferredDomainsGrid");
+  const summary = $("preferredDomainsStatus");
+  if (!grid || !summary) return;
+  const { all, enabled, status, lastProbe, lastError } = preferredDomainsState;
+  const passed = all.filter((d) => (status[d]?.stage === "WS_PASS")).length;
+  const probeText = lastProbe ? new Date(lastProbe).toLocaleString() : "尚未慢测";
+  summary.textContent = `${enabled.size}/${all.length} 已启用 · WS 通过 ${passed} 个 · ${probeText}${lastError ? ` · ${lastError}` : ""}`;
+  grid.replaceChildren();
+  const frag = document.createDocumentFragment();
+  for (const domain of all) {
+    const label = document.createElement("label");
+    label.title = preferredDomainBadge(domain);
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = enabled.has(domain);
+    input.addEventListener("change", async (event) => {
+      const checked = event.target.checked;
+      if (checked) enabled.add(domain); else enabled.delete(domain);
+      try {
+        await savePreferredDomains();
+        renderPreferredDomains();
+        toast(checked ? `已启用 ${domain}` : `已停用 ${domain}`);
+      } catch (e) {
+        if (checked) enabled.delete(domain); else enabled.add(domain);
+        event.target.checked = enabled.has(domain);
+        toast(`保存失败：${e.message}`);
+      }
+    });
+    const span = document.createElement("span");
+    span.textContent = `${domain} · ${preferredDomainBadge(domain)}`;
+    label.append(input, span);
+    frag.append(label);
+  }
+  grid.append(frag);
+}
+
+async function savePreferredDomains() {
+  return api("/api/cfnat/preferred", {
+    method: "POST",
+    body: JSON.stringify({ enabled: Array.from(preferredDomainsState.enabled) }),
+  });
+}
+
+async function setAllPreferredDomains(enabled) {
+  preferredDomainsState.enabled = new Set(enabled ? preferredDomainsState.all : []);
+  await savePreferredDomains();
+  renderPreferredDomains();
+  toast(enabled ? "已启用全部优选域名" : "已关闭全部优选域名");
+}
+
+async function pushCfdataCandidates() {
+  const dataCenter = ($("cfdataPushDC")?.value || "").trim();
+  const data = await api("/api/cfdata/push-candidates", {
+    method: "POST",
+    body: JSON.stringify({ dataCenter, limit: 300 }),
+  });
+  toast(`已推送 ${data.pushed} 个候选 IP${dataCenter ? `（${dataCenter}）` : ""}`);
+  await loadAutoCandidates(false);
 }

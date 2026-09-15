@@ -182,6 +182,7 @@ window.addEventListener("popstate", () => applyRoute());
 
 loadDefaults().then(() => {
   updateProxySourceSummary();
+  loadPreferredDomains();
   const workspaceFromHash = window.location.hash === "#candidates" ? "candidateWorkspace" : null;
   activateWorkspace(workspaceFromHash || sessionStorage.getItem("cfnatWorkspace") || "forwardWorkspace");
   applyRoute();
@@ -195,3 +196,10 @@ setInterval(refreshStatus, 3000);
 setInterval(refreshLogs, 2500);
 setInterval(refreshFiles, 12000);
 setInterval(refreshCfdataResults, 12000);
+// 优选域名与 cfdata 推送事件
+try {
+  $("preferredDomainsRefresh").addEventListener("click", async () => { try { await withButton($("preferredDomainsRefresh"), "正在刷新", loadPreferredDomains); toast("优选域名已刷新"); } catch (e) { toast(`刷新失败：${e.message}`); } });
+  $("preferredDomainsEnableAll").addEventListener("click", async () => { try { await withButton($("preferredDomainsEnableAll"), "正在保存", () => setAllPreferredDomains(true)); } catch (e) { toast(`保存失败：${e.message}`); } });
+  $("preferredDomainsClearAll").addEventListener("click", async () => { try { await withButton($("preferredDomainsClearAll"), "正在保存", () => setAllPreferredDomains(false)); } catch (e) { toast(`保存失败：${e.message}`); } });
+  $("pushCfdataCandidates").addEventListener("click", async () => { try { await withButton($("pushCfdataCandidates"), "正在推送", pushCfdataCandidates); } catch (e) { toast(`推送失败：${e.message}`); } });
+} catch (_) {}

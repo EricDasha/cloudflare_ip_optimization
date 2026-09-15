@@ -50,7 +50,7 @@ func TestExtractPublicIPv4FromTextAndBase64(t *testing.T) {
 }
 
 func TestThirdPartyProxySourcesAreHTTPSAllowlisted(t *testing.T) {
-	for _, id := range []string{"cmliussss-proxyip", "090227"} {
+	for _, id := range []string{"090227"} {
 		source, ok := proxyCandidateSources[id]
 		if !ok {
 			t.Fatalf("missing source %q", id)
@@ -64,9 +64,45 @@ func TestThirdPartyProxySourcesAreHTTPSAllowlisted(t *testing.T) {
 	if _, ok := proxyCandidateSources["third-party-subscriptions"]; ok {
 		t.Fatal("subscription converter frontends must not be automatic candidate sources")
 	}
+	// 社区候选源已停用：IP 来源改为「用户输入 + 订阅 + CFdata 筛选推送 + 优选域名」。
+	for _, disabled := range []string{"zhaobo", "william", "euorg", "cmliussss-proxyip"} {
+		if _, ok := proxyCandidateSources[disabled]; ok {
+			t.Fatalf("community candidate source %q must be disabled", disabled)
+		}
+	}
 	source := proxyCandidateSources["090227"]
 	if len(source.Domains) < 10 || len(source.URLs) != 4 {
 		t.Fatalf("090227 source was not expanded: %#v", source)
+	}
+}
+
+func TestEnabledPreferredDomainsDefaultsToAllImported(t *testing.T) {
+	a := &app{dataDir: t.TempDir()}
+	a.loadPreferredSettings()
+	all := a.importedPreferredDomains()
+	enabled := a.enabledPreferredDomains()
+	if len(all) == 0 {
+		t.Fatal("no imported preferred domains defined")
+	}
+	if !reflect.DeepEqual(all, enabled) {
+		t.Fatalf("default enabled = %d, want all imported %d", len(enabled), len(all))
+	}
+}
+
+func TestPreferredSettingsPersistEnableSubset(t *testing.T) {
+	a := &app{dataDir: t.TempDir()}
+	a.loadPreferredSettings()
+	all := a.importedPreferredDomains()
+	a.preferredMu.Lock()
+	a.preferredEnabled = map[string]bool{all[0]: true}
+	_ = a.savePreferredSettingsLocked()
+	a.preferredMu.Unlock()
+
+	b := &app{dataDir: a.dataDir}
+	b.loadPreferredSettings()
+	enabled := b.enabledPreferredDomains()
+	if len(enabled) != 1 || enabled[0] != all[0] {
+		t.Fatalf("restored enabled = %v, want only %s", enabled, all[0])
 	}
 }
 

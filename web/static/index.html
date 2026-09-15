@@ -125,6 +125,7 @@
             <div class="form-grid compact-form">
               <label>本地监听<input id="natAddr" value="0.0.0.0:1234" /></label>
               <label>固定转发目标 (IP/域名)<input id="natFixedIPs" placeholder="IP 或优选域名，逗号分隔" /></label>
+              <label>兜底域名<small>主池拨号失败才尝试，逗号分隔</small><input id="natFallback" placeholder="youxuan.cf.090227.xyz,www.visa.cn" /></label>
               <label>检测域名<input id="natDomain" value="cloudflaremirrors.com/debian" /></label>
               <label>目标端口<input id="natPort" type="number" value="443" min="1" max="65535" /></label>
             </div>
@@ -156,6 +157,22 @@
                 <button class="button primary" id="loadAutoCandidates" type="button">↓ 载入候选</button>
               </div>
             </div>
+            <section class="panel" id="preferredDomainsPanel">
+              <div class="section-title split-title">
+                <div><p class="overline">PREFERRED DOMAINS</p><h2>优选域名</h2><p class="inline-status" id="preferredDomainsStatus">正在加载...</p></div>
+                <div class="actions">
+                  <button class="button secondary" id="preferredDomainsRefresh" type="button">↻ 刷新状态</button>
+                  <button class="button secondary" id="preferredDomainsEnableAll" type="button">全部开启</button>
+                  <button class="button secondary" id="preferredDomainsClearAll" type="button">全部关闭</button>
+                </div>
+              </div>
+              <div id="preferredDomainsGrid" class="source-grid"></div>
+            </section>
+            <div class="priority-strip" aria-label="优先级">
+              <span class="priority-tag tier-1">① 手动采用 <b>立即替换生效池</b></span>
+              <span class="priority-tag tier-2">② 候选池推送 <b>后台慢测更优才上</b></span>
+              <span class="priority-tag tier-3">③ 优选域名兜底 <b>主池拨号失败才试</b></span>
+            </div>
             <div class="optimizer-strip">
               <div><strong>后台慢速优选</strong><span id="backgroundOptimizerStatus">每 15 分钟轮测 24 个候选，并发 4</span></div>
               <label class="switch-control"><input id="backgroundOptimizerEnabled" type="checkbox" checked /><span aria-hidden="true"></span><b>自动运行</b></label>
@@ -173,7 +190,9 @@
             <details class="advanced scan-workflow" open>
               <summary>自定义扫描 <span>选择候选，再设置验活规则</span></summary>
               <div class="workflow-section">
-                <div class="workflow-heading"><span class="step-index">1</span><div><h3>候选输入</h3><p>社区源、手动 IP 和订阅内容会合并去重。</p></div></div>
+                <div class="workflow-heading"><span class="step-index">1</span><div><h3>候选输入</h3><p>仅支持手动 IP 与订阅内容解析。</p></div></div>
+                <!-- 社区候选源已停用；只保留手动 IPv4 与订阅内容 -->
+                <!--
                 <fieldset class="source-fieldset" aria-describedby="proxySourceHint"><legend>社区候选源</legend>
                   <div class="source-grid" id="proxyScanSources">
                     <label><input type="checkbox" value="zhaobo" checked /><span>Zhaobo 聚合池</span></label>
@@ -185,6 +204,7 @@
                   </div>
                   <div class="source-footer"><span class="field-hint" id="proxySourceHint">已选择 3 个社区源。</span><span class="source-actions"><button type="button" class="button ghost small-button" id="selectAllProxySources">全选</button><button type="button" class="button ghost small-button" id="clearProxySources">清空</button></span></div>
                 </fieldset>
+                -->
                 <div class="form-grid input-pair">
                   <label>手动 IPv4<textarea id="proxyScanIPs" rows="5" placeholder="每行或逗号分隔；没有可留空"></textarea></label>
                   <label>订阅内容<textarea id="proxyScanSubscription" rows="5" placeholder="VLESS / Trojan / SS / VMess 或 Clash；没有可留空"></textarea></label>
@@ -202,7 +222,7 @@
               </div>
               </div>
               <div class="workflow-section workflow-result">
-                <div class="workflow-heading result-heading"><span class="step-index">3</span><div><h3>执行与结果</h3><p id="proxyScanSummary" class="inline-status" aria-live="polite">尚未扫描</p></div><div class="actions"><button class="button secondary" id="useProxyScanResults" type="button" disabled>采用通过 IP</button><button class="button primary" id="runProxyScan" type="button">▶ 开始扫描</button></div></div>
+                <div class="workflow-heading result-heading"><span class="step-index">3</span><div><h3>执行与结果</h3><p id="proxyScanSummary" class="inline-status" aria-live="polite">尚未扫描</p></div><div class="actions"><button class="button secondary" id="useProxyScanResults" type="button" disabled>采用为生效池（最高优先）</button><button class="button primary" id="runProxyScan" type="button">▶ 开始扫描</button></div></div>
               <pre id="proxyScanResults" class="result-console">等待扫描结果...</pre>
               </div>
             </details>
@@ -238,7 +258,10 @@
           <section class="results-surface" id="cfdata-results">
             <div class="section-title split-title">
               <div><p class="overline">RESULTS</p><h2>扫描结果</h2><p class="inline-status" id="ipSourceHint">正在读取来源...</p></div>
-              <div class="actions"><select id="detailFileSelect" title="详细结果文件"></select><button class="button secondary" id="refreshCfdataResults" type="button">↻ 刷新</button></div>
+              <div class="actions"><select id="detailFileSelect" title="详细结果文件"></select><button class="button secondary" id="refreshCfdataResults" type="button">↻ 刷新</button>
+                <input id="cfdataPushDC" type="text" placeholder="数据中心筛选（可选）" aria-label="筛选数据中心推送" />
+                <button class="button primary" id="pushCfdataCandidates" type="button">推送候选池</button>
+                </div>
             </div>
             <div class="tabs" role="tablist">
               <button class="tab active" data-panel="dcPanel" type="button">数据中心 <span id="dcCount" class="badge">0</span></button>

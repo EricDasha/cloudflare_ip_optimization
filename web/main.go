@@ -42,6 +42,7 @@ const (
 	preferredDomainSourceURL      = "https://cf.090227.xyz/"
 	maxPreferredDomains           = 64
 	maxForwardDomains             = 12
+	preferredSettingsFile         = "proxy-preferred.json"
 )
 
 // preferredDomainPattern 匹配 090227 优选目录页面中服务端渲染的域名卡片。
@@ -65,6 +66,23 @@ type app struct {
 	optimizerLastRun   time.Time
 	optimizerLastError string
 	quality            *qualitySchedulerRuntime
+	preferredMu        sync.Mutex
+	preferredEnabled   map[string]bool
+	preferredLastProbe time.Time
+	preferredLastError string
+	preferredStatus    map[string]preferredDomainStatus
+}
+
+// preferredDomainStatus 是单个优选域名的慢测快照，供 GUI 展示。
+type preferredDomainStatus struct {
+	Domain    string    `json:"domain"`
+	Enabled   bool      `json:"enabled"`
+	IPs       []string  `json:"ips,omitempty"`
+	Latency   int64     `json:"latency,omitempty"`
+	Mbps      float64   `json:"mbps,omitempty"`
+	Stage     string    `json:"stage,omitempty"`
+	LastProbe time.Time `json:"lastProbe,omitempty"`
+	LastError string    `json:"lastError,omitempty"`
 }
 
 type managedProcess struct {
@@ -436,6 +454,7 @@ func main() {
 	a.loadProxyCandidateCache()
 	a.loadProxyActivePool()
 	a.loadOptimizerSettings()
+	a.loadPreferredSettings()
 	a.quality = newQualitySchedulerRuntime(a.dataDir)
 	if pool := a.proxyActivePoolSnapshot(); len(pool.IPs) > 0 {
 		a.quality.seedActive(pool.IPs[0], pool.UpdatedAt)
@@ -450,6 +469,7 @@ func main() {
 	}
 	go a.runProxyCandidateRefreshLoop()
 	go a.runBackgroundOptimizerLoop()
+	go a.runPreferredDomainProbeLoop()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", a.handleHealth)
@@ -462,11 +482,13 @@ func main() {
 	mux.HandleFunc("/api/cfnat/connections", a.handleCFnatConnections)
 	mux.HandleFunc("/api/cfnat/background-optimizer", a.handleBackgroundOptimizer)
 	mux.HandleFunc("/api/cfnat/proxy-scan/apply", a.handleProxyScanApply)
+	mux.HandleFunc("/api/cfnat/preferred", a.handlePreferredDomains)
 	mux.HandleFunc("/api/cfdata/run", a.handleCFdataRun)
 	mux.HandleFunc("/api/cfdata/stop", a.handleCFdataStop)
 	mux.HandleFunc("/api/cfdata/results", a.handleCFdataResults)
 	mux.HandleFunc("/api/cfdata/detail", a.handleCFdataDetail)
 	mux.HandleFunc("/api/cfdata/speed", a.handleCFdataSpeed)
+	mux.HandleFunc("/api/cfdata/push-candidates", a.handleCFdataPushCandidates)
 	mux.HandleFunc("/api/logs", a.handleLogs)
 	mux.HandleFunc("/api/files", a.handleFiles)
 	mux.HandleFunc("/api/file/", a.handleFileDownload)
@@ -542,23 +564,24 @@ func defaultProxyAutoConfig() proxyAutoConfig {
 }
 
 var proxyCandidateSources = map[string]proxyCandidateSource{
-	"zhaobo": {Name: "Zhaobo 聚合池", Domains: []string{"proxyip.zhaobo.org"}},
-	"william": {
-		Name:    "William 台湾/韩国",
-		Domains: []string{"tw.william.us.ci", "kr.william.us.ci"},
-	},
-	"euorg": {Name: "EU.org 社区池", Domains: []string{"cdn.xn--b6gac.eu.org"}},
-	"cmliussss-proxyip": {
-		Name: "CMLiussss ProxyIP",
-		Domains: []string{
-			"ProxyIP.CMLiussss.net", "ProxyIP.HK.CMLiussss.net", "ProxyIP.SG.CMLiussss.net",
-			"ProxyIP.JP.CMLiussss.net", "ProxyIP.KR.CMLiussss.net", "ProxyIP.IN.CMLiussss.net",
-			"ProxyIP.GB.CMLiussss.net", "ProxyIP.FR.CMLiussss.net", "ProxyIP.DE.CMLiussss.net",
-			"ProxyIP.NL.CMLiussss.net", "ProxyIP.SE.CMLiussss.net", "ProxyIP.FI.CMLiussss.net",
-			"ProxyIP.PL.CMLiussss.net", "ProxyIP.RU.CMLiussss.net", "ProxyIP.CH.CMLiussss.net",
-			"ProxyIP.LV.CMLiussss.net", "ProxyIP.US.CMLiussss.net", "ProxyIP.CA.CMLiussss.net",
-		},
-	},
+	// 社区候选源已停用：IP 来源改为「用户输入 + 订阅 + CFdata 筛选推送 + 优选域名」。
+	// "zhaobo": {Name: "Zhaobo 聚合池", Domains: []string{"proxyip.zhaobo.org"}},
+	// "william": {
+	// 	Name:    "William 台湾/韩国",
+	// 	Domains: []string{"tw.william.us.ci", "kr.william.us.ci"},
+	// },
+	// "euorg": {Name: "EU.org 社区池", Domains: []string{"cdn.xn--b6gac.eu.org"}},
+	// "cmliussss-proxyip": {
+	// 	Name: "CMLiussss ProxyIP",
+	// 	Domains: []string{
+	// 		"ProxyIP.CMLiussss.net", "ProxyIP.HK.CMLiussss.net", "ProxyIP.SG.CMLiussss.net",
+	// 		"ProxyIP.JP.CMLiussss.net", "ProxyIP.KR.CMLiussss.net", "ProxyIP.IN.CMLiussss.net",
+	// 		"ProxyIP.GB.CMLiussss.net", "ProxyIP.FR.CMLiussss.net", "ProxyIP.DE.CMLiussss.net",
+	// 		"ProxyIP.NL.CMLiussss.net", "ProxyIP.SE.CMLiussss.net", "ProxyIP.FI.CMLiussss.net",
+	// 		"ProxyIP.PL.CMLiussss.net", "ProxyIP.RU.CMLiussss.net", "ProxyIP.CH.CMLiussss.net",
+	// 		"ProxyIP.LV.CMLiussss.net", "ProxyIP.US.CMLiussss.net", "ProxyIP.CA.CMLiussss.net",
+	// 	},
+	// },
 	"090227": {
 		Name: "090227 优选域名与 API",
 		Domains: []string{
@@ -579,7 +602,8 @@ var proxyCandidateSources = map[string]proxyCandidateSource{
 }
 
 var defaultProxyCandidateSourceIDs = []string{
-	"zhaobo", "william", "euorg", "cmliussss-proxyip", "090227",
+	// 社区候选源已停用；自动刷新只保留 090227 优选目录 API/域名。
+	"090227",
 }
 
 func (a *app) runProxyCandidateRefreshLoop() {
@@ -1271,7 +1295,6 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 	defer a.refreshMu.Unlock()
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
-	var preferredDomains []string
 	resolved := make([]string, 0, 1000)
 	sourceByIP := make(map[string]string)
 	sourceErrors := []string{}
@@ -1313,7 +1336,8 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 	}
 	appendGroup("proxy", community)
 	// v2rayn 导出的固定优选域名：作为 Proxy 层候选（IP 快照），走同一终审。
-	appendGroup("proxy", resolvePreferredDomains(ctx, a.importedPreferredDomains(), 1000-len(resolved)))
+	// 只解析用户当前启用的优选域名（默认全部启用；用户可在 GUI 勾选开关）。
+	appendGroup("proxy", resolvePreferredDomains(ctx, a.enabledPreferredDomains(), 1000-len(resolved)))
 	// 动态发现 090227 优选目录的当前优选域名（额外页面抓取）：
 	// 默认关闭，因为候选已由 1.txt 导入域名覆盖；仅当 PROXY_DYNAMIC_DISCOVERY=true 时补充。
 	if envBool("PROXY_DYNAMIC_DISCOVERY", false) {
@@ -1321,7 +1345,6 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 		if preferredErr != nil {
 			sourceErrors = append(sourceErrors, "090227 优选域名动态发现: "+preferredErr.Error())
 		}
-		preferredDomains = discovered
 		if len(discovered) > 0 {
 			domainIPs := resolvePreferredDomains(ctx, discovered, 1000-len(resolved))
 			appendGroup("proxy", domainIPs)
@@ -1376,7 +1399,7 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 		Sources:          []string{"official", "user", "proxy", "cfdata"},
 		IPs:              ips,
 		SourceByIP:       sourceByIP,
-		PreferredDomains: preferredDomains,
+		PreferredDomains: a.enabledPreferredDomains(),
 		Errors:           sourceErrors,
 	}
 	a.candidateMu.Lock()
@@ -1666,23 +1689,11 @@ func (a *app) handleProxyScan(w http.ResponseWriter, r *http.Request) {
 	for _, raw := range resolveSubscriptionHostnames(r.Context(), extractSubscriptionHostnames(cfg.Subscription), cfg.Limit-len(ips)) {
 		addIP(raw)
 	}
-	resolved, sourceErrors, err := resolveProxySources(r.Context(), cfg.Sources, cfg.Limit-len(ips))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	for _, ip := range resolved {
-		addIP(ip)
-	}
-	if len(cfg.Sources) > 0 {
-		for _, id := range cfg.Sources {
-			if id == "preferred-imported" {
-				for _, raw := range resolvePreferredDomains(r.Context(), a.importedPreferredDomains(), cfg.Limit-len(ips)) {
-					addIP(raw)
-				}
-			}
-		}
-	}
+	// 社区候选源已停用：手动扫描只解析用户输入的 IP 与订阅内容。
+	// resolved, sourceErrors, err := resolveProxySources(r.Context(), cfg.Sources, cfg.Limit-len(ips))
+	// if err != nil { http.Error(w, err.Error(), http.StatusBadRequest); return }
+	// for _, ip := range resolved { addIP(ip) }
+	sourceErrors := []string{}
 	if len(ips) == 0 {
 		http.Error(w, "未提供有效 IPv4 地址", http.StatusBadRequest)
 		return
@@ -1738,19 +1749,9 @@ func (a *app) handleProxyScanApply(w http.ResponseWriter, r *http.Request) {
 	for _, raw := range resolveSubscriptionHostnames(r.Context(), extractSubscriptionHostnames(cfg.Subscription), cfg.Limit-len(ips)) {
 		addIP(raw)
 	}
-	resolved, _, _ := resolveProxySources(r.Context(), cfg.Sources, cfg.Limit-len(ips))
-	for _, ip := range resolved {
-		addIP(ip)
-	}
-	if len(cfg.Sources) > 0 {
-		for _, id := range cfg.Sources {
-			if id == "preferred-imported" {
-				for _, raw := range resolvePreferredDomains(r.Context(), a.importedPreferredDomains(), cfg.Limit-len(ips)) {
-					addIP(raw)
-				}
-			}
-		}
-	}
+	// 社区候选源已停用：手动扫描只解析用户输入的 IP 与订阅内容。
+	// resolved, _, _ := resolveProxySources(r.Context(), cfg.Sources, cfg.Limit-len(ips))
+	// for _, ip := range resolved { addIP(ip) }
 	results := scanProxyIPs(r.Context(), ips, cfg)
 	passed := make([]string, 0)
 	for _, result := range results {
