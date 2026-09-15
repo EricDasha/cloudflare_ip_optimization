@@ -3,7 +3,11 @@
 /dist/
 /cfdata/
 /.code-abyss/
+/.codex-tmp/
 *.exe
+
+# IDE session history with live credentials; never track
+/history.txt
 
 # Runtime state and scan output
 /data/
