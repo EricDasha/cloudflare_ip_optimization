@@ -25,17 +25,18 @@ document.querySelectorAll("[data-workspace]").forEach((tab) => {
   tab.addEventListener("click", () => activateWorkspace(tab.dataset.workspace));
 });
 
-$("proxyScanSources").addEventListener("change", updateProxySourceSummary);
-$("selectAllProxySources").addEventListener("click", () => {
-  $("proxyScanSources").querySelectorAll("input").forEach((input) => { input.checked = true; });
+// 社区候选源已停用，元素可能不存在：统一用安全绑定，避免空引用中断整个脚本。
+$("proxyScanSources")?.addEventListener("change", updateProxySourceSummary);
+$("selectAllProxySources")?.addEventListener("click", () => {
+  $("proxyScanSources")?.querySelectorAll("input").forEach((input) => { input.checked = true; });
   updateProxySourceSummary();
 });
-$("clearProxySources").addEventListener("click", () => {
-  $("proxyScanSources").querySelectorAll("input").forEach((input) => { input.checked = false; });
+$("clearProxySources")?.addEventListener("click", () => {
+  $("proxyScanSources")?.querySelectorAll("input").forEach((input) => { input.checked = false; });
   updateProxySourceSummary();
 });
 
-$("backgroundOptimizerEnabled").addEventListener("change", async (event) => {
+if ($("backgroundOptimizerEnabled")) $("backgroundOptimizerEnabled").addEventListener("change", async (event) => {
   const input = event.currentTarget;
   input.disabled = true;
   try {
