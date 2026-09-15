@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,7 +39,14 @@ const (
 	proxyCandidateCacheFile       = "proxy-candidates.json"
 	proxyActivePoolFile           = "proxy-active.json"
 	proxyOptimizerSettingsFile    = "proxy-optimizer.json"
+	preferredDomainSourceURL      = "https://cf.090227.xyz/"
+	maxPreferredDomains           = 64
+	maxForwardDomains             = 12
 )
+
+// preferredDomainPattern 匹配 090227 优选目录页面中服务端渲染的域名卡片。
+// 页面为 GBK/UTF-8 双拼，但 copyDomain 参数是 ASCII，可在原始字节上直接匹配。
+var preferredDomainPattern = regexp.MustCompile(`copyDomain\(\s*['"]([a-zA-Z0-9][a-zA-Z0-9.\-]*)['"]\s*\)`)
 
 type app struct {
 	dataDir            string
@@ -481,12 +489,13 @@ type proxyCandidateSource struct {
 }
 
 type proxyCandidateSnapshot struct {
-	UpdatedAt   time.Time         `json:"updatedAt,omitempty"`
-	NextRefresh time.Time         `json:"nextRefresh,omitempty"`
-	Sources     []string          `json:"sources"`
-	IPs         []string          `json:"ips"`
-	SourceByIP  map[string]string `json:"sourceByIp,omitempty"`
-	Errors      []string          `json:"errors"`
+	UpdatedAt        time.Time         `json:"updatedAt,omitempty"`
+	NextRefresh      time.Time         `json:"nextRefresh,omitempty"`
+	Sources          []string          `json:"sources"`
+	IPs              []string          `json:"ips"`
+	SourceByIP       map[string]string `json:"sourceByIp,omitempty"`
+	PreferredDomains []string          `json:"preferredDomains,omitempty"`
+	Errors           []string          `json:"errors"`
 }
 
 type proxyActivePool struct {
@@ -494,6 +503,7 @@ type proxyActivePool struct {
 	Host      string            `json:"host,omitempty"`
 	Path      string            `json:"path,omitempty"`
 	IPs       []string          `json:"ips"`
+	Domains   []string          `json:"domains,omitempty"`
 	Results   []proxyScanResult `json:"results,omitempty"`
 	Error     string            `json:"error,omitempty"`
 }
@@ -942,8 +952,8 @@ func (a *app) cfnatStartupConfig() cfnatConfig {
 	cfg := defaultCFnatConfig()
 	a.activeMu.RLock()
 	defer a.activeMu.RUnlock()
-	if len(a.activePool.IPs) > 0 {
-		cfg.Fixed = strings.Join(a.activePool.IPs, ",")
+	if len(a.activePool.IPs) > 0 || len(a.activePool.Domains) > 0 {
+		cfg.Fixed = strings.Join(append(append([]string(nil), a.activePool.IPs...), a.activePool.Domains...), ",")
 	}
 	return cfg
 }
@@ -964,6 +974,13 @@ func (a *app) loadProxyActivePool() {
 		}
 	}
 	pool.IPs = valid
+	validDomains := make([]string, 0, len(pool.Domains))
+	for _, domain := range pool.Domains {
+		if validCandidateHostname(domain) {
+			validDomains = append(validDomains, domain)
+		}
+	}
+	pool.Domains = validDomains
 	a.activeMu.Lock()
 	a.activePool = pool
 	a.activeMu.Unlock()
@@ -987,6 +1004,7 @@ func (a *app) proxyActivePoolSnapshot() proxyActivePool {
 	defer a.activeMu.RUnlock()
 	pool := a.activePool
 	pool.IPs = append([]string(nil), pool.IPs...)
+	pool.Domains = append([]string(nil), pool.Domains...)
 	pool.Results = append([]proxyScanResult(nil), pool.Results...)
 	return pool
 }
@@ -1053,8 +1071,10 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 		return
 	}
 	current := a.proxyActivePoolSnapshot()
-	changed := strings.Join(current.IPs, ",") != strings.Join(passed, ",")
-	pool := proxyActivePool{UpdatedAt: time.Now(), Host: cfg.Host, Path: cfg.Path, IPs: passed, Results: results}
+	domains := a.proxyForwardDomains()
+	changed := strings.Join(current.IPs, ",") != strings.Join(passed, ",") ||
+		strings.Join(current.Domains, ",") != strings.Join(domains, ",")
+	pool := proxyActivePool{UpdatedAt: time.Now(), Host: cfg.Host, Path: cfg.Path, IPs: passed, Domains: domains, Results: results}
 	if !changed {
 		if err := a.saveProxyActivePool(pool); err != nil {
 			log.Printf("save reverified proxy active pool: %v", err)
@@ -1072,12 +1092,13 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 func (a *app) applyProxyPool(pool, current proxyActivePool) {
 	a.cfnatCtlMu.Lock()
 	defer a.cfnatCtlMu.Unlock()
-	passed := pool.IPs
+	passed := append([]string(nil), pool.IPs...)
+	passed = append(passed, pool.Domains...)
 	cfnatCfg := defaultCFnatConfig()
 	cfnatCfg.Fixed = strings.Join(passed, ",")
 	rollbackCfg := defaultCFnatConfig()
-	if len(current.IPs) > 0 {
-		rollbackCfg.Fixed = strings.Join(current.IPs, ",")
+	if len(current.IPs) > 0 || len(current.Domains) > 0 {
+		rollbackCfg.Fixed = strings.Join(append(append([]string(nil), current.IPs...), current.Domains...), ",")
 	}
 	if err := a.cfnat.stop(); err != nil {
 		log.Printf("stop cfnat for auto pool: %v", err)
@@ -1272,6 +1293,16 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 		sourceErrors = append(sourceErrors, err.Error())
 	}
 	appendGroup("proxy", community)
+	// 动态发现 090227 优选目录的当前优选域名：页面清单会随时间更新，
+	// 解析其当前 DNS 的优选 IP 进入候选池（IP 快照方案）。
+	preferredDomains, preferredErr := fetchPreferredDomains(ctx)
+	if preferredErr != nil {
+		sourceErrors = append(sourceErrors, "090227 优选域名动态发现: "+preferredErr.Error())
+	}
+	if len(preferredDomains) > 0 {
+		domainIPs := resolvePreferredDomains(ctx, preferredDomains, 1000-len(resolved))
+		appendGroup("proxy", domainIPs)
+	}
 	cfdataLimit := envInt("PROXY_CFDATA_CANDIDATES", 300)
 	if cfdataLimit < 0 || cfdataLimit > 2000 {
 		cfdataLimit = 300
@@ -1316,12 +1347,13 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 	}
 	now := time.Now()
 	snapshot := proxyCandidateSnapshot{
-		UpdatedAt:   now,
-		NextRefresh: now.Add(proxyCandidateRefreshInterval),
-		Sources:     []string{"official", "user", "proxy", "cfdata"},
-		IPs:         ips,
-		SourceByIP:  sourceByIP,
-		Errors:      sourceErrors,
+		UpdatedAt:        now,
+		NextRefresh:      now.Add(proxyCandidateRefreshInterval),
+		Sources:          []string{"official", "user", "proxy", "cfdata"},
+		IPs:              ips,
+		SourceByIP:       sourceByIP,
+		PreferredDomains: preferredDomains,
+		Errors:           sourceErrors,
 	}
 	a.candidateMu.Lock()
 	a.candidates = snapshot
@@ -1668,7 +1700,7 @@ func extractPublicIPv4(text string) []string {
 	return result
 }
 
-func fetchProxyCandidateURL(parent context.Context, rawURL string) ([]string, error) {
+func fetchHTTPSBody(parent context.Context, rawURL string) ([]byte, error) {
 	target, err := url.Parse(rawURL)
 	if err != nil || target.Scheme != "https" || target.Hostname() == "" {
 		return nil, errors.New("候选源 URL 必须是 HTTPS")
@@ -1701,7 +1733,155 @@ func fetchProxyCandidateURL(parent context.Context, rawURL string) ([]string, er
 	if len(body) > maxCandidateSourceBody {
 		return nil, errors.New("候选源内容超过 512 KiB")
 	}
+	return body, nil
+}
+
+func fetchProxyCandidateURL(parent context.Context, rawURL string) ([]string, error) {
+	body, err := fetchHTTPSBody(parent, rawURL)
+	if err != nil {
+		return nil, err
+	}
 	return extractPublicIPv4(string(body)), nil
+}
+
+// extractPreferredDomains 从 090227 优选目录页面提取服务端渲染的优选域名。
+// copyDomain 参数是页面当前权威清单；泛域名说明 .cf.090227.xyz 补充根域名。
+func extractPreferredDomains(html string) []string {
+	seen := make(map[string]struct{})
+	domains := make([]string, 0, 16)
+	add := func(raw string) {
+		domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
+		domain = strings.TrimPrefix(domain, "*.")
+		if domain == "" || !validCandidateHostname(domain) {
+			return
+		}
+		if _, ok := seen[domain]; ok || len(domains) >= maxPreferredDomains {
+			return
+		}
+		seen[domain] = struct{}{}
+		domains = append(domains, domain)
+	}
+	for _, match := range preferredDomainPattern.FindAllStringSubmatch(html, -1) {
+		add(match[1])
+	}
+	// 页面泛域名说明：*.cf.090227.xyz / *.123.cf.090227.xyz 与根域名等效。
+	for _, root := range []string{"*.cf.090227.xyz", "*.123.cf.090227.xyz"} {
+		if strings.Contains(html, root) {
+			add(root)
+		}
+	}
+	return domains
+}
+
+// fetchPreferredDomains 拉取 090227 优选目录并返回当前页面清单。
+func fetchPreferredDomains(parent context.Context) ([]string, error) {
+	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
+	defer cancel()
+	body, err := fetchHTTPSBody(ctx, preferredDomainSourceURL)
+	if err != nil {
+		return nil, err
+	}
+	domains := extractPreferredDomains(string(body))
+	if len(domains) == 0 {
+		return nil, errors.New("页面未发现优选域名")
+	}
+	return domains, nil
+}
+
+// resolvePreferredDomains 并发解析优选域名，仅保留公网 IPv4，最多 remaining 个。
+func resolvePreferredDomains(parent context.Context, domains []string, remaining int) []string {
+	if remaining <= 0 || len(domains) == 0 {
+		return nil
+	}
+	if len(domains) > maxPreferredDomains {
+		domains = domains[:maxPreferredDomains]
+	}
+	ctx, cancel := context.WithTimeout(parent, 6*time.Second)
+	defer cancel()
+	type answer struct {
+		ips []string
+	}
+	ch := make(chan answer, len(domains))
+	var wg sync.WaitGroup
+	for _, domain := range domains {
+		wg.Add(1)
+		go func(domain string) {
+			defer wg.Done()
+			dctx, dcancel := context.WithTimeout(ctx, 5*time.Second)
+			defer dcancel()
+			addresses, err := net.DefaultResolver.LookupIPAddr(dctx, domain)
+			if err != nil {
+				ch <- answer{}
+				return
+			}
+			var ips []string
+			for _, address := range addresses {
+				if ip := address.IP.To4(); ip != nil {
+					ips = append(ips, ip.String())
+				}
+			}
+			ch <- answer{ips: ips}
+		}(domain)
+	}
+	wg.Wait()
+	close(ch)
+	seen := make(map[string]struct{})
+	out := make([]string, 0, remaining)
+	for answer := range ch {
+		for _, ip := range answer.ips {
+			if _, ok := seen[ip]; ok {
+				continue
+			}
+			seen[ip] = struct{}{}
+			out = append(out, ip)
+			if len(out) >= remaining {
+				return out
+			}
+		}
+	}
+	return out
+}
+
+// proxyForwardDomains 返回可加入 CFnat 固定转发池的优选域名。
+// PROXY_DOMAIN_FORWARD 显式指定时优先；否则在 PROXY_AUTO_DOMAINS 开启时
+// 取候选缓存中的动态优选域名，上限 maxForwardDomains。
+func (a *app) proxyForwardDomains() []string {
+	configured := envForwardDomains("PROXY_DOMAIN_FORWARD")
+	if len(configured) > 0 {
+		return configured
+	}
+	if !envBool("PROXY_AUTO_DOMAINS", false) {
+		return nil
+	}
+	snapshot := a.proxyCandidateSnapshot()
+	domains := make([]string, 0, len(snapshot.PreferredDomains))
+	for _, domain := range snapshot.PreferredDomains {
+		if !validCandidateHostname(domain) {
+			continue
+		}
+		domains = append(domains, domain)
+		if len(domains) >= maxForwardDomains {
+			break
+		}
+	}
+	return domains
+}
+
+func envForwardDomains(name string) []string {
+	var domains []string
+	for _, raw := range strings.FieldsFunc(env(name, ""), func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	}) {
+		domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
+		domain = strings.TrimPrefix(domain, "*.")
+		if validCandidateHostname(domain) {
+			domains = append(domains, domain)
+		}
+	}
+	if len(domains) > maxForwardDomains {
+		domains = domains[:maxForwardDomains]
+	}
+	return domains
 }
 
 func resolveProxySources(parent context.Context, sourceIDs []string, remaining int) ([]string, []string, error) {

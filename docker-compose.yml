@@ -43,6 +43,10 @@ services:
       PROXY_AUTO_MIN_POOL: "3"
       PROXY_AUTO_CFDATA: "false"
       PROXY_AUTO_CFDATA_TIMEOUT: "600"
+      # 优选域名直连：显式指定后并入 CFnat 固定转发池；IP 池结果仍来自 VLESS 终审。
+      PROXY_DOMAIN_FORWARD: "${PROXY_DOMAIN_FORWARD:-}"
+      # 置 true 时自动把候选刷新发现的 090227 优选域名并入转发池（上限 12 个）。
+      PROXY_AUTO_DOMAINS: "false"
       PROXY_CFDATA_CANDIDATES: "300"
       PROXY_OFFICIAL_CANDIDATES: "150"
       PROXY_USER_CANDIDATES: "${PROXY_USER_CANDIDATES:-}"

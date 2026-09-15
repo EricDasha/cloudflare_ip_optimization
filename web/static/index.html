@@ -124,7 +124,7 @@
             <div class="section-title"><div><p class="overline">FORWARDING</p><h2>转发配置</h2></div></div>
             <div class="form-grid compact-form">
               <label>本地监听<input id="natAddr" value="0.0.0.0:1234" /></label>
-              <label>固定转发 IP<input id="natFixedIPs" placeholder="留空时自动扫描" /></label>
+              <label>固定转发目标 (IP/域名)<input id="natFixedIPs" placeholder="IP 或优选域名，逗号分隔" /></label>
               <label>检测域名<input id="natDomain" value="cloudflaremirrors.com/debian" /></label>
               <label>目标端口<input id="natPort" type="number" value="443" min="1" max="65535" /></label>
             </div>

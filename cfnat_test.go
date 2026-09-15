@@ -113,3 +113,35 @@ func TestHandleConnectionFallsBackOnlyAfterDialFailure(t *testing.T) {
 		t.Fatalf("dial calls = %v, want ordered fallback", calls)
 	}
 }
+
+func TestParseFixedTargetsAcceptsIPAndDomain(t *testing.T) {
+	got, err := parseFixedTargets("192.0.2.1, youxuan.cf.090227.xyz, 192.0.2.1")
+	if err != nil {
+		t.Fatalf("parseFixedTargets() error = %v", err)
+	}
+	want := []string{"192.0.2.1", "youxuan.cf.090227.xyz"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseFixedTargets() = %v, want %v", got, want)
+	}
+}
+
+func TestParseFixedTargetsRejectsInvalidDomain(t *testing.T) {
+	for _, bad := range []string{",", "onlylabel", "-bad.xyz", "bad-.xyz", "sp ace.xyz", "x@y.xyz", "1.2.3.999", "192.0.2.1, invalid_host"} {
+		if _, err := parseFixedTargets(bad); err == nil {
+			t.Fatalf("parseFixedTargets(%q) should fail", bad)
+		}
+	}
+}
+
+func TestValidForwardHostname(t *testing.T) {
+	for _, good := range []string{"youxuan.cf.090227.xyz", "www.visa.cn", "cf.877774.xyz", "staticdelivery.nexusmods.com"} {
+		if !validForwardHostname(good) {
+			t.Fatalf("validForwardHostname(%q) = false, want true", good)
+		}
+	}
+	for _, bad := range []string{"192.0.2.1", "localhost", "*.cf.090227.xyz", "a/b.xyz", "a..b", "-a.xyz", "a.xyz/"} {
+		if validForwardHostname(bad) {
+			t.Fatalf("validForwardHostname(%q) = true, want false", bad)
+		}
+	}
+}

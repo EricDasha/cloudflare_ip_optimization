@@ -58,7 +58,7 @@ docker build -f Dockerfile.multistage -t local/cloudflare-tools:multistage .
 - `tw.william.us.ci`、`kr.william.us.ci`：台湾和韩国候选。
 - `cdn.xn--b6gac.eu.org`：EU.org 社区候选池。
 - `ProxyIP.*.CMLiussss.net`：CMLiussss 全球、亚洲、欧洲和北美 ProxyIP DNS 池。
-- `cf.090227.xyz`：第三方优选目录；同时抓取 `/ct?ips=6`、`/cu`、`/cmcc?ips=8` API，并解析目录列出的固定优选域名 DNS。
+- `cf.090227.xyz`：第三方优选目录；同时抓取 `/ct?ips=6`、`/cu`、`/cmcc?ips=8` API，解析目录列出的固定优选域名 DNS，并**动态提取目录页当前渲染的优选域名**（`copyDomain` 卡片），解析其优选 IP 加入候选。页面清单变化会自动跟进，不依赖硬编码。
 
 `sub.cmliussss.net`、`owo.o00o.ooo`、`cm.soso.edu.kg`、`zrf.zrf.me` 是订阅转换器，不是候选数据源。需要使用时，将转换后的 VLESS/Trojan/SS/VMess 或 Clash 内容粘贴到手动扫描的“订阅内容”；服务端只从明确的节点 URI、JSON 或 Clash `server` 字段提取节点域名，不保存或记录原文。
 
@@ -119,6 +119,8 @@ Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新�
 | `PROXY_AUTO_MIN_POOL` | 允许替换旧池的最少通过数量 | `3` |
 | `PROXY_AUTO_CFDATA` | 每轮自动候选维护前运行一次 CFdata | `false` |
 | `PROXY_AUTO_CFDATA_TIMEOUT` | CFdata 最长运行秒数 | `600` |
+| `PROXY_DOMAIN_FORWARD` | 并入 CFnat 固定转发池的优选域名，逗号分隔 | 空 |
+| `PROXY_AUTO_DOMAINS` | 自动把目录页发现的优选域名并入转发池 | `false` |
 | `PROXY_CFDATA_CANDIDATES` | 从 `ip.csv` 读取的候选上限 | `300` |
 | `PROXY_OFFICIAL_CANDIDATES` | 从 Cloudflare 官方 CIDR 均匀抽样的候选数 | `150` |
 | `PROXY_USER_CANDIDATES` | 用户指定的公网 IPv4，逗号或空白分隔 | 空 |
@@ -132,6 +134,15 @@ Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新�
 | `PROXY_VLESS_SPEED_BYTES` | 每个通过节点的下载测速字节数，64 KiB-8 MiB | `1048576` |
 | `PROXY_VLESS_SPEED_TIMEOUT` | 每个下载测速超时，秒 | `15` |
 | `SING_BOX_BIN` | sing-box 二进制路径 | `/usr/local/bin/sing-box` |
+
+### 优选域名直连
+
+第三方「优选域名」是优选 IP 的实时转发别名：每次新 TCP 连接时按域名当前 DNS 解析，天然跟随上游优选结果刷新。两种接入方式：
+
+1. **解析优选 IP 加入待机池**（默认启用）：候选刷新时动态提取 `cf.090227.xyz` 目录页当前渲染的优选域名，解析其公网 IPv4 并入候选，与其它来源一起走 WS 初筛与 VLESS 终审。
+2. **域名直连加入固定转发池**：设置 `PROXY_DOMAIN_FORWARD`（逗号分隔的域名，如 `youxuan.cf.090227.xyz,www.visa.cn`），域名会与 VLESS 终审通过的 IP 一起写入 CFnat 固定转发池；数据面拨号时按域名解析。`PROXY_AUTO_DOMAINS=true` 时可自动使用目录页发现的优选域名（上限 12 个）。
+
+域名直连只使用目录页白名单域名或明确配置的域名，不接受任意输入；域名目标不经过终审不能进入自动池（终审产物仍是 IP 快照），直连域名作为可选的补充转发目标。CFnat `-fixed` 参数同时接受 IP 与域名。
 
 ## IP 列表获取方式
 

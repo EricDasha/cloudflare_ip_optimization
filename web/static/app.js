@@ -67,7 +67,7 @@ function renderAutoCandidates(snapshot, loadIntoInput = false) {
   const updated = snapshot.updatedAt ? new Date(snapshot.updatedAt).toLocaleString() : "尚未刷新";
   const next = snapshot.nextRefresh ? new Date(snapshot.nextRefresh).toLocaleString() : "--";
   const active = snapshot.active || {};
-  const activeCount = active.ips?.length || 0;
+  const activeCount = (active.ips?.length || 0) + (active.domains?.length || 0);
   const vlessPassed = active.results?.filter((result) => result.stage === "VLESS_PASS").length || 0;
   const activeText = activeCount ? `生效 ${activeCount} 个${vlessPassed ? ` · VLESS 已验 ${vlessPassed} 个` : ""}` : "尚无生效池";
   $("autoCandidateStatus").textContent = `${snapshot.ips?.length || 0} 个候选 · ${activeText} · 更新 ${updated}${active.error ? ` · ${active.error}` : ""}`;
@@ -75,7 +75,7 @@ function renderAutoCandidates(snapshot, loadIntoInput = false) {
   $("activePoolCount").textContent = activeCount;
   $("nextRefresh").textContent = next;
   const activeResults = new Map((active.results || []).map((result) => [result.ip, result]));
-  $("activePoolIPs").textContent = active.ips?.length
+  const ipText = active.ips?.length
     ? active.ips.map((ip) => {
         const result = activeResults.get(ip);
         const metrics = [];
@@ -83,7 +83,11 @@ function renderAutoCandidates(snapshot, loadIntoInput = false) {
         if (result?.dataLatency) metrics.push(`${result.dataLatency} ms`);
         return metrics.length ? `${ip} (${metrics.join(" · ")})` : ip;
       }).join("  ·  ")
-    : "尚无自动生效池";
+    : "";
+  const domainText = active.domains?.length
+    ? active.domains.map((domain) => `${domain} (域名直连)`).join("  ·  ")
+    : "";
+  $("activePoolIPs").textContent = [ipText, domainText].filter(Boolean).join("  ·  ") || "尚无自动生效池";
   if (loadIntoInput && snapshot.ips?.length) {
     $("proxyScanIPs").value = snapshot.ips.join("\n");
   }

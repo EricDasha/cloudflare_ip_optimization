@@ -100,7 +100,7 @@ func main() {
 	coloFilter := flag.String("colo", "", "筛选数据中心例如 HKG,SJC,LAX (多个数据中心用逗号隔开,留空则忽略匹配)")
 	Delay := flag.Int("delay", 300, "有效延迟（毫秒），超过此延迟将断开连接")
 	domain := flag.String("domain", "cloudflaremirrors.com/debian", "响应状态码检查的域名地址")
-	fixedIPs := flag.String("fixed", "", "固定转发 IP，多个地址用逗号分隔；留空时自动扫描")
+	fixedIPs := flag.String("fixed", "", "固定转发目标：IP 或优选域名，多个用逗号分隔；留空时自动扫描")
 	priorityIPs := flag.String("priority", "", "兼容旧配置保留；数据面不再按优先 IP 加权")
 	ipCount := flag.Int("ipnum", 20, "提取的有效IP数量")
 	ipsType := flag.String("ips", "4", "指定生成IPv4还是IPv6地址 (4或6)")
@@ -131,19 +131,20 @@ func main() {
 		fixedMode := strings.TrimSpace(*fixedIPs) != ""
 		var results []result
 		if fixedMode {
-			ips, parseErr := parseFixedIPs(*fixedIPs)
+			targets, parseErr := parseFixedTargets(*fixedIPs)
 			if parseErr != nil {
-				log.Printf("固定 IP 配置无效: %v", parseErr)
+				log.Printf("固定转发目标配置无效: %v", parseErr)
 				time.Sleep(3 * time.Second)
 				continue
 			}
-			results = make([]result, 0, len(ips))
-			for _, ip := range ips {
-				results = append(results, result{ip: ip})
+			results = make([]result, 0, len(targets))
+			for _, target := range targets {
+				results = append(results, result{ip: target})
 			}
-			if priorities, err := parseFixedIPs(*priorityIPs); err == nil {
+			if priorities, err := parseFixedTargets(*priorityIPs); err == nil {
 				ipManager.SetPriorityIPs(priorities)
 			}
+			log.Printf("使用 %d 个固定转发目标（IP 或优选域名），跳过官方段扫描", len(results))
 			log.Printf("使用 %d 个固定转发 IP，跳过官方段扫描", len(results))
 		} else {
 
@@ -264,7 +265,7 @@ func main() {
 			ips = append(ips, r.ip)
 		}
 		ipManager.SetIPAddresses(ips)
-		if priorities, err := parseFixedIPs(*priorityIPs); err == nil {
+		if priorities, err := parseFixedTargets(*priorityIPs); err == nil {
 			ipManager.SetPriorityIPs(priorities)
 		}
 
@@ -497,29 +498,67 @@ func parseIPList(content string) []string {
 	return ipList
 }
 
-func parseFixedIPs(value string) ([]string, error) {
+// parseFixedTargets 解析固定转发目标列表，每个目标可以是 IP 或优选域名。
+// 域名目标在每次新连接拨号时按当前 DNS 解析，天然跟随第三方优选 IP 轮换。
+func parseFixedTargets(value string) ([]string, error) {
 	seen := make(map[string]struct{})
-	var ips []string
+	var targets []string
 	for _, raw := range strings.Split(value, ",") {
-		ip := strings.TrimSpace(raw)
-		if ip == "" {
+		target := strings.TrimSpace(raw)
+		if target == "" {
 			continue
 		}
-		parsed := net.ParseIP(ip)
-		if parsed == nil {
-			return nil, fmt.Errorf("%q 不是有效 IP", ip)
+		if parsed := net.ParseIP(target); parsed != nil {
+			target = parsed.String()
+		} else if !validForwardHostname(target) {
+			return nil, fmt.Errorf("%q 不是有效 IP 或域名", target)
 		}
-		canonical := parsed.String()
-		if _, ok := seen[canonical]; ok {
+		key := strings.ToLower(target)
+		if _, ok := seen[key]; ok {
 			continue
 		}
-		seen[canonical] = struct{}{}
-		ips = append(ips, canonical)
+		seen[key] = struct{}{}
+		targets = append(targets, target)
 	}
-	if len(ips) == 0 {
-		return nil, fmt.Errorf("至少需要一个固定 IP")
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("至少需要一个固定 IP 或域名")
 	}
-	return ips, nil
+	return targets, nil
+}
+
+// validForwardHostname 校验可作为转发目标的域名：仅 ASCII、含点、逐标签合法。
+// 纯数字加点的“残 IP”形式（如 1.2.3.999）一律拒绝，避免被误当域名。
+func validForwardHostname(host string) bool {
+	if len(host) < 4 || len(host) > 253 || net.ParseIP(host) != nil {
+		return false
+	}
+	if !strings.Contains(host, ".") || strings.ContainsAny(host, " /\\@\"':") {
+		return false
+	}
+	if strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") {
+		return false
+	}
+	numericOnly := true
+	for _, char := range host {
+		if char != '.' && (char < '0' || char > '9') {
+			numericOnly = false
+			break
+		}
+	}
+	if numericOnly {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, char := range label {
+			if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func nextRandomIntn(n int) int {

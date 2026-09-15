@@ -354,3 +354,38 @@ func TestRankVLESSPassesBySpeedUsesSourceThenThroughput(t *testing.T) {
 		t.Fatalf("failed speed probe remained eligible: %#v", results[3])
 	}
 }
+
+func TestExtractPreferredDomainsFrom090227Page(t *testing.T) {
+	page := `<section class="section"><h2 class="section-title">CM优选域名</h2><div class="domain-cards-grid">
+<div class="domain-card"><button class="copy-domain" onclick="copyDomain('youxuan.cf.090227.xyz')">*.cf.090227.xyz</button></div>
+<div class="domain-card"><button class="copy-domain" onclick="copyDomain('cf.877774.xyz')">cf.877774.xyz</button></div>
+</div></section>
+<section><h2 class="section-title">官方优选域名</h2><div class="domain-cards-grid">
+<div class="domain-card"><button class="copy-domain" onclick="copyDomain('www.visa.cn')">www.visa.cn</button></div>
+<div class="domain-card"><button class="copy-domain" onclick="copyDomain('bad host')">bad host</button></div>
+</div></section>`
+	got := extractPreferredDomains(page)
+	want := []string{"youxuan.cf.090227.xyz", "cf.877774.xyz", "www.visa.cn", "cf.090227.xyz"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("extractPreferredDomains() = %v, want %v", got, want)
+	}
+}
+
+func TestExtractPreferredDomainsRejectsInfrastructureNoise(t *testing.T) {
+	// 页面里出现的非优选域名外链不应被提取。
+	page := `<a href="https://fonts.googleapis.com">fonts</a><span>ipip.net</span>
+<button onclick="copyDomain('cf.tencentapp.cn')">cf.tencentapp.cn</button>`
+	got := extractPreferredDomains(page)
+	if !reflect.DeepEqual(got, []string{"cf.tencentapp.cn"}) {
+		t.Fatalf("extractPreferredDomains() = %v, want only copyDomain card", got)
+	}
+}
+
+func TestEnvForwardDomainsParsesCommaAndWildcard(t *testing.T) {
+	t.Setenv("PROXY_DOMAIN_FORWARD", "youxuan.cf.090227.xyz, www.visa.cn, bad host, *.bestcf.030101.xyz")
+	got := envForwardDomains("PROXY_DOMAIN_FORWARD")
+	want := []string{"youxuan.cf.090227.xyz", "www.visa.cn", "bestcf.030101.xyz"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("envForwardDomains() = %v, want %v", got, want)
+	}
+}
