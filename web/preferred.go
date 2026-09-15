@@ -137,13 +137,10 @@ func (a *app) probePreferredDomains(parent context.Context) {
 	if len(domains) == 0 {
 		return
 	}
-	if !a.proxyScanMu.TryLock() {
-		a.preferredMu.Lock()
-		a.preferredLastError = "上一轮扫描未结束，跳过本轮优选域名慢测"
-		a.preferredMu.Unlock()
-		return
-	}
-	defer a.proxyScanMu.Unlock()
+	// 不使用 proxyScanMu：优选域名慢测是轻量操作，不应被全量候选刷新长时间阻塞。
+	// 使用独立 preferredProbeMu 防重入，可与其他扫描并发运行。
+	a.preferredProbeMu.Lock()
+	defer a.preferredProbeMu.Unlock()
 
 	cfg := defaultProxyAutoConfig()
 	// 慢测：小并发、短延迟上限，避免抢占主数据面。

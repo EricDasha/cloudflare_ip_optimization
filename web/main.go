@@ -67,6 +67,7 @@ type app struct {
 	optimizerLastError string
 	quality            *qualitySchedulerRuntime
 	preferredMu        sync.Mutex
+	preferredProbeMu   sync.Mutex
 	preferredEnabled   map[string]bool
 	preferredLastProbe time.Time
 	preferredLastError string
