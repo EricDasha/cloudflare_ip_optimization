@@ -31,6 +31,7 @@ ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     CFNAT_FIXED_IPS="" \
     CFNAT_IPNUM=20 \
     CFNAT_IPS=4 \
+    CFNAT_FALLBACK="" \
     CFNAT_NUM=1 \
     CFNAT_PORT=443 \
     CFNAT_RANDOM=true \

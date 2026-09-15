@@ -91,6 +91,7 @@ Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新�
 | `CFNAT_DELAY` | `-delay` | `2000` |
 | `CFNAT_DOMAIN` | `-domain` | `cloudflaremirrors.com/debian` |
 | `CFNAT_FIXED_IPS` | `-fixed` | 空 |
+| `CFNAT_FALLBACK` | `-fallback`（兜底目标，仅拨号失败时尝试） | 空 |
 | `CFNAT_PRIORITY_IPS` | `-priority` | 空；仅兼容旧配置，不参与数据面加权 |
 | `CFNAT_IPNUM` | `-ipnum` | `20` |
 | `CFNAT_IPS` | `-ips` | `4` |

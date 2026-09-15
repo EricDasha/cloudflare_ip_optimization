@@ -53,12 +53,16 @@ $("backgroundOptimizerEnabled").addEventListener("change", async (event) => {
   }
 });
 
-$("useProxyScanResults").addEventListener("click", () => {
+$("useProxyScanResults").addEventListener("click", async () => {
   const ips = latestProxyScanResults.filter((r) => !r.error).map((r) => r.ip);
   if (!ips.length) { toast("没有可采用的通过 IP"); return; }
-  $("natFixedIPs").value = ips.join(",");
-  $("cfnatAdvanced").open = false;
-  toast(`已填入 ${ips.length} 个固定转发 IP`);
+  try {
+    const data = await withButton($("useProxyScanResults"), "正在采用", () => api("/api/cfnat/proxy-scan/apply", { method: "POST", body: JSON.stringify(proxyScanPayload()) }));
+    $("natFixedIPs").value = ips.join(",");
+    $("cfnatAdvanced").open = false;
+    await refreshAll();
+    toast(`已采用 ${data.applied || ips.length} 个 IP 为固定转发池`);
+  } catch (e) { toast(`采用失败：${e.message}`); }
 });
 
 $("refreshAutoCandidates").addEventListener("click", async () => {

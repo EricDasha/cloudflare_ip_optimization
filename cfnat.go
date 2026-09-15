@@ -101,6 +101,7 @@ func main() {
 	Delay := flag.Int("delay", 300, "有效延迟（毫秒），超过此延迟将断开连接")
 	domain := flag.String("domain", "cloudflaremirrors.com/debian", "响应状态码检查的域名地址")
 	fixedIPs := flag.String("fixed", "", "固定转发目标：IP 或优选域名，多个用逗号分隔；留空时自动扫描")
+	fallbackIPs := flag.String("fallback", "", "兜底目标（IP 或优选域名），仅在固定转发目标拨号失败时尝试；多个用逗号分隔")
 	priorityIPs := flag.String("priority", "", "兼容旧配置保留；数据面不再按优先 IP 加权")
 	ipCount := flag.Int("ipnum", 20, "提取的有效IP数量")
 	ipsType := flag.String("ips", "4", "指定生成IPv4还是IPv6地址 (4或6)")
@@ -116,6 +117,7 @@ func main() {
 
 	// 创建 IP 管理器
 	ipManager := NewIPManager()
+	var fallbackManager *IPManager
 
 	// 启动 TCP 监听
 	listener, err := net.Listen("tcp", *localAddr)
@@ -129,6 +131,7 @@ func main() {
 	for {
 		startTime := time.Now()
 		fixedMode := strings.TrimSpace(*fixedIPs) != ""
+		fallbackMode := strings.TrimSpace(*fallbackIPs) != ""
 		var results []result
 		if fixedMode {
 			targets, parseErr := parseFixedTargets(*fixedIPs)
@@ -144,8 +147,16 @@ func main() {
 			if priorities, err := parseFixedTargets(*priorityIPs); err == nil {
 				ipManager.SetPriorityIPs(priorities)
 			}
+			if fallbackMode {
+				fbTargets, fbErr := parseFixedTargets(*fallbackIPs)
+				if fbErr != nil {
+					log.Printf("兜底目标配置无效: %v", fbErr)
+				} else {
+					fallbackManager = NewIPManager()
+					fallbackManager.SetIPAddresses(fbTargets)
+				}
+			}
 			log.Printf("使用 %d 个固定转发目标（IP 或优选域名），跳过官方段扫描", len(results))
-			log.Printf("使用 %d 个固定转发 IP，跳过官方段扫描", len(results))
 		} else {
 
 			// 使用函数处理 locations.json，确保 defer 正确执行
@@ -293,7 +304,12 @@ func main() {
 			log.Printf("客户端来源: %s 连接建立，当前活跃连接数: %d", clientAddr, atomic.LoadInt32(&activeConnections))
 			// 多目标参数仅作为“失败时按顺序回退”，不再并发竞速，
 			// 从而保证一次前端逻辑连接只产生一个真实上游会话。
-			go handleConnection(conn, ipManager.nextTargets(*port, *num), time.Duration(*Delay)*time.Millisecond)
+			primary := ipManager.nextTargets(*port, *num)
+			var fallback []string
+			if fallbackManager != nil {
+				fallback = fallbackManager.nextTargets(*port, 1)
+			}
+			go handleConnection(conn, append(primary, fallback...), time.Duration(*Delay)*time.Millisecond)
 		}
 	}
 }

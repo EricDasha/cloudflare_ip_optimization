@@ -257,8 +257,9 @@ type cfnatConfig struct {
 	Num      int    `json:"num"`
 	Port     int    `json:"port"`
 	Random   bool   `json:"random"`
-	Task     int    `json:"task"`
 	TLS      bool   `json:"tls"`
+	Task     int    `json:"task"`
+	Fallback string `json:"fallback"`
 }
 
 type cfdataConfig struct {
@@ -287,6 +288,7 @@ func defaultCFnatConfig() cfnatConfig {
 		Random:   envBool("CFNAT_RANDOM", true),
 		Task:     envInt("CFNAT_TASK", 100),
 		TLS:      envBool("CFNAT_TLS", true),
+		Fallback: env("CFNAT_FALLBACK", ""),
 	}
 }
 
@@ -309,6 +311,9 @@ func normalizeCFnat(c cfnatConfig) cfnatConfig {
 	}
 	if c.Priority == "" {
 		c.Priority = d.Priority
+	}
+	if c.Fallback == "" {
+		c.Fallback = d.Fallback
 	}
 	if c.IPNum == 0 {
 		c.IPNum = d.IPNum
@@ -336,14 +341,15 @@ func (c cfnatConfig) args() []string {
 		"-delay", strconv.Itoa(c.Delay),
 		"-domain", c.Domain,
 		"-fixed", c.Fixed,
+		"-fallback", c.Fallback,
 		"-priority", c.Priority,
 		"-ipnum", strconv.Itoa(c.IPNum),
 		"-ips", c.IPs,
 		"-num", strconv.Itoa(c.Num),
 		"-port", strconv.Itoa(c.Port),
-		"-random=" + strconv.FormatBool(c.Random),
+		"-random", strconv.FormatBool(c.Random),
 		"-task", strconv.Itoa(c.Task),
-		"-tls=" + strconv.FormatBool(c.TLS),
+		"-tls", strconv.FormatBool(c.TLS),
 	}
 }
 
@@ -455,6 +461,7 @@ func main() {
 	mux.HandleFunc("/api/cfnat/proxy-candidates", a.handleProxyCandidates)
 	mux.HandleFunc("/api/cfnat/connections", a.handleCFnatConnections)
 	mux.HandleFunc("/api/cfnat/background-optimizer", a.handleBackgroundOptimizer)
+	mux.HandleFunc("/api/cfnat/proxy-scan/apply", a.handleProxyScanApply)
 	mux.HandleFunc("/api/cfdata/run", a.handleCFdataRun)
 	mux.HandleFunc("/api/cfdata/stop", a.handleCFdataStop)
 	mux.HandleFunc("/api/cfdata/results", a.handleCFdataResults)
@@ -568,6 +575,7 @@ var proxyCandidateSources = map[string]proxyCandidateSource{
 			"https://cf.090227.xyz/cmcc?ips=8",
 		},
 	},
+	"preferred-imported": {Name: "v2rayn 导入优选域名"},
 }
 
 var defaultProxyCandidateSourceIDs = []string{
@@ -952,8 +960,11 @@ func (a *app) cfnatStartupConfig() cfnatConfig {
 	cfg := defaultCFnatConfig()
 	a.activeMu.RLock()
 	defer a.activeMu.RUnlock()
-	if len(a.activePool.IPs) > 0 || len(a.activePool.Domains) > 0 {
-		cfg.Fixed = strings.Join(append(append([]string(nil), a.activePool.IPs...), a.activePool.Domains...), ",")
+	if len(a.activePool.IPs) > 0 {
+		cfg.Fixed = strings.Join(a.activePool.IPs, ",")
+	}
+	if len(a.activePool.Domains) > 0 {
+		cfg.Fallback = strings.Join(a.activePool.Domains, ",")
 	}
 	return cfg
 }
@@ -1007,6 +1018,10 @@ func (a *app) proxyActivePoolSnapshot() proxyActivePool {
 	pool.Domains = append([]string(nil), pool.Domains...)
 	pool.Results = append([]proxyScanResult(nil), pool.Results...)
 	return pool
+}
+func (a *app) importedPreferredDomains() []string {
+	// 从 v2rayn 导出的常见优选域名固定列表，用于候选池与兜底
+	return []string{"bestcf.030101.xyz", "cdn.2020111.xyz", "cdns.doon.eu.org", "cf.0sm.com", "cf.877771.xyz", "cf.877774.xyz", "cf.900501.xyz", "cfip.1323123.xyz", "cfip.cfcdn.vip", "cfip.xxxxxxxx.tk", "cloudflare.182682.xyz", "cloudflare-dl.byoip.top", "cloudflare-ip.mofashi.ltd", "fn.130519.xyz", "freeyx.cloudflare88.eu.org", "nrt.xxxxxxxx.nyc.mn", "nrtcfdns.zone.id", "saas.sin.fan", "tencentapp.cn", "xn--b6gac.eu.org", "777.ai7777777.xyz", "store.ubi.com", "serviceshub.samsclub.com", "www.allianz.com", "www.decathlon.com", "www.asda.com", "www.shopify.com", "cookiebot.com", "bluehost.com", "nexusmods.com", "glassdoor.com", "www.jimdo.com", "openai.com", "www.sage.com", "www.speedtest.net", "investor.apple.com", "markmonitor.com", "store.epicgames.com", "mycareer.verizon.com", "onetrust.com", "www.affirm.com", "www.zendesk.com", "www.doordash.com", "digitalocean.com", "ringcentral.com", "chrono24.com", "www.wto.org", "www.mskcc.org", "cdn.jsdelivr.net", "www.broadcom.com", "www.nestle.com", "homecare.stryker.com", "www.emerson.com", "visit.honeywell.com", "polestar.com", "auctions.ihg.com.cn", "woodsbagot.com", "www.transunion.hk", "www.hongkongairport.com", "deepin.org", "www.police.uk", "www.leics.police.uk", "china.mfa.gov.ua", "www.visa.cn", "visa.com", "www.tpg.com", "www.wilshire.com", "engage.cloudflareclient.com", "cloudflare-eth.com", "cloudflare.dev", "cloudflare.net", "r2.dev", "pages.dev", "cdnjs.com", "cloudflare-ech.com", "static.cloudflareinsights.com", "ln.edu.hk", "www.ntu.edu.sg", "www.ox.ac.uk", "columbia.edu", "www.udacity.com", "for.edu.sg", "www.researchgate.net", "skk.moe", "cf.090227.xyz", "cf.3666888.xyz", "ct.877774.xyz", "ct.cloudflare.byoip.top", "cu.877774.xyz", "cu.cloudflare.byoip.top", "cmcc.877774.xyz", "cm.cloudflare.byoip.top"}
 }
 
 func (a *app) autoApplyProxyPool(parent context.Context) {
@@ -1093,12 +1108,15 @@ func (a *app) applyProxyPool(pool, current proxyActivePool) {
 	a.cfnatCtlMu.Lock()
 	defer a.cfnatCtlMu.Unlock()
 	passed := append([]string(nil), pool.IPs...)
-	passed = append(passed, pool.Domains...)
 	cfnatCfg := defaultCFnatConfig()
 	cfnatCfg.Fixed = strings.Join(passed, ",")
+	cfnatCfg.Fallback = strings.Join(pool.Domains, ",")
 	rollbackCfg := defaultCFnatConfig()
-	if len(current.IPs) > 0 || len(current.Domains) > 0 {
-		rollbackCfg.Fixed = strings.Join(append(append([]string(nil), current.IPs...), current.Domains...), ",")
+	if len(current.IPs) > 0 {
+		rollbackCfg.Fixed = strings.Join(current.IPs, ",")
+	}
+	if len(current.Domains) > 0 {
+		rollbackCfg.Fallback = strings.Join(current.Domains, ",")
 	}
 	if err := a.cfnat.stop(); err != nil {
 		log.Printf("stop cfnat for auto pool: %v", err)
@@ -1303,6 +1321,8 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 		domainIPs := resolvePreferredDomains(ctx, preferredDomains, 1000-len(resolved))
 		appendGroup("proxy", domainIPs)
 	}
+	// v2rayn 导出的固定优选域名：作为 Proxy 层候选（IP 快照），走同一终审。
+	appendGroup("proxy", resolvePreferredDomains(ctx, a.importedPreferredDomains(), 1000-len(resolved)))
 	cfdataLimit := envInt("PROXY_CFDATA_CANDIDATES", 300)
 	if cfdataLimit < 0 || cfdataLimit > 2000 {
 		cfdataLimit = 300
@@ -1650,6 +1670,15 @@ func (a *app) handleProxyScan(w http.ResponseWriter, r *http.Request) {
 	for _, ip := range resolved {
 		addIP(ip)
 	}
+	if len(cfg.Sources) > 0 {
+		for _, id := range cfg.Sources {
+			if id == "preferred-imported" {
+				for _, raw := range resolvePreferredDomains(r.Context(), a.importedPreferredDomains(), cfg.Limit-len(ips)) {
+					addIP(raw)
+				}
+			}
+		}
+	}
 	if len(ips) == 0 {
 		http.Error(w, "未提供有效 IPv4 地址", http.StatusBadRequest)
 		return
@@ -1660,6 +1689,79 @@ func (a *app) handleProxyScan(w http.ResponseWriter, r *http.Request) {
 
 func isPublicIPv4(ip net.IP) bool {
 	return ip != nil && ip.To4() != nil && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsUnspecified() && !ip.IsMulticast() && !ip.IsLinkLocalUnicast()
+}
+func (a *app) handleProxyScanApply(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.proxyScanMu.TryLock() {
+		http.Error(w, "已有反代 IP 扫描正在运行", http.StatusTooManyRequests)
+		return
+	}
+	defer a.proxyScanMu.Unlock()
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var cfg proxyScanConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		http.Error(w, "无效的请求体", http.StatusBadRequest)
+		return
+	}
+	cfg, err := normalizeProxyScan(cfg)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	seen := make(map[string]struct{})
+	ips := make([]string, 0, cfg.Limit)
+	addIP := func(raw string) {
+		ip := net.ParseIP(strings.TrimSpace(raw))
+		if !isPublicIPv4(ip) || len(ips) >= cfg.Limit {
+			return
+		}
+		key := ip.To4().String()
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		ips = append(ips, key)
+	}
+	for _, raw := range strings.FieldsFunc(cfg.IPs, func(r rune) bool { return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t' }) {
+		addIP(raw)
+	}
+	for _, raw := range extractPublicIPv4(cfg.Subscription) {
+		addIP(raw)
+	}
+	for _, raw := range resolveSubscriptionHostnames(r.Context(), extractSubscriptionHostnames(cfg.Subscription), cfg.Limit-len(ips)) {
+		addIP(raw)
+	}
+	resolved, _, _ := resolveProxySources(r.Context(), cfg.Sources, cfg.Limit-len(ips))
+	for _, ip := range resolved {
+		addIP(ip)
+	}
+	if len(cfg.Sources) > 0 {
+		for _, id := range cfg.Sources {
+			if id == "preferred-imported" {
+				for _, raw := range resolvePreferredDomains(r.Context(), a.importedPreferredDomains(), cfg.Limit-len(ips)) {
+					addIP(raw)
+				}
+			}
+		}
+	}
+	results := scanProxyIPs(r.Context(), ips, cfg)
+	passed := make([]string, 0)
+	for _, result := range results {
+		if result.Error == "" {
+			passed = append(passed, result.IP)
+		}
+	}
+	if len(passed) == 0 {
+		http.Error(w, "未通过任何 IP", http.StatusBadRequest)
+		return
+	}
+	current := a.proxyActivePoolSnapshot()
+	pool := proxyActivePool{UpdatedAt: time.Now(), Host: current.Host, Path: current.Path, IPs: passed, Domains: current.Domains, Results: results}
+	a.applyProxyPool(pool, current)
+	writeJSON(w, map[string]any{"ok": true, "applied": len(passed)})
 }
 
 const maxCandidateSourceBody = 512 * 1024

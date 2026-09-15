@@ -22,6 +22,7 @@ services:
       CFNAT_DELAY: "2000"
       CFNAT_DOMAIN: cloudflaremirrors.com/debian
       CFNAT_FIXED_IPS: 128.199.255.242,119.205.235.58,60.249.21.30
+      CFNAT_FALLBACK: "${CFNAT_FALLBACK:-}"      # 兜底目标（IP 或优选域名），仅拨号失败时尝试
       CFNAT_PRIORITY_IPS: ""
       CFNAT_IPNUM: "20"
       CFNAT_IPS: "4"                 # 4 或 6
