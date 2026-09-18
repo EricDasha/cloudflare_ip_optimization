@@ -60,15 +60,23 @@ docker build -f Dockerfile.multistage -t local/cloudflare-tools:multistage .
 - `ProxyIP.*.CMLiussss.net`：CMLiussss 全球、亚洲、欧洲和北美 ProxyIP DNS 池。
 - `cf.090227.xyz`：第三方优选目录；抓取 `/ct?ips=6`、`/cu`、`/cmcc?ips=8` API 与固定优选域名 DNS。页面内的 `copyDomain` 优选域名仅在 `PROXY_DYNAMIC_DISCOVERY=true` 时动态提取（默认关闭，主要候选来自 v2rayn 导入域名）。
 
-`sub.cmliussss.net`、`owo.o00o.ooo`、`cm.soso.edu.kg`、`zrf.zrf.me` 是订阅转换器，不是候选数据源。需要使用时，将转换后的 VLESS/Trojan/SS/VMess 或 Clash 内容粘贴到手动扫描的“订阅内容”；服务端只从明确的节点 URI、JSON 或 Clash `server` 字段提取节点域名，不保存或记录原文。
+订阅转换器（`PROXY_SUBSCRIPTION_CONVERTER`，默认 `https://vlesdy.trojanjd.dpdns.org/sub`）配合第三方维护者域名（`PROXY_SUBSCRIPTION_MAINTAINERS`，默认 `owo.o00o.ooo`、`cm.soso.edu.kg`、`zrf.zrf.me`、`sub.keaeye.icu`、`sub.mot.cloudns.biz`、`sub.mia.xx.kg`、`sub.lzjbaby.com`、`sub.xdu.qzz.io`）是日常 IP 来源：服务端按 `?token=…&sub=<维护者>` 拉取节点链接，提取 IP 后慢筛入池。token 经 `PROXY_SUBSCRIPTION_TOKEN` 从 `.env` 注入，不进仓库、不回显。手动扫描的“订阅内容”粘贴同样支持，把转换后的 VLESS/Trojan/SS/VMess 或 Clash 内容贴入即可；服务端只从明确的节点 URI、JSON 或 Clash `server` 字段提取节点域名，不保存或记录原文。
 
-服务端只允许上述固定候选源，不接受任意 URL；第三方 HTTPS 源禁止跨域跳转，正文限制为 512 KiB，不执行脚本。手动导入的节点域名最多 64 个 hostname、共享 3 秒解析期限，并只接受公网 IPv4。所有结果仍拒绝私网、回环、链路本地与组播地址。扫描接口限制请求体为 1 MiB、并发为 `1-500`、扫描数量为 `1-10000`，同一时刻只运行一个扫描任务。
+服务端只允许上述固定候选源与订阅维护者清单，不接受任意 URL；第三方 HTTPS 源禁止跨域跳转，正文限制为 512 KiB，不执行脚本。手动导入的节点域名最多 64 个 hostname、共享 3 秒解析期限，并只接受公网 IPv4。所有结果仍拒绝私网、回环、链路本地与组播地址。扫描接口限制请求体为 1 MiB、并发为 `1-500`、扫描数量为 `1-10000`，同一时刻只运行一个扫描任务。
 
 Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新解析全部内置源。成功结果以原子替换方式写入 `/data/proxy-candidates.json`；刷新失败时保留上一次成功候选。页面会显示上次成功时间、下次刷新时间，并提供“立即拉取候选”和“载入自动候选”。
 
-启用 `PROXY_AUTO_APPLY` 后，后台先用实际 `Host + WebSocket path` 对全部候选并发执行 TLS 与 WebSocket `101 Switching Protocols` 初筛。启用 `PROXY_VLESS_PROBE` 后，再启动短生命周期 sing-box，以候选 `IP:PROXY_AUTO_PORT` 覆盖模板服务器地址，通过真实 VLESS 链路请求 `generate_204`，随后从 `speed.cloudflare.com` 读取固定大小响应并记录 Mbps。候选按 `official > user > proxy > cfdata` 分层，层内按下载 Mbps 降序、数据面延迟升序排列；下载失败的候选不会进入 active pool。只有最终通过数量达到 `PROXY_AUTO_MIN_POOL` 才替换 `/data/proxy-active.json` 并重启 CFnat。模板、sing-box 或数据面失败均保留旧池。
+启用 `PROXY_AUTO_APPLY` 后，后台先用实际 `Host + WebSocket path` 对全部候选并发执行 TLS 与 WebSocket `101 Switching Protocols` 初筛。启用 `PROXY_VLESS_PROBE` 后，再启动短生命周期 sing-box，以候选 `IP:PROXY_AUTO_PORT` 覆盖模板服务器地址，通过真实 VLESS 链路请求 `generate_204`，随后从 `speed.cloudflare.com` 读取固定大小响应并记录 Mbps。候选按 `user > subscription > cfdata > official` 分层（preferred 不再参与 IP 探测），层内按下载 Mbps 降序、数据面延迟升序排列；下载失败的候选不会进入 active pool。只有最终通过数量达到 `PROXY_AUTO_MIN_POOL` 且通过换池防抖三道闸（冷却/健康/同池跳过）才替换 `/data/proxy-active.json` 并重启 CFnat。模板、sing-box 或数据面失败均保留旧池。
 
 后台慢速优选默认开启：启动 90 秒后执行首轮，此后每 15 分钟从候选缓存轮转抽取 24 个 IP，以并发 4、单 IP 1500 ms 上限进行初筛；启用 VLESS probe 时仍须通过真实数据面终审。每轮失败保留旧池，且不会与手动扫描或六小时全量维护并发。GUI 开关会写入 `/data/proxy-optimizer.json`，容器重启后保持用户选择。
+
+CFdata 彻底手动化：无后台自启动、无定时扫描；只在用户点“运行扫描”或“完整优选”时执行，结果写入 `ip.csv` 供候选汇合读取。旧的 `PROXY_CFDATA_BACKGROUND_*` / `PROXY_CFDATA_SIFT_COUNT` 变量已废弃不再读取。
+
+日常 IP 供给走订阅慢扫：服务端按 `PROXY_SUBSCRIPTION_MAINTAINERS`（默认 8 个第三方维护者域名）逐个请求订阅转换器 `PROXY_SUBSCRIPTION_CONVERTER + ?token=…&sub=<维护者>`（token 从 `PROXY_SUBSCRIPTION_TOKEN` 注入，不进仓库），提取明文 IP 与节点域名解析出的 IP，做并发 4、2000 ms 上限的 WS 慢筛后丢入订阅池（`subscription-pool.json`，上限 1000），默认每 `PROXY_SUBSCRIPTION_REFRESH_MINUTES=360` 分钟一轮，也可点“立即拉取订阅”。候选来源优先级为 `user > subscription > cfdata > official`；`PROXY_USER_CANDIDATES` 与手动采用永远最高优先。
+
+优选域名纯兜底：勾选的域名只进 cfnat `-fallback`，主池全部拨号失败时才尝试；服务端不再解析、不探测、不合入候选池、不参与任何换池，避免“人挤人”顶掉正在工作的 IP。
+
+换池防抖三道闸（防“一个劲换 IP”）：调度器晋升需连续 3 轮、相对 +25% 且绝对 +80Mbps、上次换池 30 分钟后；连续失败 3 次才判失败；任何自动换池（scheduler / 全量终审）还受全局冷却 `PROXY_POOL_SWITCH_COOLDOWN_MINUTES=30` 约束，且现生效池全部健康（`PROXY_ACTIVE_HEALTH_WINDOW_MINUTES=60` 内无失败）时拒绝顶池；同 IP 集合直接跳过不重启 cfnat。用户手动采用不受冷却限制。
 
 ### VLESS 探针模板
 
@@ -121,7 +129,7 @@ Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新�
 | `PROXY_AUTO_CFDATA` | 每轮自动候选维护前运行一次 CFdata | `false` |
 | `PROXY_AUTO_CFDATA_TIMEOUT` | CFdata 最长运行秒数 | `600` |
 | `PROXY_DOMAIN_FORWARD` | 并入 CFnat 固定转发池的优选域名，逗号分隔 | 空 |
-| `PROXY_AUTO_DOMAINS` | 自动把目录页发现的优选域名并入转发池 | `false` |
+| `PROXY_AUTO_DOMAINS` | 优选域名并入 cfnat 兜底转发（-fallback） | `true` |
 | `PROXY_CFDATA_CANDIDATES` | 从 `ip.csv` 读取的候选上限 | `300` |
 | `PROXY_OFFICIAL_CANDIDATES` | 从 Cloudflare 官方 CIDR 均匀抽样的候选数 | `150` |
 | `PROXY_USER_CANDIDATES` | 用户指定的公网 IPv4，逗号或空白分隔 | 空 |
@@ -136,14 +144,14 @@ Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新�
 | `PROXY_VLESS_SPEED_TIMEOUT` | 每个下载测速超时，秒 | `15` |
 | `SING_BOX_BIN` | sing-box 二进制路径 | `/usr/local/bin/sing-box` |
 
-### 优选域名直连
+### 优选域名直连（纯兜底）
 
-第三方「优选域名」是优选 IP 的实时转发别名：每次新 TCP 连接时按域名当前 DNS 解析，天然跟随上游优选结果刷新。两种接入方式：
+第三方「优选域名」是优选 IP 的实时转发别名：每次新 TCP 连接时按域名当前 DNS 解析，天然跟随上游优选结果刷新。本项目中优选域名**只做兜底、不做任何解析探测**：
 
-1. **解析优选 IP 加入待机池**（默认启用）：候选刷新时解析 v2rayn 导入的固定优选域名（以及 090227 固定域名）的公网 IPv4 并入候选，与其它来源一起走 WS 初筛与 VLESS 终审。可选 `PROXY_DYNAMIC_DISCOVERY=true` 再从 `cf.090227.xyz` 页面动态补充最新域名。
-2. **域名直连加入固定转发池**：设置 `PROXY_DOMAIN_FORWARD`（逗号分隔的域名，如 `youxuan.cf.090227.xyz,www.visa.cn`），域名会与 VLESS 终审通过的 IP 一起写入 CFnat 固定转发池；数据面拨号时按域名解析。`PROXY_AUTO_DOMAINS=true` 时可自动使用目录页发现的优选域名（上限 12 个）。
+- **域名直连加入兜底**：设置 `PROXY_DOMAIN_FORWARD`（逗号分隔的域名，如 `youxuan.cf.090227.xyz,www.visa.cn`），或直接在页面勾选优选域名；这些域名只写入 CFnat `-fallback`，主池全部拨号失败时才按顺序尝试。数据面拨号时按域名当前 DNS 解析。
+- 优选域名不解析成 IP、不合入候选池、不参与 WS/VLESS 探测与换池；`PROXY_DYNAMIC_DISCOVERY` 与优选域名慢测均已废弃。
 
-域名直连只使用目录页白名单域名或明确配置的域名，不接受任意输入；域名目标不经过终审不能进入自动池（终审产物仍是 IP 快照），直连域名作为可选的补充转发目标。CFnat `-fixed` 参数同时接受 IP 与域名。
+域名直连只使用明确配置或页面勾选的域名，不接受任意输入；域名目标不经过终审，不能进入 IP 生效池，只做兜底转发目标。CFnat `-fixed` 参数同时接受 IP 与域名。
 
 ## IP 列表获取方式
 

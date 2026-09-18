@@ -63,8 +63,27 @@ function activateWorkspace(workspaceId) {
 let latestProxyScanResults = [];
 let autoCandidateSnapshot = { ips: [], errors: [] };
 
+function renderSubscriptionStatus(sub) {
+  const el = $("subscriptionStatus");
+  if (!el) return;
+  if (!sub) { el.textContent = "订阅池状态未知"; return; }
+  const last = sub.lastRun && !String(sub.lastRun).startsWith("0001-")
+    ? new Date(sub.lastRun).toLocaleString() : "尚未拉取";
+  const maintainers = Array.isArray(sub.maintainers) ? sub.maintainers.length : 0;
+  el.textContent = `订阅池 ${sub.totalIPs || 0} 个 IP · ${maintainers} 个维护者 · 上次验活 ${sub.lastCount || 0} 个通过 · ${last}${sub.lastError ? ` · ${sub.lastError}` : ""}`;
+}
+
+function renderPoolGuard(guard) {
+  const el = $("poolGuardStatus");
+  if (!el) return;
+  if (!guard) { el.textContent = "换池保护状态未知"; return; }
+  el.textContent = `换池冷却 ${guard.cooldownMinutes || 30} 分钟 · 上次换池 ${guard.lastSwitchAt && !String(guard.lastSwitchAt).startsWith("0001-") ? new Date(guard.lastSwitchAt).toLocaleString() : "无记录"} · 健康窗口 ${guard.healthWindowMin || 60} 分钟`;
+}
+
 function renderAutoCandidates(snapshot, loadIntoInput = false) {
   autoCandidateSnapshot = snapshot || { ips: [], errors: [] };
+  renderSubscriptionStatus(snapshot.subscription);
+  renderPoolGuard(snapshot.poolGuard);
   const updated = snapshot.updatedAt ? new Date(snapshot.updatedAt).toLocaleString() : "尚未刷新";
   const next = snapshot.nextRefresh ? new Date(snapshot.nextRefresh).toLocaleString() : "--";
   const active = snapshot.active || {};
@@ -607,44 +626,32 @@ async function runCFdata() {
   await refreshAll();
 }
 
-// ---- 优选域名管控 ----
-let preferredDomainsState = { all: [], enabled: new Set(), status: {}, lastProbe: null, lastError: "" };
+// ---- 优选域名兜底（纯转发，不解析不探测） ----
+// 勾选的域名只会进入 cfnat -fallback：主池全部拨号失败时才尝试。
+let preferredDomainsState = { all: [], enabled: new Set(), limit: 20 };
 
 async function loadPreferredDomains() {
   const data = await api("/api/cfnat/preferred");
   preferredDomainsState = {
     all: data.all || [],
     enabled: new Set(data.enabled || []),
-    status: data.status || {},
-    lastProbe: data.lastProbe || null,
-    lastError: data.lastError || "",
+    limit: data.limit || 20,
   };
   renderPreferredDomains();
   return data;
-}
-
-function preferredDomainBadge(domain) {
-  const st = preferredDomainsState.status[domain];
-  if (!st || !st.stage) return "未测";
-  if (st.stage === "WS_PASS") return `${st.latency || 0} ms`;
-  if (st.stage === "WS_FAIL") return "WS 失败";
-  if (st.stage === "RESOLVE_FAIL") return "DNS 失败";
-  return st.stage;
 }
 
 function renderPreferredDomains() {
   const grid = $("preferredDomainsGrid");
   const summary = $("preferredDomainsStatus");
   if (!grid || !summary) return;
-  const { all, enabled, status, lastProbe, lastError } = preferredDomainsState;
-  const passed = all.filter((d) => (status[d]?.stage === "WS_PASS")).length;
-  const probeText = lastProbe ? new Date(lastProbe).toLocaleString() : "尚未慢测";
-  summary.textContent = `${enabled.size}/${all.length} 已启用 · WS 通过 ${passed} 个 · ${probeText}${lastError ? ` · ${lastError}` : ""}`;
+  const { enabled } = preferredDomainsState;
+  summary.textContent = `${enabled.size}/${preferredDomainsState.all.length} 已启用为兜底转发（主池失败才用，不探测不排序）`;
   grid.replaceChildren();
   const frag = document.createDocumentFragment();
-  for (const domain of all) {
+  for (const domain of preferredDomainsState.all) {
     const label = document.createElement("label");
-    label.title = preferredDomainBadge(domain);
+    label.title = "仅兜底转发";
     const input = document.createElement("input");
     input.type = "checkbox";
     input.checked = enabled.has(domain);
@@ -654,7 +661,7 @@ function renderPreferredDomains() {
       try {
         await savePreferredDomains();
         renderPreferredDomains();
-        toast(checked ? `已启用 ${domain}` : `已停用 ${domain}`);
+        toast(checked ? `已启用兜底 ${domain}` : `已停用兜底 ${domain}`);
       } catch (e) {
         if (checked) enabled.delete(domain); else enabled.add(domain);
         event.target.checked = enabled.has(domain);
@@ -662,7 +669,7 @@ function renderPreferredDomains() {
       }
     });
     const span = document.createElement("span");
-    span.textContent = `${domain} · ${preferredDomainBadge(domain)}`;
+    span.textContent = domain;
     label.append(input, span);
     frag.append(label);
   }
@@ -672,7 +679,7 @@ function renderPreferredDomains() {
 async function savePreferredDomains() {
   return api("/api/cfnat/preferred", {
     method: "POST",
-    body: JSON.stringify({ enabled: Array.from(preferredDomainsState.enabled) }),
+    body: JSON.stringify({ enabled: Array.from(preferredDomainsState.enabled), limit: preferredDomainsState.limit || 0 }),
   });
 }
 

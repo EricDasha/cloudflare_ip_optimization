@@ -155,8 +155,11 @@
               <div class="actions">
                 <button class="button secondary" id="refreshAutoCandidates" type="button">↻ 刷新候选并终审</button>
                 <button class="button primary" id="loadAutoCandidates" type="button">↓ 载入候选</button>
+                <button class="button secondary" id="refreshSubscriptions" type="button">⇪ 立即拉取订阅</button>
               </div>
             </div>
+            <p class="inline-status" id="subscriptionStatus">订阅池状态读取中…</p>
+            <p class="inline-status" id="poolGuardStatus">换池保护状态读取中…</p>
             <section class="panel" id="preferredDomainsPanel">
               <div class="section-title split-title">
                 <div><p class="overline">PREFERRED DOMAINS</p><h2>优选域名</h2><p class="inline-status" id="preferredDomainsStatus">正在加载...</p></div>
@@ -166,6 +169,7 @@
                   <button class="button secondary" id="preferredDomainsClearAll" type="button">全部关闭</button>
                 </div>
               </div>
+              <p class="inline-status">勾选的域名只进 cfnat 兜底（-fallback）：主池全部拨号失败才尝试，不解析、不探测、不参与换池。</p>
               <div id="preferredDomainsGrid" class="source-grid"></div>
             </section>
             <div class="priority-strip" aria-label="优先级">

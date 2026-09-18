@@ -7,6 +7,35 @@ import (
 	"time"
 )
 
+// ============================================================================
+// 三池模型状态机 (Three-Pool Model State Machine)
+// ============================================================================
+//
+// 状态定义：
+//   UNKNOWN  → 未测试
+//   PROBING  → 正在测试中
+//   STANDBY  → 已通过测试，进入替补池，等待晋升机会
+//   ACTIVE   → 工作池，正在转发用户流量
+//   DEGRADED → 工作池但性能下降（连接失败但未达阈值）
+//   FAILED   → 测试失败，暂时淘汰
+//
+// 状态转换：
+//   UNKNOWN  → PROBING
+//   PROBING  → STANDBY | FAILED
+//   STANDBY  → PROBING | ACTIVE | FAILED
+//   ACTIVE   → DEGRADED | FAILED | STANDBY（被更高品质 IP 替换）
+//   DEGRADED → ACTIVE | FAILED | STANDBY
+//   FAILED   → PROBING（重新测试）
+//
+// 晋升阈值（Promotion Threshold，防抖版）：
+//   - RequiredSuperiorRounds = 3：连续 3 轮证明明显优于 Active
+//   - RelativePromotionGain = 0.25：速度提升 ≥25%
+//   - AbsolutePromotionGainMbps = 80：且绝对提升 ≥80Mbps
+//   - FailureThreshold = 3：连续失败 3 次才判失败（单次抖动不再换池）
+//   - MinimumSwitchInterval = 30min：距离上次切换 >30 分钟
+//
+// ============================================================================
+
 type lineState string
 
 const (
@@ -36,6 +65,7 @@ const (
 	reasonFailoverAfterActiveFailure = "failover_after_active_failure"
 )
 
+// lineQuality 表示单个 IP 的质量状态，用于三池模型的晋升决策。
 type lineQuality struct {
 	IP                  string
 	State               lineState
@@ -49,6 +79,14 @@ type lineQuality struct {
 	StateChangedAt      time.Time
 }
 
+// schedulerPolicy 定义晋升阈值和切换规则。
+// 这些参数共同防止系统过度抖动（oscillation）：
+//   - CapacityMbps：速度上限，防止异常高值影响评分
+//   - RelativePromotionGain：相对提升阈值（25%）
+//   - AbsolutePromotionGainMbps：绝对提升阈值（80Mbps）
+//   - RequiredSuperiorRounds：连续证明轮数（3轮）
+//   - FailureThreshold：失败次数阈值（3次）
+//   - MinimumSwitchInterval：最小切换间隔（30分钟）
 type schedulerPolicy struct {
 	CapacityMbps              float64
 	RelativePromotionGain     float64
@@ -61,11 +99,11 @@ type schedulerPolicy struct {
 func defaultSchedulerPolicy() schedulerPolicy {
 	return schedulerPolicy{
 		CapacityMbps:              1024,
-		RelativePromotionGain:     0.15,
-		AbsolutePromotionGainMbps: 50,
-		RequiredSuperiorRounds:    2,
-		FailureThreshold:          1,
-		MinimumSwitchInterval:     10 * time.Minute,
+		RelativePromotionGain:     0.25,
+		AbsolutePromotionGainMbps: 80,
+		RequiredSuperiorRounds:    3,
+		FailureThreshold:          3,
+		MinimumSwitchInterval:     30 * time.Minute,
 	}
 }
 
@@ -93,6 +131,18 @@ type schedulerDecision struct {
 	Reason string
 }
 
+// decideLineSwitch 根据三池模型和晋升阈值决定是否换池。
+//
+// 决策流程：
+// 1. 如果没有 Active IP，从 Standby 中选最优晋升
+// 2. 如果 Active 失败（连续失败 ≥ FailureThreshold=3），触发 Failover
+// 3. 如果距离上次切换 < MinimumSwitchInterval（30min），不换
+// 4. 检查是否有 Standby IP 满足晋升条件：
+//   - 连续 ConsecutiveSuperior ≥ RequiredSuperiorRounds（3轮）
+//   - 速度 AverageMbps ≥ Active * (1 + RelativePromotionGain)（25%）
+//   - 速度 AverageMbps ≥ Active + AbsolutePromotionGainMbps（80Mbps）
+//
+// 5. 满足条件则执行 Promotion，否则保持当前 Active
 func decideLineSwitch(input schedulerInput, policy schedulerPolicy) (schedulerDecision, error) {
 	if err := policy.validate(); err != nil {
 		return schedulerDecision{}, err

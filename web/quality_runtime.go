@@ -10,6 +10,24 @@ import (
 	"time"
 )
 
+// ============================================================================
+// 质量记录持久化 (Quality Record Persistence)
+// ============================================================================
+//
+// 每个被测试过的 IP 都有一个 qualityRecord，记录：
+//   - State：当前状态（UNKNOWN/PROBING/STANDBY/ACTIVE/DEGRADED/FAILED）
+//   - Samples：最近 12 次测试的采样（Mbps + 成功/失败）
+//   - AverageMbps/P95Mbps/PeakMbps：基于采样的统计值
+//   - SuccessRate：成功率
+//   - ConsecutiveSuperior：连续优于 Active 的轮数（用于晋升决策）
+//   - ConsecutiveFailures：连续失败次数（用于判断 FAILED）
+//
+// 状态转换由 observe() 和 commitSwitch() 驱动：
+//   - observe()：记录测试结果，更新状态和统计值
+//   - commitSwitch()：执行晋升，更新 ActiveIP 和状态
+//
+// ============================================================================
+
 const proxyQualityFile = "proxy-quality.json"
 
 type qualitySample struct {
@@ -143,6 +161,15 @@ func (r *qualitySchedulerRuntime) ensureRecordLocked(ip, source string, now time
 	return rec
 }
 
+// observe 记录单次测试结果，更新 IP 的质量状态。
+//
+// 状态转换逻辑：
+//   - 如果 IP 状态是 UNKNOWN/STANDBY/FAILED，转为 PROBING
+//   - 测试成功：重置 ConsecutiveFailures，如果不是 Active 则设为 STANDBY
+//   - 测试失败：增加 ConsecutiveFailures，达到阈值则设为 FAILED
+//
+// 此函数还更新 ConsecutiveSuperior（连续优于 Active 的轮数），
+// 用于晋升决策：Standby IP 必须连续 2 轮证明明显优于 Active 才能晋升。
 func (r *qualitySchedulerRuntime) observe(ip, source string, mbps float64, success bool, now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -261,6 +288,15 @@ func (r *qualitySchedulerRuntime) decide(now time.Time) schedulerDecision {
 	return decision
 }
 
+// commitSwitch 执行晋升切换：旧 Active → Standby，新 IP → Active。
+//
+// 切换后：
+//   - 旧 Active 的状态变为 STANDBY（保留质量记录，可再次晋升）
+//   - 新 Active 的状态变为 ACTIVE，ConsecutiveSuperior 重置为 0
+//   - 更新 ActiveIP、LastSwitchAt、LastDecision
+//
+// 注意：切换是由 decideLineSwitch() 决策的，此函数只负责执行。
+// 决策会考虑 MinimumSwitchInterval（10分钟）防止过度抖动。
 func (r *qualitySchedulerRuntime) commitSwitch(decision schedulerDecision, now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

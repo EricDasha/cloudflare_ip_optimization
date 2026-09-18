@@ -82,6 +82,14 @@ $("loadAutoCandidates").addEventListener("click", async () => {
   } catch (e) { toast(`候选载入失败：${e.message}`); }
 });
 
+$("refreshSubscriptions").addEventListener("click", async () => {
+  try {
+    await withButton($("refreshSubscriptions"), "正在拉取", () => api("/api/subscriptions/refresh", { method: "POST", body: "{}" }));
+    toast("订阅拉取已启动，后台慢筛后入池");
+    await loadAutoCandidates(false);
+  } catch (e) { toast(`订阅拉取失败：${e.message}`); }
+});
+
 $("runCfdata").addEventListener("click", async () => {
   try { await withButton($("runCfdata"), "正在启动", runCFdata); toast("CFdata 已开扫"); }
   catch (e) { toast(`运行失败：${e.message}`); }
@@ -202,5 +210,6 @@ try {
   $("preferredDomainsRefresh").addEventListener("click", async () => { try { await withButton($("preferredDomainsRefresh"), "正在刷新", loadPreferredDomains); toast("优选域名已刷新"); } catch (e) { toast(`刷新失败：${e.message}`); } });
   $("preferredDomainsEnableAll").addEventListener("click", async () => { try { await withButton($("preferredDomainsEnableAll"), "正在保存", () => setAllPreferredDomains(true)); } catch (e) { toast(`保存失败：${e.message}`); } });
   $("preferredDomainsClearAll").addEventListener("click", async () => { try { await withButton($("preferredDomainsClearAll"), "正在保存", () => setAllPreferredDomains(false)); } catch (e) { toast(`保存失败：${e.message}`); } });
+
   $("pushCfdataCandidates").addEventListener("click", async () => { try { await withButton($("pushCfdataCandidates"), "正在推送", pushCfdataCandidates); } catch (e) { toast(`推送失败：${e.message}`); } });
 } catch (_) {}

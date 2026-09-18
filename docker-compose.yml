@@ -46,8 +46,11 @@ services:
       PROXY_AUTO_CFDATA_TIMEOUT: "600"
       # 优选域名直连：显式指定后并入 CFnat 固定转发池；IP 池结果仍来自 VLESS 终审。
       PROXY_DOMAIN_FORWARD: "${PROXY_DOMAIN_FORWARD:-}"
-      # 置 true 时自动把候选刷新发现的 090227 优选域名并入转发池（上限 12 个）。
-      PROXY_AUTO_DOMAINS: "false"
+      # 优选域名兜底转发：置 true 时把已启用的优选域名并入 cfnat -fallback
+      # （上限 12 个），仅在固定 IP 池全部拨号失败时才直连域名，不解析不探测。
+      PROXY_AUTO_DOMAINS: "true"
+      # 优选域名按延迟排序后仅取前 N 个合入候选池，避免过度依赖优选域名。
+      PROXY_PREFERRED_MAX_DOMAINS: "20"
       PROXY_CFDATA_CANDIDATES: "300"
       PROXY_OFFICIAL_CANDIDATES: "150"
       PROXY_USER_CANDIDATES: "${PROXY_USER_CANDIDATES:-}"
@@ -57,6 +60,25 @@ services:
       PROXY_SCHEDULER_PROBE_INTERVAL_SECONDS: "300"
       PROXY_SCHEDULER_BATCH_SIZE: "12"
       PROXY_SCHEDULER_APPLY: "true"
+      # CFdata 彻底手动化：无后台自启动、无定时扫描、无 sift 联动。
+      # 以下变量保留仅防旧配置残留，服务端不再读取。
+      # 日常 IP 供给走订阅慢扫：PROXY_SUBSCRIPTION_*。
+      PROXY_CFDATA_BACKGROUND_ENABLED: "false"
+      PROXY_CFDATA_BACKGROUND_MINUTES: "60"
+      PROXY_CFDATA_BACKGROUND_TIMEOUT: "600"
+      PROXY_CFDATA_SIFT_COUNT: "40"
+      # 订阅日常慢入池：维护者域名清单 + 转换器基地址 + token（token 从 .env 注入）。
+      PROXY_SUBSCRIPTION_CONVERTER: "https://vlesdy.trojanjd.dpdns.org/sub"
+      PROXY_SUBSCRIPTION_MAINTAINERS: "owo.o00o.ooo,cm.soso.edu.kg,zrf.zrf.me,sub.keaeye.icu,sub.mot.cloudns.biz,sub.mia.xx.kg,sub.lzjbaby.com,sub.xdu.qzz.io"
+      PROXY_SUBSCRIPTION_TOKEN: "${PROXY_SUBSCRIPTION_TOKEN:-}"
+      PROXY_SUBSCRIPTION_REFRESH_ENABLED: "true"
+      PROXY_SUBSCRIPTION_REFRESH_MINUTES: "360"
+      PROXY_SUBSCRIPTION_PER_MAINTAINER: "30"
+      PROXY_SUBSCRIPTION_FETCH_TIMEOUT: "45"
+      PROXY_SUBSCRIPTION_VERIFY_TIMEOUT: "240"
+      # 换池防抖：自动换池全局冷却 +生效池健康窗口。
+      PROXY_POOL_SWITCH_COOLDOWN_MINUTES: "30"
+      PROXY_ACTIVE_HEALTH_WINDOW_MINUTES: "60"
 
       # WS 101 通过后，使用 /data 中的本地 VLESS outbound 模板做真实数据面终审。
       PROXY_VLESS_PROBE: "true"

@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
-	"time"
 )
 
 // preferredSettingsFile 也定义于 main.go：常量同名不同作用域会冲突，这里不再重复声明。
@@ -23,6 +23,7 @@ func (a *app) loadPreferredSettings() {
 		enabled[domain] = true // 默认全部启用
 	}
 	a.preferredEnabled = enabled
+	a.preferredLimit = envInt("PROXY_PREFERRED_MAX_DOMAINS", 20)
 	a.preferredStatus = make(map[string]preferredDomainStatus)
 	data, err := os.ReadFile(filepath.Join(a.dataDir, preferredSettingsFile))
 	if err != nil {
@@ -30,9 +31,13 @@ func (a *app) loadPreferredSettings() {
 	}
 	var stored struct {
 		Enabled []string `json:"enabled"`
+		Limit   int      `json:"limit"`
 	}
 	if json.Unmarshal(data, &stored) != nil {
 		return
+	}
+	if stored.Limit >= 1 && stored.Limit <= maxPreferredDomains {
+		a.preferredLimit = stored.Limit
 	}
 	if len(stored.Enabled) == 0 {
 		return
@@ -58,7 +63,7 @@ func (a *app) savePreferredSettingsLocked() error {
 	}
 	path := filepath.Join(a.dataDir, preferredSettingsFile)
 	tmp := path + ".tmp"
-	data := []byte(`{"enabled":["` + strings.Join(enabled, `","`) + `"]}`)
+	data := []byte(`{"enabled":["` + strings.Join(enabled, `","`) + `"],"limit":` + strconv.Itoa(a.preferredLimit) + `}`)
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return err
 	}
@@ -77,6 +82,51 @@ func (a *app) enabledPreferredDomains() []string {
 		}
 	}
 	return out
+}
+
+func (a *app) preferredLimitValue() int {
+	a.preferredMu.Lock()
+	defer a.preferredMu.Unlock()
+	return a.preferredLimit
+}
+
+// rankedEnabledPreferredDomains 返回已启用域名（导入顺序）。
+// 优选域名已改为纯兜底转发，不再探测排序；保留函数仅防旧调用残留。
+func (a *app) rankedEnabledPreferredDomains() []string {
+	a.preferredMu.Lock()
+	defer a.preferredMu.Unlock()
+	all := a.importedPreferredDomains()
+	type entry struct {
+		d   string
+		lat int64
+		ok  bool
+	}
+	entries := make([]entry, 0, len(all))
+	for _, domain := range all {
+		if !a.preferredEnabled[domain] {
+			continue
+		}
+		entries = append(entries, entry{d: domain})
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.d)
+	}
+	return out
+}
+
+// enabledPreferredDomainsForCandidates 取前 limit 个启用域名供给候选快照展示。
+// 注意：优选域名不再解析成 IP 合入候选池，仅作 cfnat 兜底转发。
+func (a *app) enabledPreferredDomainsForCandidates() []string {
+	ranked := a.rankedEnabledPreferredDomains()
+	limit := a.preferredLimitValue()
+	if limit < 1 || limit > maxPreferredDomains {
+		limit = envInt("PROXY_PREFERRED_MAX_DOMAINS", 20)
+	}
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+	return ranked
 }
 
 // preferredStatusSnapshot 返回每个导入域名的最新慢测状态与启用状态。
@@ -104,133 +154,20 @@ func (a *app) getAllPreferredDomains() []string {
 	return a.importedPreferredDomains()
 }
 
-// updatePreferredDomainStatus 记录单域名的最近慢测结果。
-func (a *app) updatePreferredDomainStatus(domain string, st preferredDomainStatus) {
-	a.preferredMu.Lock()
-	a.preferredStatus[domain] = st
-	a.preferredLastProbe = time.Now()
-	a.preferredMu.Unlock()
-}
-
-// runPreferredDomainProbeLoop 后台慢测启用的优选域名：
-// DNS 解析 → WS 初筛（可选 VLESS）→ 记录每域名最优延迟/速度 → 返回通过域名候选。
-// 换池动作由候选池优化器统一执行（比 active 更优才推送），此处只产出候选与状态。
+// 优选域名是纯兜底转发目标：不解析、不探测、不合入候选池。
+// 以下函数保留空壳仅防旧调用残留，实际行为：什么都不做。
 func (a *app) runPreferredDomainProbeLoop() {
-	initial := time.NewTimer(60 * time.Second)
-	defer initial.Stop()
-	<-initial.C
-	interval := time.Duration(envInt("PROXY_PREFERRED_PROBE_MINUTES", 10)) * time.Minute
-	if interval < time.Minute {
-		interval = 10 * time.Minute
-	}
-	for {
-		a.probePreferredDomains(context.Background())
-		ticker := time.NewTimer(interval)
-		<-ticker.C
-		ticker.Stop()
-	}
+	log.Printf("preferred-domain probe loop disabled: domains are fallback-only, no resolve/probe")
 }
 
-// probePreferredDomains 对启用优选域名执行一轮慢测并写回候选池。
 func (a *app) probePreferredDomains(parent context.Context) {
-	domains := a.enabledPreferredDomains()
-	if len(domains) == 0 {
-		return
-	}
-	// 不使用 proxyScanMu：优选域名慢测是轻量操作，不应被全量候选刷新长时间阻塞。
-	// 使用独立 preferredProbeMu 防重入，可与其他扫描并发运行。
-	a.preferredProbeMu.Lock()
-	defer a.preferredProbeMu.Unlock()
-
-	cfg := defaultProxyAutoConfig()
-	// 慢测：小并发、短延迟上限，避免抢占主数据面。
-	cfg.Concurrency = 4
-	cfg.MaxLatency = 2000
-
-	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
-	defer cancel()
-
-	ipByDomain := make(map[string][]string, len(domains))
-	allIPs := make([]string, 0, len(domains)*4)
-	for _, domain := range domains {
-		ips := resolvePreferredDomains(ctx, []string{domain}, 6)
-		if len(ips) == 0 {
-			a.updatePreferredDomainStatus(domain, preferredDomainStatus{Domain: domain, Enabled: a.preferredEnabled[domain], Stage: "RESOLVE_FAIL", LastError: "DNS 无可用 IPv4"})
-			continue
-		}
-		ipByDomain[domain] = ips
-		allIPs = append(allIPs, ips...)
-	}
-	if len(allIPs) == 0 {
-		a.preferredMu.Lock()
-		a.preferredLastError = "本轮无优选域名解析到 IPv4"
-		a.preferredMu.Unlock()
-		return
-	}
-
-	results := scanProxyWebSockets(ctx, allIPs, cfg)
-	latencyByIP := make(map[string]int64, len(results))
-	okSet := make(map[string]struct{})
-	for _, result := range results {
-		if result.Error == "" {
-			latencyByIP[result.IP] = result.Latency
-			okSet[result.IP] = struct{}{}
-		}
-	}
-	statusByDomain := make(map[string]preferredDomainStatus)
-	for domain, ips := range ipByDomain {
-		var best string
-		var bestLatency int64
-		for _, ip := range ips {
-			if _, ok := okSet[ip]; !ok {
-				continue
-			}
-			if best == "" || latencyByIP[ip] < bestLatency {
-				best = ip
-				bestLatency = latencyByIP[ip]
-			}
-		}
-		if best == "" {
-			statusByDomain[domain] = preferredDomainStatus{Domain: domain, Enabled: a.preferredEnabled[domain], Stage: "WS_FAIL"}
-			continue
-		}
-		statusByDomain[domain] = preferredDomainStatus{Domain: domain, Enabled: a.preferredEnabled[domain], IPs: []string{best}, Latency: bestLatency, Stage: "WS_PASS", LastProbe: time.Now()}
-	}
-
-	// 将本轮 WS 通过的优选域名 IP 合并进候选池（proxy 层），
-	// 后续候选池优化器会做 VLESS 数据面终审并按“更优换池”规则推送。
-	a.mergePreferredIPsIntoCandidates(ctx, okSet)
-
-	a.preferredMu.Lock()
-	a.preferredStatus = statusByDomain
-	a.preferredLastProbe = time.Now()
-	a.preferredLastError = ""
-	a.preferredMu.Unlock()
+	_ = parent
+	// 已废弃：优选域名不再解析、不探测、不合入候选池，仅作 cfnat 兜底转发。
 }
 
-// mergePreferredIPsIntoCandidates 将从优选域名解析出的已通过 IP 合入候选快照。
-func (a *app) mergePreferredIPsIntoCandidates(parent context.Context, passed map[string]struct{}) {
-	a.candidateMu.Lock()
-	defer a.candidateMu.Unlock()
-	snapshot := a.candidates
-	if snapshot.SourceByIP == nil {
-		snapshot.SourceByIP = make(map[string]string)
-	}
-	for ip := range passed {
-		key := ip
-		if _, ok := snapshot.SourceByIP[key]; ok {
-			continue
-		}
-		snapshot.SourceByIP[key] = "proxy"
-		snapshot.IPs = append(snapshot.IPs, key)
-		if len(snapshot.IPs) > 1000 {
-			snapshot.IPs = snapshot.IPs[:1000]
-		}
-	}
-	if len(snapshot.IPs) > 0 && !snapshot.UpdatedAt.IsZero() {
-		a.candidates = snapshot
-		_ = a.saveProxyCandidateCache(snapshot)
-	}
+// updatePreferredDomainStatus 保留空壳：优选域名无慢测状态可记录。
+func (a *app) updatePreferredDomainStatus(domain string, st preferredDomainStatus) {
+	_, _ = domain, st
 }
 
 // handlePreferredDomains 读取/设置优选域名启用状态。
@@ -240,6 +177,7 @@ func (a *app) handlePreferredDomains(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"all":       a.getAllPreferredDomains(),
 			"enabled":   a.enabledPreferredDomains(),
+			"limit":     a.preferredLimitValue(),
 			"status":    a.preferredStatusSnapshot(),
 			"lastProbe": a.preferredLastProbe,
 			"lastError": a.preferredLastError,
@@ -248,6 +186,7 @@ func (a *app) handlePreferredDomains(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var body struct {
 			Enabled []string `json:"enabled"`
+			Limit   int      `json:"limit"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -267,6 +206,11 @@ func (a *app) handlePreferredDomains(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		a.preferredMu.Lock()
+		if body.Limit >= 1 && body.Limit <= maxPreferredDomains {
+			a.preferredLimit = body.Limit
+		} else if body.Limit != 0 {
+			a.preferredLimit = envInt("PROXY_PREFERRED_MAX_DOMAINS", 20)
+		}
 		a.preferredEnabled = want
 		if err := a.savePreferredSettingsLocked(); err != nil {
 			a.preferredMu.Unlock()

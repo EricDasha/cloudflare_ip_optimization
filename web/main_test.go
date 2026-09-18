@@ -76,6 +76,51 @@ func TestThirdPartyProxySourcesAreHTTPSAllowlisted(t *testing.T) {
 	}
 }
 
+func TestSameIPSetIgnoresOrder(t *testing.T) {
+	if !sameIPSet([]string{"1.1.1.1", "8.8.8.8"}, []string{"8.8.8.8", "1.1.1.1"}) {
+		t.Fatal("same IPs in different order were treated as changed")
+	}
+	if sameIPSet([]string{"1.1.1.1"}, []string{"1.1.1.1", "8.8.8.8"}) {
+		t.Fatal("different pools were treated as same")
+	}
+}
+
+func TestSubscriptionMaintainersDefaultList(t *testing.T) {
+	t.Setenv("PROXY_SUBSCRIPTION_MAINTAINERS", "")
+	got := subscriptionMaintainers()
+	for _, want := range []string{"owo.o00o.ooo", "cm.soso.edu.kg", "zrf.zrf.me"} {
+		found := false
+		for _, host := range got {
+			if host == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("default maintainers missing %q: %v", want, got)
+		}
+	}
+}
+
+func TestInterleaveByMaintainerIsRoundRobin(t *testing.T) {
+	ips := []string{"a1", "a2", "a3", "b1"}
+	sources := map[string]string{"a1": "A", "a2": "A", "a3": "A", "b1": "B"}
+	got := interleaveByMaintainer(ips, sources)
+	want := []string{"a1", "b1", "a2", "a3"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("interleaveByMaintainer() = %v, want %v", got, want)
+	}
+}
+
+func TestPreferredDomainsAreFallbackOnly(t *testing.T) {
+	if got := resolvePreferredDomains(context.Background(), []string{"www.visa.cn"}, 10); len(got) != 0 {
+		t.Fatalf("preferred domains must not resolve to IPs: %v", got)
+	}
+	if _, err := fetchPreferredDomains(context.Background()); err == nil {
+		t.Fatal("preferred-domain discovery must be disabled")
+	}
+}
+
 func TestEnabledPreferredDomainsDefaultsToAllImported(t *testing.T) {
 	a := &app{dataDir: t.TempDir()}
 	a.loadPreferredSettings()

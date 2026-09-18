@@ -39,6 +39,7 @@ const (
 	proxyCandidateCacheFile       = "proxy-candidates.json"
 	proxyActivePoolFile           = "proxy-active.json"
 	proxyOptimizerSettingsFile    = "proxy-optimizer.json"
+	subscriptionPoolFile          = "subscription-pool.json"
 	preferredDomainSourceURL      = "https://cf.090227.xyz/"
 	maxPreferredDomains           = 64
 	maxForwardDomains             = 12
@@ -60,15 +61,27 @@ type app struct {
 	candidates         proxyCandidateSnapshot
 	activeMu           sync.RWMutex
 	activePool         proxyActivePool
+	poolGuardMu        sync.Mutex
+	lastPoolSwitchAt   time.Time
+	activeHealthMu     sync.Mutex
+	activeHealth       map[string]*activeHealthStat
 	optimizerMu        sync.RWMutex
 	optimizerEnabled   bool
 	optimizerCursor    int
 	optimizerLastRun   time.Time
 	optimizerLastError string
+	subMu              sync.RWMutex
+	subSweepMu         sync.Mutex
+	subIPs             []string
+	subSources         map[string]string
+	subLastRun         time.Time
+	subLastError       string
+	subLastCount       int
 	quality            *qualitySchedulerRuntime
 	preferredMu        sync.Mutex
 	preferredProbeMu   sync.Mutex
 	preferredEnabled   map[string]bool
+	preferredLimit     int
 	preferredLastProbe time.Time
 	preferredLastError string
 	preferredStatus    map[string]preferredDomainStatus
@@ -451,11 +464,15 @@ func main() {
 		cfnat:            newManagedProcess("cfnat", env("CFNAT_BIN", "/usr/local/bin/cfnat")),
 		cfdata:           newManagedProcess("cfdata", env("CFDATA_BIN", "/usr/local/bin/cfdata")),
 		optimizerEnabled: envBool("PROXY_BACKGROUND_OPTIMIZER", true),
+		activeHealth:     make(map[string]*activeHealthStat),
+		subSources:       make(map[string]string),
 	}
 	a.loadProxyCandidateCache()
 	a.loadProxyActivePool()
 	a.loadOptimizerSettings()
 	a.loadPreferredSettings()
+	a.loadSubscriptionPool()
+	a.seedPoolGuardFromActive()
 	a.quality = newQualitySchedulerRuntime(a.dataDir)
 	if pool := a.proxyActivePoolSnapshot(); len(pool.IPs) > 0 {
 		a.quality.seedActive(pool.IPs[0], pool.UpdatedAt)
@@ -470,7 +487,7 @@ func main() {
 	}
 	go a.runProxyCandidateRefreshLoop()
 	go a.runBackgroundOptimizerLoop()
-	go a.runPreferredDomainProbeLoop()
+	go a.runSubscriptionSweepLoop()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", a.handleHealth)
@@ -484,6 +501,7 @@ func main() {
 	mux.HandleFunc("/api/cfnat/background-optimizer", a.handleBackgroundOptimizer)
 	mux.HandleFunc("/api/cfnat/proxy-scan/apply", a.handleProxyScanApply)
 	mux.HandleFunc("/api/cfnat/preferred", a.handlePreferredDomains)
+	mux.HandleFunc("/api/subscriptions/refresh", a.handleSubscriptionRefresh)
 	mux.HandleFunc("/api/cfdata/run", a.handleCFdataRun)
 	mux.HandleFunc("/api/cfdata/stop", a.handleCFdataStop)
 	mux.HandleFunc("/api/cfdata/results", a.handleCFdataResults)
@@ -634,6 +652,53 @@ func (a *app) runBackgroundOptimizerLoop() {
 	}
 }
 
+// runCFdataBackgroundScan 已废弃：CFdata 彻底改为用户主动触发，
+// 不再有任何后台自启动（无后台循环、无定时扫描）。
+// 保留空壳仅防旧调用残留；实际扫描走 /api/cfdata/run 手动触发。
+func (a *app) runCFdataBackgroundScan() {
+	log.Printf("runCFdataBackgroundScan is disabled: CFdata runs only on manual trigger (/api/cfdata/run)")
+}
+
+// ============================================================================
+// 三池模型 (Three-Pool Model)
+// ============================================================================
+//
+// 整个优选系统维护三个池，各自承担不同的测试成本和生命周期：
+//
+// 1. Candidate Pool（候选池）
+//    - 来源：用户IP/订阅 > 优选域名 > CFdata cache > 官方段采样
+//    - 测试：低成本 TCP/TLS 延迟筛选
+//    - 规模：大量（数百~数千）
+//    - 职责：快速发现可能可用的 IP
+//
+// 2. Standby Pool（替补池）
+//    - 来源：Candidate Pool 中通过 TCP 测试的 IP
+//    - 测试：完整 VLESS 品质测试（延迟+速度+稳定性）
+//    - 规模：中等（数十）
+//    - 职责：预热验证，等待晋升机会
+//
+// 3. Active Pool（工作池）
+//    - 来源：Standby Pool 中经过多轮验证的最优 IP
+//    - 测试：仅被动连接指标（不主动测速，避免干扰工作流量）
+//    - 规模：极小（1-5）
+//    - 职责：实际转发用户流量
+//
+// 晋升规则（Promotion Threshold）：
+//   - Standby IP 必须连续 2 轮证明明显优于 Active（RequiredSuperiorRounds=2）
+//   - "明显优于" = 速度提升 ≥15% 且 ≥50Mbps（RelativePromotionGain=0.15, AbsolutePromotionGainMbps=50）
+//   - 距离上次切换必须 >10 分钟（MinimumSwitchInterval=10min）
+//   - 晋升后，旧 Active 降级为 Standby（不是丢弃）
+//
+// Active 隔离：
+//   - 后台 Optimizer 只测试 Candidate/Standby IP，绝不触碰 Active IP
+//   - Active IP 的健康检查仅通过被动连接指标（连接成功率、失败率）
+//   - 这确保后台优选不会干扰正在工作的代理连接
+//
+// ============================================================================
+
+// runQualitySchedulerProbe 后台优选主循环：
+// 从 Candidate Pool 取一批 IP → WS/VLESS 测试 → 观察结果 → 决定是否换池。
+// 此函数是三池模型的核心执行器。
 func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	if a.quality == nil {
 		return
@@ -651,14 +716,20 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	cfg := defaultProxyAutoConfig()
 	cfg.Concurrency = 4
 	cfg.MaxLatency = 1500
+
+	// 从 Candidate Pool 获取候选 IP
 	snapshot := a.proxyCandidateSnapshot()
 	if len(snapshot.IPs) == 0 {
 		return
 	}
+
+	// Active 隔离：构建 Active IP 集合，后续批量测试时跳过
 	active := make(map[string]struct{})
 	for _, ip := range a.proxyActivePoolSnapshot().IPs {
 		active[ip] = struct{}{}
 	}
+
+	// 从 Candidate Pool 轮询取一批待测 IP（排除 Active）
 	a.optimizerMu.Lock()
 	start := a.optimizerCursor % len(snapshot.IPs)
 	a.optimizerCursor = (start + a.quality.batch) % len(snapshot.IPs)
@@ -675,10 +746,14 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	if len(batch) == 0 {
 		return
 	}
+
+	// 第一阶段：WS/TLS 初筛（低成本）
 	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
 	defer cancel()
 	results := scanProxyWebSockets(ctx, batch, cfg)
 	applyCandidateSourcePriority(results, snapshot.SourceByIP)
+
+	// 第二阶段：VLESS 完整测试（高成本，仅对通过初筛的 IP）
 	passed := make([]string, 0, len(results))
 	if cfg.VLESS.Enabled {
 		template, err := loadVLESSOutboundTemplate(cfg.VLESS.TemplatePath)
@@ -695,136 +770,48 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 			}
 		}
 	}
+
+	// 观察结果：更新每个 IP 的质量记录（进入 Standby 状态），
+	// 同时喂 active 被动健康：WS/VLESS 通过记成功，失败记失败，供换池“健康闸”使用。
 	passedSet := make(map[string]struct{}, len(passed))
 	for _, ip := range passed {
 		passedSet[ip] = struct{}{}
 	}
 	now := time.Now()
+	activeSet := make(map[string]struct{}, len(active))
+	for ip := range active {
+		activeSet[ip] = struct{}{}
+	}
 	for _, result := range results {
 		_, ok := passedSet[result.IP]
 		a.quality.observe(result.IP, snapshot.SourceByIP[result.IP], result.DownloadMbps, ok, now)
+		if _, isActive := activeSet[result.IP]; isActive {
+			a.recordActiveHealth(result.IP, ok, now)
+		}
 	}
+
+	// 决策：检查是否有 Standby IP 应该晋升为 Active
 	decision := a.quality.decide(now)
 	if decision.Event == switchNone || decision.ToIP == "" || !a.quality.apply {
 		return
 	}
+
+	// 执行换池：旧 Active → Standby，新 IP → Active。
+	// 防顶池三道闸：同池跳过、全局冷却、active 自检先行。
+	if !a.allowPoolSwitch(now, "scheduler") {
+		return
+	}
 	current := a.proxyActivePoolSnapshot()
+	if sameIPSet(current.IPs, []string{decision.ToIP}) {
+		log.Printf("scheduler pool switch skipped: target equals current pool")
+		return
+	}
 	pool := current
 	pool.UpdatedAt, pool.Host, pool.Path = now, cfg.Host, cfg.Path
 	pool.IPs, pool.Results = []string{decision.ToIP}, results
 	a.applyProxyPool(pool, current)
 	a.quality.commitSwitch(decision, now)
-}
-
-func (a *app) backgroundOptimizeProxyPool(parent context.Context) {
-	if !a.proxyScanMu.TryLock() {
-		return
-	}
-	defer a.proxyScanMu.Unlock()
-	a.optimizerMu.RLock()
-	enabled := a.optimizerEnabled
-	a.optimizerMu.RUnlock()
-	if !enabled || !defaultProxyAutoConfig().Enabled {
-		return
-	}
-	cfg := defaultProxyAutoConfig()
-	cfg.Concurrency = 4
-	cfg.MaxLatency = 1500
-	snapshot := a.proxyCandidateSnapshot()
-	candidates := snapshot.IPs
-	if len(candidates) == 0 {
-		return
-	}
-	maxPoolCandidates := cfg.PoolSize
-	if cfg.VLESS.Enabled && cfg.VLESS.MaxCandidates > maxPoolCandidates {
-		maxPoolCandidates = cfg.VLESS.MaxCandidates
-	}
-	const batchSize = 24
-	a.optimizerMu.Lock()
-	start := a.optimizerCursor % len(candidates)
-	a.optimizerCursor = (start + batchSize) % len(candidates)
-	a.optimizerLastRun = time.Now()
-	a.optimizerLastError = ""
-	a.optimizerMu.Unlock()
-	batch := make([]string, 0, batchSize)
-	for i := 0; i < batchSize && i < len(candidates); i++ {
-		batch = append(batch, candidates[(start+i)%len(candidates)])
-	}
-	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
-	defer cancel()
-	results := scanProxyWebSockets(ctx, batch, cfg)
-	applyCandidateSourcePriority(results, snapshot.SourceByIP)
-	passed := make([]string, 0, len(results))
-	if cfg.VLESS.Enabled {
-		if err := cfg.VLESS.validate(); err != nil {
-			a.optimizerMu.Lock()
-			a.optimizerLastError = "VLESS 配置无效"
-			a.optimizerMu.Unlock()
-			return
-		}
-		template, err := loadVLESSOutboundTemplate(cfg.VLESS.TemplatePath)
-		if err != nil {
-			a.optimizerMu.Lock()
-			a.optimizerLastError = "VLESS 模板不可用"
-			a.optimizerMu.Unlock()
-			return
-		}
-		passed = probeVLESSPool(ctx, results, cfg.Port, maxPoolCandidates, cfg.VLESS, template)
-		passed = rankVLESSPassesBySpeed(ctx, passed, results, cfg.Port, cfg.VLESS, template)
-		if len(passed) > cfg.PoolSize {
-			passed = passed[:cfg.PoolSize]
-		}
-	} else {
-		for _, result := range results {
-			if result.Error == "" {
-				passed = append(passed, result.IP)
-			}
-		}
-	}
-	if len(passed) == 0 {
-		a.optimizerMu.Lock()
-		a.optimizerLastError = "本轮无低延迟候选"
-		a.optimizerMu.Unlock()
-		return
-	}
-	current := a.proxyActivePoolSnapshot()
-	merged := append([]string{}, passed...)
-	merged = append(merged, current.IPs...)
-	seen := make(map[string]bool, len(merged))
-	ordered := merged[:0]
-	for _, ip := range merged {
-		if !seen[ip] {
-			seen[ip] = true
-			ordered = append(ordered, ip)
-		}
-	}
-	if len(ordered) > cfg.PoolSize {
-		ordered = ordered[:cfg.PoolSize]
-	}
-	if len(ordered) < cfg.MinPool {
-		if len(current.IPs) >= cfg.MinPool {
-			return
-		}
-		if len(passed) < cfg.MinPool {
-			return
-		}
-	}
-	if len(current.IPs) == 0 && len(ordered) < cfg.MinPool {
-		return
-	}
-	pool := current
-	pool.UpdatedAt = time.Now()
-	pool.Host, pool.Path = cfg.Host, cfg.Path
-	pool.IPs = ordered
-	pool.Results = results
-	if strings.Join(current.IPs, ",") == strings.Join(ordered, ",") {
-		_ = a.saveProxyActivePool(pool)
-		a.activeMu.Lock()
-		a.activePool = pool
-		a.activeMu.Unlock()
-		return
-	}
-	a.applyProxyPool(pool, current)
+	a.markPoolSwitched(now)
 }
 
 func rankVLESSPassesBySpeed(parent context.Context, passed []string, results []proxyScanResult, port int, base vlessProbeConfig, template map[string]any) []string {
@@ -934,50 +921,10 @@ func proxyResultSourceRank(results []proxyScanResult, ip string) int {
 }
 
 func (a *app) refreshAndApplyProxyPool(ctx context.Context) {
-	a.runScheduledCFdata(ctx)
+	// CFdata 已解耦为独立后台扫描器，不再在此触发。
+	// Optimizer 只读取 cfdata cache（ip.csv），不启动扫描。
 	if a.refreshProxyCandidates(ctx) {
 		a.autoApplyProxyPool(ctx)
-	}
-}
-
-func (a *app) runScheduledCFdata(parent context.Context) {
-	if !envBool("PROXY_AUTO_CFDATA", false) {
-		return
-	}
-	timeoutSeconds := envInt("PROXY_AUTO_CFDATA_TIMEOUT", 600)
-	if timeoutSeconds < 30 || timeoutSeconds > 3600 {
-		timeoutSeconds = 600
-	}
-	status := a.cfdata.status()
-	if !status.Running {
-		cfg := defaultCFdataConfig()
-		if err := a.cfdata.start(a.dataDir, cfg.args(), ""); err != nil {
-			log.Printf("scheduled cfdata start failed: %v", err)
-			return
-		}
-		log.Printf("scheduled cfdata scan started")
-	}
-	ctx, cancel := context.WithTimeout(parent, time.Duration(timeoutSeconds)*time.Second)
-	defer cancel()
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			_ = a.cfdata.stop()
-			log.Printf("scheduled cfdata scan timed out after %ds", timeoutSeconds)
-			return
-		case <-ticker.C:
-			status := a.cfdata.status()
-			if !status.Running {
-				if status.ExitCode != nil && *status.ExitCode == 0 {
-					log.Printf("scheduled cfdata scan completed")
-				} else {
-					log.Printf("scheduled cfdata scan failed: %s", status.LastError)
-				}
-				return
-			}
-		}
 	}
 }
 
@@ -1112,10 +1059,9 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 	}
 	current := a.proxyActivePoolSnapshot()
 	domains := a.proxyForwardDomains()
-	changed := strings.Join(current.IPs, ",") != strings.Join(passed, ",") ||
-		strings.Join(current.Domains, ",") != strings.Join(domains, ",")
-	pool := proxyActivePool{UpdatedAt: time.Now(), Host: cfg.Host, Path: cfg.Path, IPs: passed, Domains: domains, Results: results}
-	if !changed {
+	now := time.Now()
+	pool := proxyActivePool{UpdatedAt: now, Host: cfg.Host, Path: cfg.Path, IPs: passed, Domains: domains, Results: results}
+	if sameIPSet(current.IPs, passed) && sameStringSet(current.Domains, domains) {
 		if err := a.saveProxyActivePool(pool); err != nil {
 			log.Printf("save reverified proxy active pool: %v", err)
 			return
@@ -1126,7 +1072,12 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 		log.Printf("proxy active pool reverified: %d IPs", len(passed))
 		return
 	}
+	// 全量终审换池同样受全局冷却保护，避免与 scheduler 互相顶池。
+	if !a.allowPoolSwitch(now, "auto-apply") {
+		return
+	}
 	a.applyProxyPool(pool, current)
+	a.markPoolSwitched(now)
 }
 
 func (a *app) applyProxyPool(pool, current proxyActivePool) {
@@ -1219,18 +1170,25 @@ func applyCandidateSourcePriority(results []proxyScanResult, sourceByIP map[stri
 	if len(sourceByIP) == 0 {
 		return
 	}
+	// 来源优先级决定"什么时候拿它来测试"，不决定最终性能排名。
+	// user > subscription > cfdata > official > preferred > proxy(community fallback)
+	// preferred 只做兜底转发，不再参与 IP 探测排序。
 	rank := func(ip string) int {
 		switch sourceByIP[ip] {
-		case "official":
-			return 0
 		case "user":
+			return 0
+		case "subscription":
 			return 1
-		case "proxy":
-			return 2
 		case "cfdata":
+			return 2
+		case "official":
 			return 3
-		default:
+		case "preferred":
 			return 4
+		case "proxy":
+			return 5
+		default:
+			return 6
 		}
 	}
 	for i := range results {
@@ -1330,27 +1288,19 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 	appendGroup("user", strings.FieldsFunc(env("PROXY_USER_CANDIDATES", ""), func(r rune) bool {
 		return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t'
 	}))
+	appendGroup("subscription", a.subscriptionPoolIPs(1000-len(resolved)))
 	community, communityErrors, err := resolveProxySources(ctx, defaultProxyCandidateSourceIDs, 1000-len(resolved))
 	sourceErrors = append(sourceErrors, communityErrors...)
 	if err != nil {
 		sourceErrors = append(sourceErrors, err.Error())
 	}
 	appendGroup("proxy", community)
-	// v2rayn 导出的固定优选域名：作为 Proxy 层候选（IP 快照），走同一终审。
+	// v2rayn 导出的固定优选域名：作为独立 preferred 层候选（IP 快照），走同一终审。
 	// 只解析用户当前启用的优选域名（默认全部启用；用户可在 GUI 勾选开关）。
-	appendGroup("proxy", resolvePreferredDomains(ctx, a.enabledPreferredDomains(), 1000-len(resolved)))
-	// 动态发现 090227 优选目录的当前优选域名（额外页面抓取）：
-	// 默认关闭，因为候选已由 1.txt 导入域名覆盖；仅当 PROXY_DYNAMIC_DISCOVERY=true 时补充。
-	if envBool("PROXY_DYNAMIC_DISCOVERY", false) {
-		discovered, preferredErr := fetchPreferredDomains(ctx)
-		if preferredErr != nil {
-			sourceErrors = append(sourceErrors, "090227 优选域名动态发现: "+preferredErr.Error())
-		}
-		if len(discovered) > 0 {
-			domainIPs := resolvePreferredDomains(ctx, discovered, 1000-len(resolved))
-			appendGroup("proxy", domainIPs)
-		}
-	}
+	// 优选域名不再解析成 IP 合入候选池：仅作 cfnat 兜底转发（-fallback），
+	// 不参与任何探测与 IP 排序，避免“人挤人”顶掉工作 IP。
+	// 090227 动态发现同样停用（PROXY_DYNAMIC_DISCOVERY 废弃）。
+	_ = ctx
 	cfdataLimit := envInt("PROXY_CFDATA_CANDIDATES", 300)
 	if cfdataLimit < 0 || cfdataLimit > 2000 {
 		cfdataLimit = 300
@@ -1397,10 +1347,10 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 	snapshot := proxyCandidateSnapshot{
 		UpdatedAt:        now,
 		NextRefresh:      now.Add(proxyCandidateRefreshInterval),
-		Sources:          []string{"official", "user", "proxy", "cfdata"},
+		Sources:          []string{"user", "subscription", "cfdata", "official"},
 		IPs:              ips,
 		SourceByIP:       sourceByIP,
-		PreferredDomains: a.enabledPreferredDomains(),
+		PreferredDomains: a.enabledPreferredDomainsForCandidates(),
 		Errors:           sourceErrors,
 	}
 	a.candidateMu.Lock()
@@ -1504,6 +1454,8 @@ func sampleIPv4CIDRs(content string, limit int) []string {
 	return result
 }
 
+// cfdataCandidateIPs 纯读取函数：从用户手动触发 CFdata 产生的 ip.csv 读取候选 IP。
+// CFdata 无任何后台自启动；此函数绝不触发扫描。
 func (a *app) cfdataCandidateIPs(limit int) ([]string, error) {
 	rows, _, err := a.readScanRows()
 	if err != nil {
@@ -1586,8 +1538,10 @@ func (a *app) handleProxyCandidates(w http.ResponseWriter, r *http.Request) {
 	writeSnapshot := func() {
 		writeJSON(w, struct {
 			proxyCandidateSnapshot
-			Active proxyActivePool `json:"active"`
-		}{proxyCandidateSnapshot: a.proxyCandidateSnapshot(), Active: a.proxyActivePoolSnapshot()})
+			Active       proxyActivePool `json:"active"`
+			Subscription map[string]any  `json:"subscription"`
+			PoolGuard    map[string]any  `json:"poolGuard"`
+		}{proxyCandidateSnapshot: a.proxyCandidateSnapshot(), Active: a.proxyActivePoolSnapshot(), Subscription: a.subscriptionStatus(), PoolGuard: a.poolGuardStatus()})
 	}
 	switch r.Method {
 	case http.MethodGet:
@@ -1612,6 +1566,555 @@ type proxyScanResult struct {
 	SourceRank   int     `json:"sourceRank,omitempty"`
 	Stage        string  `json:"stage,omitempty"`
 	Error        string  `json:"error,omitempty"`
+}
+
+// activeHealthStat 记录生效池 IP 的被动健康：成功/失败计数与最近失败时间。
+type activeHealthStat struct {
+	Success   int
+	Failures  int
+	LastFail  time.Time
+	LastCheck time.Time
+}
+
+// poolSwitchCooldown 全局换池冷却：任何自动换池路径（scheduler/auto-apply）
+// 两次换池之间至少间隔该时长，防止“人挤人”互相顶池。
+// 用户手动采用不受冷却限制。
+func poolSwitchCooldown() time.Duration {
+	minutes := envInt("PROXY_POOL_SWITCH_COOLDOWN_MINUTES", 30)
+	if minutes < 5 || minutes > 24*60 {
+		minutes = 30
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+// seedPoolGuardFromActive 启动时用持久化生效池时间初始化冷却锚点，
+// 避免重启后立即被后台换池顶掉正在工作的 IP。
+func (a *app) seedPoolGuardFromActive() {
+	pool := a.proxyActivePoolSnapshot()
+	if pool.UpdatedAt.IsZero() {
+		return
+	}
+	a.poolGuardMu.Lock()
+	a.lastPoolSwitchAt = pool.UpdatedAt
+	a.poolGuardMu.Unlock()
+}
+
+func (a *app) markPoolSwitched(now time.Time) {
+	a.poolGuardMu.Lock()
+	a.lastPoolSwitchAt = now
+	a.poolGuardMu.Unlock()
+}
+
+// allowPoolSwitch 自动换池三道闸：
+// 1) 全局冷却未过 → 拒绝；2) 现生效池全部健康（近 N 次无失败）→ 拒绝顶池；
+// 3) 通过才允许换池。通过后调用方必须 markPoolSwitched。
+func (a *app) allowPoolSwitch(now time.Time, reason string) bool {
+	cooldown := poolSwitchCooldown()
+	a.poolGuardMu.Lock()
+	last := a.lastPoolSwitchAt
+	a.poolGuardMu.Unlock()
+	if !last.IsZero() && now.Sub(last) < cooldown {
+		log.Printf("pool switch blocked by cooldown (%s ago < %s): %s", now.Sub(last).Round(time.Second), cooldown, reason)
+		return false
+	}
+	current := a.proxyActivePoolSnapshot()
+	if len(current.IPs) > 0 && a.activePoolHealthy(current.IPs) {
+		log.Printf("pool switch blocked: active pool healthy, keep working IPs (%s)", reason)
+		return false
+	}
+	return true
+}
+
+// activePoolHealthy 现生效池健康即“全部 IP 近期无失败记录”。
+// 无健康记录的 IP 视为未知（不阻拦换池），只有“有成功且无近期失败”才算健康票。
+func (a *app) activePoolHealthy(ips []string) bool {
+	window := activeHealthWindow()
+	now := time.Now()
+	a.activeHealthMu.Lock()
+	defer a.activeHealthMu.Unlock()
+	healthy := 0
+	for _, ip := range ips {
+		st := a.activeHealth[ip]
+		if st == nil || st.Success == 0 {
+			continue
+		}
+		if !st.LastFail.IsZero() && now.Sub(st.LastFail) < window {
+			continue
+		}
+		healthy++
+	}
+	return healthy > 0 && healthy == len(ips)
+}
+
+func activeHealthWindow() time.Duration {
+	minutes := envInt("PROXY_ACTIVE_HEALTH_WINDOW_MINUTES", 60)
+	if minutes < 10 || minutes > 24*60 {
+		minutes = 60
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func (a *app) poolGuardStatus() map[string]any {
+	a.poolGuardMu.Lock()
+	last := a.lastPoolSwitchAt
+	a.poolGuardMu.Unlock()
+	cooldown := poolSwitchCooldown()
+	next := ""
+	if !last.IsZero() {
+		next = last.Add(cooldown).Format(time.RFC3339)
+	}
+	return map[string]any{
+		"cooldownMinutes": int(cooldown.Minutes()),
+		"lastSwitchAt":    last,
+		"nextAllowedAt":   next,
+		"healthWindowMin": int(activeHealthWindow().Minutes()),
+	}
+}
+
+func (a *app) recordActiveHealth(ip string, success bool, now time.Time) {
+	a.activeHealthMu.Lock()
+	defer a.activeHealthMu.Unlock()
+	st := a.activeHealth[ip]
+	if st == nil {
+		st = &activeHealthStat{}
+		a.activeHealth[ip] = st
+	}
+	st.LastCheck = now
+	if success {
+		st.Success++
+	} else {
+		st.Failures++
+		st.LastFail = now
+	}
+}
+
+func sameIPSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, ip := range a {
+		seen[ip]++
+	}
+	for _, ip := range b {
+		seen[ip]--
+		if seen[ip] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, s := range a {
+		seen[s]++
+	}
+	for _, s := range b {
+		seen[s]--
+		if seen[s] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// defaultSubscriptionConverter 订阅转换器基地址（token 来自 SECRET，非代码）。
+// sub 参数为第三方维护者域名：?sub=<maintainer-host>。
+func defaultSubscriptionConverter() string {
+	return strings.TrimRight(strings.TrimSpace(env("PROXY_SUBSCRIPTION_CONVERTER", "https://vlesdy.trojanjd.dpdns.org/sub")), "/")
+}
+
+// subscriptionMaintainers 第三方订阅维护者域名清单（逗号/空白分隔）。
+// 默认内置用户给出的 7 个维护者；环境变量可覆盖。
+func subscriptionMaintainers() []string {
+	raw := strings.TrimSpace(env("PROXY_SUBSCRIPTION_MAINTAINERS", "owo.o00o.ooo cm.soso.edu.kg zrf.zrf.me sub.keaeye.icu sub.mot.cloudns.biz sub.mia.xx.kg sub.lzjbaby.com sub.xdu.qzz.io"))
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 16)
+	for _, host := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	}) {
+		host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+		if host == "" || !validCandidateHostname(host) {
+			continue
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		out = append(out, host)
+		if len(out) >= 16 {
+			break
+		}
+	}
+	return out
+}
+
+func subscriptionToken() string {
+	return strings.TrimSpace(env("PROXY_SUBSCRIPTION_TOKEN", ""))
+}
+
+func subscriptionRefreshEnabled() bool {
+	return envBool("PROXY_SUBSCRIPTION_REFRESH_ENABLED", true)
+}
+
+func subscriptionRefreshMinutes() time.Duration {
+	minutes := envInt("PROXY_SUBSCRIPTION_REFRESH_MINUTES", 360)
+	if minutes < 30 || minutes > 24*60 {
+		minutes = 360
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func subscriptionMaxHosts() int {
+	return maxSubscriptionHostnames
+}
+
+// fetchSubscriptionBody 拉取单个维护者订阅内容：HTTPS 同 host 跳转、≤512KiB。
+func fetchSubscriptionBody(parent context.Context, converter, maintainer, token string) ([]byte, error) {
+	if converter == "" || maintainer == "" || token == "" {
+		return nil, errors.New("订阅转换器、维护者或 token 为空")
+	}
+	target := converter + "?token=" + url.QueryEscape(token) + "&sub=" + url.QueryEscape(maintainer)
+	parsed, err := url.Parse(target)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" {
+		return nil, errors.New("订阅转换器地址必须是 HTTPS")
+	}
+	subFetchTimeout := envInt("PROXY_SUBSCRIPTION_FETCH_TIMEOUT", 45)
+	if subFetchTimeout < 15 || subFetchTimeout > 180 {
+		subFetchTimeout = 45
+	}
+	client := &http.Client{
+		Timeout: time.Duration(subFetchTimeout) * time.Second,
+		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			if !strings.EqualFold(req.URL.Hostname(), parsed.Hostname()) {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
+	request, err := http.NewRequestWithContext(parent, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("订阅 HTTP 状态码 %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxCandidateSourceBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxCandidateSourceBody {
+		return nil, errors.New("订阅内容超过 512 KiB")
+	}
+	return body, nil
+}
+
+// loadSubscriptionPool 启动加载持久化的订阅 IP 池。
+func (a *app) loadSubscriptionPool() {
+	data, err := os.ReadFile(filepath.Join(a.dataDir, subscriptionPoolFile))
+	if err != nil {
+		return
+	}
+	var stored struct {
+		UpdatedAt time.Time         `json:"updatedAt"`
+		IPs       []string          `json:"ips"`
+		Sources   map[string]string `json:"sources"`
+	}
+	if json.Unmarshal(data, &stored) != nil || len(stored.IPs) == 0 {
+		return
+	}
+	valid := make([]string, 0, len(stored.IPs))
+	sources := make(map[string]string, len(stored.IPs))
+	for _, raw := range stored.IPs {
+		if ip := net.ParseIP(raw); isPublicIPv4(ip) {
+			key := ip.To4().String()
+			valid = append(valid, key)
+			if src := stored.Sources[key]; src != "" {
+				sources[key] = src
+			} else {
+				sources[key] = "subscription"
+			}
+		}
+	}
+	a.subMu.Lock()
+	a.subIPs = valid
+	a.subSources = sources
+	a.subMu.Unlock()
+}
+
+func (a *app) saveSubscriptionPoolLocked() error {
+	data, err := json.MarshalIndent(map[string]any{
+		"updatedAt": time.Now(),
+		"ips":       a.subIPs,
+		"sources":   a.subSources,
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(a.dataDir, subscriptionPoolFile)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// subscriptionPoolIPs 返回订阅池 IP 快照（按入库顺序），供候选汇合以 subscription 层合入。
+func (a *app) subscriptionPoolIPs(remaining int) []string {
+	a.subMu.RLock()
+	defer a.subMu.RUnlock()
+	if remaining <= 0 || len(a.subIPs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, min(remaining, len(a.subIPs)))
+	for _, ip := range a.subIPs {
+		out = append(out, ip)
+		if len(out) >= remaining {
+			break
+		}
+	}
+	return out
+}
+
+func (a *app) subscriptionStatus() map[string]any {
+	a.subMu.RLock()
+	defer a.subMu.RUnlock()
+	maintainers := subscriptionMaintainers()
+	byMaintainer := make(map[string]int, len(maintainers))
+	for _, src := range a.subSources {
+		byMaintainer[src]++
+	}
+	return map[string]any{
+		"enabled":      subscriptionRefreshEnabled(),
+		"maintainers":  maintainers,
+		"totalIPs":     len(a.subIPs),
+		"byMaintainer": byMaintainer,
+		"lastRun":      a.subLastRun,
+		"lastError":    a.subLastError,
+		"lastCount":    a.subLastCount,
+	}
+}
+
+// runSubscriptionSweepLoop 日常订阅慢扫：按维护者逐个拉取订阅内容，
+// 提取明文 IP 与节点域名解析出的 IP，低成本 WS 验活后丢入订阅池慢慢候选。
+func (a *app) runSubscriptionSweepLoop() {
+	initial := time.NewTimer(60 * time.Second)
+	defer initial.Stop()
+	<-initial.C
+	for {
+		if subscriptionRefreshEnabled() {
+			a.sweepSubscriptions(context.Background())
+		}
+		ticker := time.NewTimer(subscriptionRefreshMinutes())
+		<-ticker.C
+		ticker.Stop()
+	}
+}
+
+// sweepSubscriptions 执行一轮订阅拉取 → IP 提取 → WS 慢筛 → 入池。
+// 防重入：同一时刻只跑一轮，避免手动触发与定时轮重叠造成“人挤人”式重复拉取。
+func (a *app) sweepSubscriptions(parent context.Context) {
+	if !a.subSweepMu.TryLock() {
+		log.Printf("subscription sweep skipped: another sweep is running")
+		return
+	}
+	defer a.subSweepMu.Unlock()
+	token := subscriptionToken()
+	converter := defaultSubscriptionConverter()
+	maintainers := subscriptionMaintainers()
+	if token == "" || len(maintainers) == 0 {
+		a.subMu.Lock()
+		a.subLastError = "订阅 token 未配置（PROXY_SUBSCRIPTION_TOKEN）"
+		a.subMu.Unlock()
+		log.Printf("subscription sweep skipped: token unset")
+		return
+	}
+	cfg := defaultProxyAutoConfig()
+	if cfg.Host == "" || cfg.Path == "" {
+		a.subMu.Lock()
+		a.subLastError = "PROXY_AUTO_HOST 未配置，跳过订阅验活"
+		a.subMu.Unlock()
+		log.Printf("subscription sweep skipped: PROXY_AUTO_HOST unset")
+		return
+	}
+	cfg.Concurrency = 4
+	cfg.MaxLatency = 2000
+	perMaintainer := envInt("PROXY_SUBSCRIPTION_PER_MAINTAINER", 30)
+	if perMaintainer < 1 || perMaintainer > 200 {
+		perMaintainer = 30
+	}
+	var fresh []string
+	freshSources := make(map[string]string)
+	sourceErrors := []string{}
+	ctx, cancel := context.WithTimeout(parent, 8*time.Minute)
+	defer cancel()
+	// 并行拉取各维护者订阅（并发 3、单源失败重试 1 次）：
+	// 订阅转换器偶发冷启动慢（实测单源 14~21s），串行会被慢源拖垮整轮预算，
+	// 后续维护者还没轮到就撞上总超时。
+	type subFetch struct {
+		maintainer string
+		body       []byte
+		err        error
+	}
+	fetches := make([]subFetch, len(maintainers))
+	sem := make(chan struct{}, 3)
+	var wg sync.WaitGroup
+	for i, maintainer := range maintainers {
+		wg.Add(1)
+		go func(i int, maintainer string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			var (
+				body []byte
+				err  error
+			)
+			for attempt := 0; attempt < 2; attempt++ {
+				body, err = fetchSubscriptionBody(ctx, converter, maintainer, token)
+				if err == nil {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					fetches[i] = subFetch{maintainer, nil, err}
+					return
+				case <-time.After(3 * time.Second):
+				}
+			}
+			fetches[i] = subFetch{maintainer, body, err}
+		}(i, maintainer)
+	}
+	wg.Wait()
+	for _, f := range fetches {
+		if f.err != nil {
+			sourceErrors = append(sourceErrors, f.maintainer+": "+f.err.Error())
+			continue
+		}
+		maintainer := f.maintainer
+		text := string(f.body)
+		for _, ip := range extractPublicIPv4(text) {
+			if _, ok := freshSources[ip]; !ok {
+				freshSources[ip] = maintainer
+				fresh = append(fresh, ip)
+			}
+		}
+		for _, ip := range resolveSubscriptionHostnames(ctx, extractSubscriptionHostnames(text), perMaintainer) {
+			if _, ok := freshSources[ip]; !ok {
+				freshSources[ip] = maintainer
+				fresh = append(fresh, ip)
+			}
+		}
+	}
+	if len(fresh) == 0 {
+		a.subMu.Lock()
+		a.subLastRun = time.Now()
+		a.subLastError = strings.Join(sourceErrors, " | ")
+		if a.subLastError == "" {
+			a.subLastError = "订阅未提取到公网 IPv4"
+		}
+		a.subMu.Unlock()
+		log.Printf("subscription sweep: no IPs extracted: %s", strings.Join(sourceErrors, " | "))
+		return
+	}
+	// 慢筛：只把 WS 通过的留下来，避免脏 IP 进池。
+	// fresh 按维护者顺序排列；为避免单维护者独占验活预算，轮转打散后再验。
+	fresh = interleaveByMaintainer(fresh, freshSources)
+	wsTimeout := envInt("PROXY_SUBSCRIPTION_VERIFY_TIMEOUT", 240)
+	if wsTimeout < 60 || wsTimeout > 900 {
+		wsTimeout = 240
+	}
+	wsCtx, wsCancel := context.WithTimeout(ctx, time.Duration(wsTimeout)*time.Second)
+	defer wsCancel()
+	results := scanProxyWebSockets(wsCtx, fresh, cfg)
+	verified := make([]string, 0, len(results))
+	for _, result := range results {
+		if result.Error == "" {
+			verified = append(verified, result.IP)
+		}
+	}
+	a.subMu.Lock()
+	defer a.subMu.Unlock()
+	merged := make(map[string]struct{}, len(a.subIPs))
+	combined := make([]string, 0, len(a.subIPs)+len(verified))
+	for _, ip := range a.subIPs {
+		if _, ok := merged[ip]; !ok {
+			merged[ip] = struct{}{}
+			combined = append(combined, ip)
+		}
+	}
+	for _, ip := range verified {
+		if _, ok := merged[ip]; !ok {
+			merged[ip] = struct{}{}
+			combined = append(combined, ip)
+		}
+	}
+	// 订阅池上限 1000，老 IP 在前（先到先得，慢扫天然轮换）。
+	if len(combined) > 1000 {
+		combined = combined[len(combined)-1000:]
+	}
+	sources := make(map[string]string, len(combined))
+	for _, ip := range combined {
+		if src, ok := a.subSources[ip]; ok {
+			sources[ip] = src
+		} else if src, ok := freshSources[ip]; ok {
+			sources[ip] = src
+		} else {
+			sources[ip] = "subscription"
+		}
+	}
+	a.subIPs = combined
+	a.subSources = sources
+	a.subLastRun = time.Now()
+	a.subLastError = strings.Join(sourceErrors, " | ")
+	a.subLastCount = len(verified)
+	_ = a.saveSubscriptionPoolLocked()
+	log.Printf("subscription sweep: %d verified of %d extracted (pool=%d)", len(verified), len(fresh), len(combined))
+}
+
+// interleaveByMaintainer 按维护者轮转打散 IP，保证多维护者公平分享验活预算。
+func interleaveByMaintainer(ips []string, sources map[string]string) []string {
+	bySource := make(map[string][]string)
+	order := make([]string, 0)
+	for _, ip := range ips {
+		src := sources[ip]
+		if _, ok := bySource[src]; !ok {
+			order = append(order, src)
+		}
+		bySource[src] = append(bySource[src], ip)
+	}
+	out := make([]string, 0, len(ips))
+	for i := 0; len(out) < len(ips); i++ {
+		progress := false
+		for _, src := range order {
+			if i < len(bySource[src]) {
+				out = append(out, bySource[src][i])
+				progress = true
+			}
+		}
+		if !progress {
+			break
+		}
+	}
+	return out
+}
+
+// handleSubscriptionRefresh 手动立即触发一轮订阅拉取（不阻塞 HTTP）。
+func (a *app) handleSubscriptionRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	go a.sweepSubscriptions(context.Background())
+	writeJSON(w, map[string]any{"ok": true, "started": true})
 }
 
 func normalizeProxyScan(c proxyScanConfig) (proxyScanConfig, error) {
@@ -1765,8 +2268,17 @@ func (a *app) handleProxyScanApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current := a.proxyActivePoolSnapshot()
-	pool := proxyActivePool{UpdatedAt: time.Now(), Host: current.Host, Path: current.Path, IPs: passed, Domains: current.Domains, Results: results}
+	now := time.Now()
+	// 手动采用是最高优先级：用户显式点了采用，直接换池，不受冷却限制，
+	// 但同池仍跳过，避免无意义重启 cfnat。
+	if sameIPSet(current.IPs, passed) {
+		log.Printf("manual apply skipped: pool unchanged (%d IPs)", len(passed))
+		writeJSON(w, map[string]any{"ok": true, "applied": 0, "unchanged": true})
+		return
+	}
+	pool := proxyActivePool{UpdatedAt: now, Host: current.Host, Path: current.Path, IPs: passed, Domains: current.Domains, Results: results}
 	a.applyProxyPool(pool, current)
+	a.markPoolSwitched(now)
 	writeJSON(w, map[string]any{"ok": true, "applied": len(passed)})
 }
 
@@ -1881,78 +2393,23 @@ func extractPreferredDomains(html string) []string {
 	return domains
 }
 
-// fetchPreferredDomains 拉取 090227 优选目录并返回当前页面清单。
+// fetchPreferredDomains / resolvePreferredDomains 已废弃：优选域名不再解析成 IP，
+// 仅作 cfnat 兜底转发（-fallback 由 cfnat 数据面按当前 DNS 拨号）。
+// 保留空壳仅防旧调用与旧测试残留。
 func fetchPreferredDomains(parent context.Context) ([]string, error) {
-	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
-	defer cancel()
-	body, err := fetchHTTPSBody(ctx, preferredDomainSourceURL)
-	if err != nil {
-		return nil, err
-	}
-	domains := extractPreferredDomains(string(body))
-	if len(domains) == 0 {
-		return nil, errors.New("页面未发现优选域名")
-	}
-	return domains, nil
+	_ = parent
+	return nil, errors.New("preferred-domain discovery disabled: domains are fallback-only")
 }
 
-// resolvePreferredDomains 并发解析优选域名，仅保留公网 IPv4，最多 remaining 个。
 func resolvePreferredDomains(parent context.Context, domains []string, remaining int) []string {
-	if remaining <= 0 || len(domains) == 0 {
-		return nil
-	}
-	if len(domains) > maxPreferredDomains {
-		domains = domains[:maxPreferredDomains]
-	}
-	ctx, cancel := context.WithTimeout(parent, 6*time.Second)
-	defer cancel()
-	type answer struct {
-		ips []string
-	}
-	ch := make(chan answer, len(domains))
-	var wg sync.WaitGroup
-	for _, domain := range domains {
-		wg.Add(1)
-		go func(domain string) {
-			defer wg.Done()
-			dctx, dcancel := context.WithTimeout(ctx, 5*time.Second)
-			defer dcancel()
-			addresses, err := net.DefaultResolver.LookupIPAddr(dctx, domain)
-			if err != nil {
-				ch <- answer{}
-				return
-			}
-			var ips []string
-			for _, address := range addresses {
-				if ip := address.IP.To4(); ip != nil {
-					ips = append(ips, ip.String())
-				}
-			}
-			ch <- answer{ips: ips}
-		}(domain)
-	}
-	wg.Wait()
-	close(ch)
-	seen := make(map[string]struct{})
-	out := make([]string, 0, remaining)
-	for answer := range ch {
-		for _, ip := range answer.ips {
-			if _, ok := seen[ip]; ok {
-				continue
-			}
-			seen[ip] = struct{}{}
-			out = append(out, ip)
-			if len(out) >= remaining {
-				return out
-			}
-		}
-	}
-	return out
+	_, _, _ = parent, domains, remaining
+	return nil
 }
 
-// proxyForwardDomains 返回可加入 CFnat 固定转发池的优选域名。
-// PROXY_DOMAIN_FORWARD 显式指定时优先；否则在 PROXY_AUTO_DOMAINS 开启时
-// 取候选缓存中的动态优选域名，上限 maxForwardDomains。
+// proxyForwardDomains 返回 cfnat 兜底转发域名（-fallback）。
+// 优选域名仅转发、不解析不探测：PROXY_DOMAIN_FORWARD 显式指定时优先；
+// 否则取用户启用的优选域名前 maxForwardDomains 个。数据面拨号时按当前 DNS 解析。
+// 兜底只在主池全部拨号失败时尝试，绝不参与 IP 探测与换池。
 func (a *app) proxyForwardDomains() []string {
 	configured := envForwardDomains("PROXY_DOMAIN_FORWARD")
 	if len(configured) > 0 {

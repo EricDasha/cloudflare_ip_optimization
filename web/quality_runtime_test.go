@@ -33,7 +33,7 @@ func TestQualityRuntimePersistsAndRestores(t *testing.T) {
 	}
 }
 
-func TestQualityRuntimePromotionNeedsTwoObservedRounds(t *testing.T) {
+func TestQualityRuntimePromotionNeedsThreeObservedRounds(t *testing.T) {
 	r := testQualityRuntime(t)
 	now := time.Date(2026, 8, 21, 10, 0, 0, 0, time.UTC)
 	r.seedActive("1.1.1.1", now.Add(-time.Hour))
@@ -43,19 +43,28 @@ func TestQualityRuntimePromotionNeedsTwoObservedRounds(t *testing.T) {
 		t.Fatalf("promoted after one round: %#v", got)
 	}
 	r.observe("8.8.8.8", "official", 520, true, now.Add(5*time.Minute))
-	if got := r.decide(now.Add(5 * time.Minute)); got.Event != switchPromotion || got.ToIP != "8.8.8.8" {
-		t.Fatalf("second superior round did not promote: %#v", got)
+	if got := r.decide(now.Add(5 * time.Minute)); got.Event != switchNone {
+		t.Fatalf("promoted after two rounds under 3-round policy: %#v", got)
+	}
+	r.observe("8.8.8.8", "official", 540, true, now.Add(10*time.Minute))
+	if got := r.decide(now.Add(10 * time.Minute)); got.Event != switchPromotion || got.ToIP != "8.8.8.8" {
+		t.Fatalf("third superior round did not promote: %#v", got)
 	}
 }
 
-func TestQualityRuntimeActiveFailureImmediatelyFailsOver(t *testing.T) {
+func TestQualityRuntimeActiveFailureFailsOverAfterThreeStrikes(t *testing.T) {
 	r := testQualityRuntime(t)
 	now := time.Date(2026, 8, 21, 10, 0, 0, 0, time.UTC)
 	r.seedActive("1.1.1.1", now)
 	r.observe("8.8.8.8", "official", 600, true, now)
 	r.observeActiveHealth(false, now.Add(time.Minute))
-	got := r.decide(now.Add(time.Minute))
+	if got := r.decide(now.Add(time.Minute)); got.Event != switchNone {
+		t.Fatalf("single active failure failed over under 3-strike policy: %#v", got)
+	}
+	r.observeActiveHealth(false, now.Add(2*time.Minute))
+	r.observeActiveHealth(false, now.Add(3*time.Minute))
+	got := r.decide(now.Add(3 * time.Minute))
 	if got.Event != switchFailover || got.ToIP != "8.8.8.8" {
-		t.Fatalf("failed active did not fail over: %#v", got)
+		t.Fatalf("sustained active failure did not fail over: %#v", got)
 	}
 }

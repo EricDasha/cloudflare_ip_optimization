@@ -19,17 +19,17 @@ func TestSchedulerRejectsNormalFluctuation(t *testing.T) {
 	}
 }
 
-func TestSchedulerPromotionNeedsBothGainsAndTwoRounds(t *testing.T) {
+func TestSchedulerPromotionNeedsBothGainsAndThreeRounds(t *testing.T) {
 	policy := defaultSchedulerPolicy()
 	now := time.Date(2026, 8, 21, 2, 0, 0, 0, time.UTC)
 	active := lineQuality{IP: "A", State: lineActive, AverageMbps: 300, SuccessRate: 1}
-	candidate := lineQuality{IP: "B", State: lineStandby, AverageMbps: 500, P95Mbps: 480, PeakMbps: 520, SuccessRate: 1, ConsecutiveSuperior: 1}
+	candidate := lineQuality{IP: "B", State: lineStandby, AverageMbps: 500, P95Mbps: 480, PeakMbps: 520, SuccessRate: 1, ConsecutiveSuperior: 2}
 
 	decision, _ := decideLineSwitch(schedulerInput{Now: now, Active: &active, Standby: []lineQuality{candidate}}, policy)
 	if decision.Event != switchNone {
-		t.Fatalf("single superior round promoted candidate: %#v", decision)
+		t.Fatalf("two superior rounds promoted candidate under 3-round policy: %#v", decision)
 	}
-	candidate.ConsecutiveSuperior = 2
+	candidate.ConsecutiveSuperior = 3
 	decision, _ = decideLineSwitch(schedulerInput{Now: now, Active: &active, Standby: []lineQuality{candidate}}, policy)
 	if decision.Event != switchPromotion || decision.ToIP != "B" || decision.Reason != reasonPromotedSuperiorThroughput {
 		t.Fatalf("qualified candidate was not promoted: %#v", decision)
@@ -40,21 +40,26 @@ func TestSchedulerMinimumSwitchIntervalBlocksPromotion(t *testing.T) {
 	policy := defaultSchedulerPolicy()
 	now := time.Date(2026, 8, 21, 2, 0, 0, 0, time.UTC)
 	active := lineQuality{IP: "A", State: lineActive, AverageMbps: 100, SuccessRate: 1}
-	standby := []lineQuality{{IP: "B", State: lineStandby, AverageMbps: 900, P95Mbps: 850, PeakMbps: 950, SuccessRate: 1, ConsecutiveSuperior: 2}}
+	standby := []lineQuality{{IP: "B", State: lineStandby, AverageMbps: 900, P95Mbps: 850, PeakMbps: 950, SuccessRate: 1, ConsecutiveSuperior: 3}}
 	decision, _ := decideLineSwitch(schedulerInput{Now: now, LastSwitch: now.Add(-2 * time.Minute), Active: &active, Standby: standby}, policy)
 	if decision.Event != switchNone {
 		t.Fatalf("cooldown did not block promotion: %#v", decision)
 	}
 }
 
-func TestSchedulerFailoverBypassesPromotionCooldown(t *testing.T) {
+func TestSchedulerFailoverNeedsThreeConsecutiveFailures(t *testing.T) {
 	policy := defaultSchedulerPolicy()
 	now := time.Date(2026, 8, 21, 2, 0, 0, 0, time.UTC)
-	active := lineQuality{IP: "A", State: lineFailed, ConsecutiveFailures: 1}
 	standby := []lineQuality{{IP: "B", State: lineStandby, AverageMbps: 600, P95Mbps: 580, PeakMbps: 650, SuccessRate: 0.99}}
-	decision, _ := decideLineSwitch(schedulerInput{Now: now, LastSwitch: now.Add(-time.Minute), Active: &active, Standby: standby}, policy)
+	flaky := lineQuality{IP: "A", State: lineDegraded, ConsecutiveFailures: 1}
+	decision, _ := decideLineSwitch(schedulerInput{Now: now, LastSwitch: now.Add(-time.Minute), Active: &flaky, Standby: standby}, policy)
+	if decision.Event != switchNone {
+		t.Fatalf("single failure triggered failover under 3-failure policy: %#v", decision)
+	}
+	dead := lineQuality{IP: "A", State: lineFailed, ConsecutiveFailures: 3}
+	decision, _ = decideLineSwitch(schedulerInput{Now: now, LastSwitch: now.Add(-time.Minute), Active: &dead, Standby: standby}, policy)
 	if decision.Event != switchFailover || decision.ToIP != "B" || decision.Reason != reasonFailoverAfterActiveFailure {
-		t.Fatalf("active failure did not fail over immediately: %#v", decision)
+		t.Fatalf("sustained active failure did not fail over: %#v", decision)
 	}
 }
 
@@ -81,7 +86,7 @@ func TestSchedulerSimulationDoesNotOscillate(t *testing.T) {
 	policy := defaultSchedulerPolicy()
 	now := time.Date(2026, 8, 21, 2, 0, 0, 0, time.UTC)
 	active := lineQuality{IP: "A", State: lineActive, AverageMbps: 900, SuccessRate: 1}
-	series := []float64{920, 910, 950, 980, 915, 960}
+	series := []float64{920, 910, 950, 980, 915, 960, 990, 1005}
 	for i, speed := range series {
 		standby := lineQuality{IP: "B", State: lineStandby, AverageMbps: speed, P95Mbps: speed, PeakMbps: speed, SuccessRate: 1, ConsecutiveSuperior: i + 1}
 		decision, err := decideLineSwitch(schedulerInput{Now: now.Add(time.Duration(i) * 5 * time.Minute), Active: &active, Standby: []lineQuality{standby}}, policy)
