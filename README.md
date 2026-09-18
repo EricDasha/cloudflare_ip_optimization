@@ -140,8 +140,8 @@ CFdata 彻底手动化：无后台自启动、无定时扫描；只在用户点�
 | `PROXY_VLESS_EXPECT_STATUS` | 数据面成功状态码 | `204` |
 | `PROXY_VLESS_TIMEOUT` | 每个 VLESS probe 超时，秒 | `15` |
 | `PROXY_VLESS_MAX_CANDIDATES` | 每轮最多执行真实 VLESS probe 的候选数 | `20` |
-| `PROXY_VLESS_SPEED_BYTES` | 每个通过节点的下载测速字节数，64 KiB-8 MiB | `1048576` |
-| `PROXY_VLESS_SPEED_TIMEOUT` | 每个下载测速超时，秒 | `15` |
+| `PROXY_VLESS_SPEED_BYTES` | 每个通过节点的下载测速字节数（仅前 6 个候选，软门槛） | `2097152` |
+| `PROXY_VLESS_SPEED_TIMEOUT` | 每个下载测速超时，秒 | `20` |
 | `SING_BOX_BIN` | sing-box 二进制路径 | `/usr/local/bin/sing-box` |
 
 ### 优选域名直连（纯兜底）

@@ -424,15 +424,45 @@ func TestRankVLESSPassesBySpeedUsesSourceThenThroughput(t *testing.T) {
 		nil,
 		probe,
 	)
-	want := []string{"198.51.100.2", "198.51.100.3"}
+	// 软门槛：204 已通过的 IP 全部保留（测速失败不再一票否决），
+	// 测速成功的按吞吐降序排在前，测速失败/未测的按来源与延迟排在后面。
+	want := []string{"198.51.100.2", "198.51.100.3", "198.51.100.1", "198.51.100.4"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("rankVLESSPassesBySpeedWithProbe() = %v, want %v", got, want)
 	}
 	if results[2].DownloadMbps != 30 || results[0].DownloadMbps != 12 || results[1].DownloadMbps != 50 {
 		t.Fatalf("download metrics were not recorded: %#v", results)
 	}
-	if results[3].Stage != "VLESS_SPEED_FAIL" || results[3].Error == "" {
-		t.Fatalf("failed speed probe remained eligible: %#v", results[3])
+	if results[3].Stage != "VLESS_PASS" || results[3].Error != "" || results[3].Note == "" {
+		t.Fatalf("soft-gated speed failure should stay eligible with a note: %#v", results[3])
+	}
+}
+
+func TestRankVLESSPassesKeepsBelowThresholdIPsEligible(t *testing.T) {
+	t.Setenv("PROXY_VLESS_MIN_DOWNLOAD_MBPS", "100")
+	results := []proxyScanResult{
+		{IP: "198.51.100.1", Latency: 100, SourceRank: 0, Stage: "VLESS_PASS"},
+		{IP: "198.51.100.2", Latency: 50, SourceRank: 1, Stage: "VLESS_PASS"},
+	}
+	probe := func(_ context.Context, ip string, _ int, _ vlessProbeConfig, _ map[string]any) (vlessProbeMetrics, error) {
+		return vlessProbeMetrics{Duration: 500 * time.Millisecond, Mbps: 5}, nil
+	}
+	got := rankVLESSPassesBySpeedWithProbe(
+		context.Background(),
+		[]string{"198.51.100.1", "198.51.100.2"},
+		results,
+		443,
+		vlessProbeConfig{Timeout: time.Second},
+		nil,
+		probe,
+	)
+	if len(got) != 2 {
+		t.Fatalf("below-threshold IPs must stay eligible, got %v", got)
+	}
+	for _, r := range results {
+		if r.Stage != "VLESS_PASS" || r.Error != "" || r.Note == "" {
+			t.Fatalf("expected soft-gated pass with note, got %#v", r)
+		}
 	}
 }
 

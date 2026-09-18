@@ -43,6 +43,7 @@ const (
 	preferredDomainSourceURL      = "https://cf.090227.xyz/"
 	maxPreferredDomains           = 64
 	maxForwardDomains             = 12
+	maxVLESSSpeedProbes           = 6
 	preferredSettingsFile         = "proxy-preferred.json"
 )
 
@@ -831,13 +832,13 @@ func rankVLESSPassesBySpeedWithProbe(
 		return passed
 	}
 	speedCfg := base
-	speedBytes := envInt("PROXY_VLESS_SPEED_BYTES", 8388608)
+	speedBytes := envInt("PROXY_VLESS_SPEED_BYTES", 2097152)
 	if speedBytes < 1048576 || speedBytes > 33554432 {
-		speedBytes = 8388608
+		speedBytes = 2097152
 	}
-	speedTimeout := envInt("PROXY_VLESS_SPEED_TIMEOUT", 30)
+	speedTimeout := envInt("PROXY_VLESS_SPEED_TIMEOUT", 20)
 	if speedTimeout < 5 || speedTimeout > 120 {
-		speedTimeout = 30
+		speedTimeout = 20
 	}
 	speedCfg.TestURL = fmt.Sprintf("https://speed.cloudflare.com/__down?bytes=%d", speedBytes)
 	speedCfg.ExpectedStatus = http.StatusOK
@@ -846,40 +847,50 @@ func rankVLESSPassesBySpeedWithProbe(
 	speedCfg.Timeout = time.Duration(speedTimeout) * time.Second
 	times := make(map[string]int64, len(passed))
 	speeds := make(map[string]float64, len(passed))
-	minMbps := envFloat("PROXY_VLESS_MIN_DOWNLOAD_MBPS", 20)
+	minMbps := envFloat("PROXY_VLESS_MIN_DOWNLOAD_MBPS", 3)
 	if minMbps < 0 || minMbps > 10000 {
-		minMbps = 20
+		minMbps = 3
+	}
+	// 测速只对前 maxSpeedProbes 个候选执行：终审池上限本来就只有个位数，
+	// 没必要为排序把每个候选都跑一遍 2MB 下载。
+	maxSpeedProbes := len(passed)
+	if maxSpeedProbes > maxVLESSSpeedProbes {
+		maxSpeedProbes = maxVLESSSpeedProbes
 	}
 	verified := make([]string, 0, len(passed))
-	for _, ip := range passed {
-		ctx, cancel := context.WithTimeout(parent, speedCfg.Timeout)
-		metrics, err := probe(ctx, ip, port, speedCfg, template)
-		cancel()
-		if err == nil {
+	for idx, ip := range passed {
+		if idx < maxSpeedProbes {
+			ctx, cancel := context.WithTimeout(parent, speedCfg.Timeout)
+			metrics, err := probe(ctx, ip, port, speedCfg, template)
+			cancel()
+			if err == nil {
+				for i := range results {
+					if results[i].IP == ip {
+						results[i].DownloadMbps = metrics.Mbps
+						break
+					}
+				}
+			}
+			// 软门槛：测速只用于排序与展示，不再一票否决。
+			// 数据面（204）已通过的 IP 一律保留——否则国内网络很难稳定跑到
+			// 20Mbps 门槛，终审会恒为 0 通过，池子永远换不出去。
+			if err == nil && metrics.Mbps >= minMbps {
+				times[ip] = metrics.Duration.Milliseconds()
+				speeds[ip] = metrics.Mbps
+			}
 			for i := range results {
 				if results[i].IP == ip {
-					results[i].DownloadMbps = metrics.Mbps
+					results[i].Stage = "VLESS_PASS"
+					if err != nil {
+						results[i].Note = "测速未完成（软门槛，仅影响排序）：" + err.Error()
+					} else if metrics.Mbps < minMbps {
+						results[i].Note = fmt.Sprintf("测速 %.2f Mbps 低于参考值 %.2f Mbps（软门槛，仅影响排序）", metrics.Mbps, minMbps)
+					}
 					break
 				}
 			}
 		}
-		if err == nil && metrics.Mbps >= minMbps {
-			times[ip] = metrics.Duration.Milliseconds()
-			speeds[ip] = metrics.Mbps
-			verified = append(verified, ip)
-			continue
-		}
-		for i := range results {
-			if results[i].IP == ip {
-				results[i].Stage = "VLESS_SPEED_FAIL"
-				if err != nil {
-					results[i].Error = err.Error()
-				} else {
-					results[i].Error = fmt.Sprintf("VLESS download speed %.2f Mbps below threshold %.2f Mbps", metrics.Mbps, minMbps)
-				}
-				break
-			}
-		}
+		verified = append(verified, ip)
 	}
 	passed = verified
 	sort.SliceStable(passed, func(i, j int) bool {
@@ -1566,6 +1577,7 @@ type proxyScanResult struct {
 	SourceRank   int     `json:"sourceRank,omitempty"`
 	Stage        string  `json:"stage,omitempty"`
 	Error        string  `json:"error,omitempty"`
+	Note         string  `json:"note,omitempty"`
 }
 
 // activeHealthStat 记录生效池 IP 的被动健康：成功/失败计数与最近失败时间。
