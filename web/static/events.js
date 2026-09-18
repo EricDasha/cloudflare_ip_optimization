@@ -205,6 +205,9 @@ setInterval(refreshStatus, 3000);
 setInterval(refreshLogs, 2500);
 setInterval(refreshFiles, 12000);
 setInterval(refreshCfdataResults, 12000);
+// 候选池/工作池面板原本只在页面加载或点按钮时取数，换池后界面看不出变化；
+// 这里补一个轻量轮询（仅 GET 快照，不回填输入框）。
+setInterval(() => { loadAutoCandidates(false).catch(() => {}); }, 15000);
 // 优选域名与 cfdata 推送事件
 try {
   $("preferredDomainsRefresh").addEventListener("click", async () => { try { await withButton($("preferredDomainsRefresh"), "正在刷新", loadPreferredDomains); toast("优选域名已刷新"); } catch (e) { toast(`刷新失败：${e.message}`); } });
