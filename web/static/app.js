@@ -22,7 +22,7 @@ function proxyScanPayload() {
   return {
     ips: $("proxyScanIPs").value,
     subscription: $("proxyScanSubscription").value,
-    sources: Array.from(document.querySelectorAll("#proxyScanSources input:checked"), (input) => input.value),
+    sources: [],
     host: $("proxyScanHost").value.trim(),
     port: number("proxyScanPort"),
     concurrency: number("proxyScanConcurrency"),
@@ -30,34 +30,6 @@ function proxyScanPayload() {
     limit: number("proxyScanLimit"),
     tls: $("proxyScanTLS").checked,
   };
-}
-
-function updateProxySourceSummary() {
-  const select = $("proxyScanSources");
-  const hint = $("proxySourceHint");
-  if (!select || !hint) return;
-  const selected = Array.from(select.querySelectorAll("input:checked"), (input) => input.nextElementSibling.textContent.trim());
-  hint.textContent = selected.length
-    ? `已选择 ${selected.length} 个社区源：${selected.join("、")}。`
-    : "未选择社区源；本次只使用手动 IP / 订阅内容。";
-}
-
-function activateWorkspace(workspaceId) {
-  document.querySelectorAll("[data-workspace]").forEach((tab) => {
-    const active = tab.dataset.workspace === workspaceId;
-    tab.classList.toggle("active", active);
-    tab.setAttribute("aria-selected", String(active));
-  });
-  document.querySelectorAll(".workspace-panel").forEach((panel) => {
-    const active = panel.id === workspaceId;
-    panel.classList.toggle("active", active);
-    panel.hidden = !active;
-  });
-  sessionStorage.setItem("cfnatWorkspace", workspaceId);
-  if (window.location.pathname === "/cfnat") {
-    const hash = workspaceId === "candidateWorkspace" ? "#candidates" : "#forward";
-    history.replaceState({}, "", `${window.location.pathname}${hash}`);
-  }
 }
 
 let latestProxyScanResults = [];
@@ -108,9 +80,61 @@ function renderAutoCandidates(snapshot, loadIntoInput = false) {
     ? active.domains.map((domain) => `${domain} (兜底域名)`).join("  ·  ")
     : "";
   $("activePoolIPs").textContent = [ipText, domainText].filter(Boolean).join("  ·  ") || "尚无自动生效池";
+  renderSourceTierBar(snapshot);
   if (loadIntoInput && snapshot.ips?.length) {
     $("proxyScanIPs").value = snapshot.ips.join("\n");
   }
+}
+
+// 来源分层条：按 user > subscription > preferred > cfdata > official > proxy 顺序
+// 展示各层候选数量，层宽即占比。snapshot.sourceByIp 为后端快照的来源映射。
+function renderSourceTierBar(snapshot) {
+  const bar = $("sourceTierBar");
+  if (!bar) return;
+  const byIp = snapshot?.sourceByIp || snapshot?.sourceByIP || {};
+  const tiers = [
+    ["user", "手动", "user"],
+    ["subscription", "订阅", "subscription"],
+    ["preferred", "优选解析", "preferred"],
+    ["cfdata", "CFdata", "cfdata"],
+    ["official", "官方段", "official"],
+    ["proxy", "社区", "proxy"],
+  ];
+  const counts = tiers.map(([key, label, cls]) => {
+    let n = 0;
+    for (const ip of Object.keys(byIp)) {
+      if (byIp[ip] === key) n++;
+    }
+    return { key, label, cls, n };
+  });
+  let unknown = 0;
+  for (const ip of Object.keys(byIp)) {
+    if (!tiers.some(([key]) => byIp[ip] === key)) unknown++;
+  }
+  const total = counts.reduce((s, t) => s + t.n, 0) + unknown;
+  bar.replaceChildren();
+  if (!total) {
+    const empty = document.createElement("span");
+    empty.className = "tier-seg empty";
+    empty.textContent = "等待候选快照…";
+    bar.append(empty);
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const t of [...counts, ...(unknown ? [{ key: "unknown", label: "其他", cls: "official", n: unknown }] : [])]) {
+    if (!t.n) continue;
+    const seg = document.createElement("span");
+    seg.className = `tier-seg ${t.cls}`;
+    seg.style.flex = String(t.n);
+    seg.title = `${t.label} ${t.n} 个`;
+    const name = document.createElement("span");
+    name.textContent = t.label;
+    const num = document.createElement("b");
+    num.textContent = String(t.n);
+    seg.append(name, num);
+    frag.append(seg);
+  }
+  bar.append(frag);
 }
 
 async function loadAutoCandidates(loadIntoInput = false) {
@@ -173,6 +197,11 @@ function applyRoute(path = normalizeRoute()) {
     $("logTarget").value = "cfdata";
     refreshCfdataResults().catch((e) => toast(`结果刷新失败：${e.message}`));
     refreshLogs().catch((e) => toast(`日志刷新失败：${e.message}`));
+    return;
+  }
+  if (path === "/pool") {
+    loadAutoCandidates(false).catch((e) => toast(`候选载入失败：${e.message}`));
+    loadPreferredDomains().catch(() => {});
     return;
   }
   if (path === "/files") {
@@ -626,9 +655,10 @@ async function runCFdata() {
   await refreshAll();
 }
 
-// ---- 优选域名兜底（纯转发，不解析不探测） ----
-// 勾选的域名只会进入 cfnat -fallback：主池全部拨号失败时才尝试。
-let preferredDomainsState = { all: [], enabled: new Set(), limit: 20 };
+// ---- 优选域名双职责：C 区解析供给 + cfnat 兜底转发 ----
+// 勾选的域名随候选刷新解析出公网 IPv4，走与订阅同款乡试与殿试；
+// 同时保留 -fallback，主池全部拨号失败时才直连。徽标 = 上次解析结果。
+let preferredDomainsState = { all: [], enabled: new Set(), limit: 20, status: {} };
 
 async function loadPreferredDomains() {
   const data = await api("/api/cfnat/preferred");
@@ -636,9 +666,21 @@ async function loadPreferredDomains() {
     all: data.all || [],
     enabled: new Set(data.enabled || []),
     limit: data.limit || 20,
+    status: data.status || {},
   };
   renderPreferredDomains();
   return data;
+}
+
+function preferredDomainBadge(domain) {
+  const st = preferredDomainsState.status?.[domain];
+  if (!st || !st.stage) return { text: "未解析", cls: "" };
+  if (st.stage === "RESOLVED") {
+    const n = Array.isArray(st.ips) ? st.ips.length : 0;
+    return { text: n ? `解析 ${n} IP` : "解析 0 IP", cls: n ? "resolved" : "" };
+  }
+  if (st.stage === "RESOLVE_FAIL") return { text: "解析失败", cls: "failed" };
+  return { text: st.stage, cls: "" };
 }
 
 function renderPreferredDomains() {
@@ -646,22 +688,25 @@ function renderPreferredDomains() {
   const summary = $("preferredDomainsStatus");
   if (!grid || !summary) return;
   const { enabled } = preferredDomainsState;
-  summary.textContent = `${enabled.size}/${preferredDomainsState.all.length} 已启用为兜底转发（主池失败才用，不探测不排序）`;
+  summary.textContent = `${enabled.size}/${preferredDomainsState.all.length} 已启用：解析供候选 + 兜底转发`;
   grid.replaceChildren();
   const frag = document.createDocumentFragment();
   for (const domain of preferredDomainsState.all) {
+    const on = enabled.has(domain);
+    const badge = preferredDomainBadge(domain);
     const label = document.createElement("label");
-    label.title = "仅兜底转发";
+    label.className = "domain-row";
+    label.title = on ? "解析供给 + 兜底转发" : "已关闭";
     const input = document.createElement("input");
     input.type = "checkbox";
-    input.checked = enabled.has(domain);
+    input.checked = on;
     input.addEventListener("change", async (event) => {
       const checked = event.target.checked;
       if (checked) enabled.add(domain); else enabled.delete(domain);
       try {
         await savePreferredDomains();
         renderPreferredDomains();
-        toast(checked ? `已启用兜底 ${domain}` : `已停用兜底 ${domain}`);
+        toast(checked ? `已启用 ${domain}（解析供给 + 兜底）` : `已停用 ${domain}`);
       } catch (e) {
         if (checked) enabled.delete(domain); else enabled.add(domain);
         event.target.checked = enabled.has(domain);
@@ -669,8 +714,12 @@ function renderPreferredDomains() {
       }
     });
     const span = document.createElement("span");
+    span.className = "domain-name";
     span.textContent = domain;
-    label.append(input, span);
+    const mark = document.createElement("span");
+    mark.className = `domain-badge ${badge.cls}${on ? "" : " off"}`.trim();
+    mark.textContent = badge.text;
+    label.append(input, span, mark);
     frag.append(label);
   }
   grid.append(frag);

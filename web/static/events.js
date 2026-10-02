@@ -21,19 +21,14 @@ $("runProxyScan").addEventListener("click", async () => {
   } catch (e) { toast(`扫描失败：${e.message}`); }
 });
 
-document.querySelectorAll("[data-workspace]").forEach((tab) => {
-  tab.addEventListener("click", () => activateWorkspace(tab.dataset.workspace));
-});
-
-// 社区候选源已停用，元素可能不存在：统一用安全绑定，避免空引用中断整个脚本。
-$("proxyScanSources")?.addEventListener("change", updateProxySourceSummary);
-$("selectAllProxySources")?.addEventListener("click", () => {
-  $("proxyScanSources")?.querySelectorAll("input").forEach((input) => { input.checked = true; });
-  updateProxySourceSummary();
-});
-$("clearProxySources")?.addEventListener("click", () => {
-  $("proxyScanSources")?.querySelectorAll("input").forEach((input) => { input.checked = false; });
-  updateProxySourceSummary();
+loadDefaults().then(() => {
+  loadPreferredDomains();
+  applyRoute();
+  refreshStatus();
+  refreshFiles();
+  refreshCfdataResults();
+  refreshLogs();
+  loadAutoCandidates(false).catch((e) => toast(`自动候选载入失败：${e.message}`));
 });
 
 if ($("backgroundOptimizerEnabled")) $("backgroundOptimizerEnabled").addEventListener("change", async (event) => {
@@ -190,10 +185,7 @@ document.querySelectorAll("[data-route]").forEach((link) => {
 window.addEventListener("popstate", () => applyRoute());
 
 loadDefaults().then(() => {
-  updateProxySourceSummary();
   loadPreferredDomains();
-  const workspaceFromHash = window.location.hash === "#candidates" ? "candidateWorkspace" : null;
-  activateWorkspace(workspaceFromHash || sessionStorage.getItem("cfnatWorkspace") || "forwardWorkspace");
   applyRoute();
   refreshStatus();
   refreshFiles();

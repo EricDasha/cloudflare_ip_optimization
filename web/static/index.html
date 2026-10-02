@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="dark" />
     <link rel="icon" href="data:," />
     <title>Cloudflare Tools</title>
-    <link rel="stylesheet" href="/styles.css?v=20260915a" />
+    <link rel="stylesheet" href="/styles.css?v=20261002a" />
   </head>
   <body>
     <div class="app-shell">
@@ -18,6 +18,7 @@
         <nav class="nav" aria-label="主导航">
           <a href="/" data-route="/" class="nav-item active"><span aria-hidden="true">◫</span>总览</a>
           <a href="/cfnat" data-route="/cfnat" class="nav-item"><span aria-hidden="true">⇄</span>转发</a>
+          <a href="/pool" data-route="/pool" class="nav-item"><span aria-hidden="true">▦</span>考场</a>
           <a href="/cfdata" data-route="/cfdata" class="nav-item"><span aria-hidden="true">⌁</span>扫描</a>
           <a href="/files" data-route="/files" class="nav-item"><span aria-hidden="true">▤</span>文件</a>
         </nav>
@@ -36,6 +37,7 @@
           <button class="icon-button" id="refreshBtn" type="button" title="刷新全部" aria-label="刷新全部">↻</button>
         </header>
 
+        <!-- 总览指挥台 -->
         <div class="route-page active" data-page="/">
           <section class="operation-band">
             <div class="operation-copy">
@@ -69,6 +71,7 @@
             <div class="action-row">
               <button class="button secondary" id="quickRestartCfnat" type="button"><span aria-hidden="true">↻</span>重启 CFnat</button>
               <button class="button secondary" id="quickRunCfdata" type="button"><span aria-hidden="true">⌁</span>运行 CFdata</button>
+              <a class="button ghost" href="/pool" data-route="/pool">候选考场 <span aria-hidden="true">→</span></a>
               <a class="button ghost" href="/cfnat" data-route="/cfnat">转发设置 <span aria-hidden="true">→</span></a>
               <a class="button ghost" href="/cfdata" data-route="/cfdata">扫描结果 <span aria-hidden="true">→</span></a>
             </div>
@@ -103,12 +106,8 @@
           </section>
         </div>
 
+        <!-- 转发配置 -->
         <div class="route-page" data-page="/cfnat">
-          <div class="subnav" role="tablist" aria-label="转发工作区">
-            <button class="subnav-item active" type="button" role="tab" aria-selected="true" aria-controls="forwardWorkspace" data-workspace="forwardWorkspace">转发配置</button>
-            <button class="subnav-item" type="button" role="tab" aria-selected="false" aria-controls="candidateWorkspace" data-workspace="candidateWorkspace">候选池与扫描</button>
-          </div>
-          <div id="forwardWorkspace" class="workspace-panel active">
           <section class="runtime-strip">
             <div><span class="health-dot"></span><strong>CFnat 转发入口</strong><small>0.0.0.0:1234</small></div>
             <div class="actions">
@@ -145,10 +144,10 @@
               </div>
             </details>
           </section>
+        </div>
 
-          </div>
-          <div id="candidateWorkspace" class="workspace-panel">
-
+        <!-- 候选考场：B 区订阅 · C 区优选解析 · 手动乡试 · 殿试采用 -->
+        <div class="route-page" data-page="/pool">
           <section class="panel" id="proxyScanner">
             <div class="section-title split-title">
               <div><p class="overline">CANDIDATE POOL</p><h2>候选与终审</h2><p class="inline-status" id="autoCandidateStatus">正在读取候选...</p></div>
@@ -158,24 +157,29 @@
                 <button class="button secondary" id="refreshSubscriptions" type="button">⇪ 立即拉取订阅</button>
               </div>
             </div>
+            <div class="tier-bar" id="sourceTierBar" aria-label="候选来源分层">
+              <span class="tier-seg empty">等待候选快照…</span>
+            </div>
             <p class="inline-status" id="subscriptionStatus">订阅池状态读取中…</p>
             <p class="inline-status" id="poolGuardStatus">换池保护状态读取中…</p>
             <section class="panel" id="preferredDomainsPanel">
               <div class="section-title split-title">
-                <div><p class="overline">PREFERRED DOMAINS</p><h2>优选域名</h2><p class="inline-status" id="preferredDomainsStatus">正在加载...</p></div>
+                <div><p class="overline">PREFERRED DOMAINS · C 区</p><h2>优选域名</h2><p class="inline-status" id="preferredDomainsStatus">正在加载...</p></div>
                 <div class="actions">
                   <button class="button secondary" id="preferredDomainsRefresh" type="button">↻ 刷新状态</button>
                   <button class="button secondary" id="preferredDomainsEnableAll" type="button">全部开启</button>
                   <button class="button secondary" id="preferredDomainsClearAll" type="button">全部关闭</button>
                 </div>
               </div>
-              <p class="inline-status">勾选的域名只进 cfnat 兜底（-fallback）：主池全部拨号失败才尝试，不解析、不探测、不参与换池。</p>
-              <div id="preferredDomainsGrid" class="source-grid"></div>
+              <p class="inline-status">双职责：勾选的域名随候选刷新解析出公网 IPv4，走与订阅同款乡试与殿试（C 区供给）；同时保留 cfnat 兜底（-fallback），主池全部拨号失败才直连。徽标为上次解析结果。</p>
+              <div id="preferredDomainsGrid" class="domain-grid"></div>
             </section>
             <div class="priority-strip" aria-label="优先级">
               <span class="priority-tag tier-1">① 手动采用 <b>立即替换生效池</b></span>
-              <span class="priority-tag tier-2">② 候选池推送 <b>后台慢测更优才上</b></span>
-              <span class="priority-tag tier-3">③ 优选域名兜底 <b>主池拨号失败才试</b></span>
+              <span class="priority-tag tier-2">② 订阅慢筛 <b>WS 验活后入池</b></span>
+              <span class="priority-tag tier-3">③ 优选解析 <b>与订阅同款考试</b></span>
+              <span class="priority-tag tier-4">④ CFdata 手扫 <b>扫描兜底来源</b></span>
+              <span class="priority-tag tier-4">⑤ 域名兜底 <b>主池失败才拨</b></span>
             </div>
             <div class="optimizer-strip">
               <div><strong>后台慢速优选</strong><span id="backgroundOptimizerStatus">每 15 分钟轮测 24 个候选，并发 4</span></div>
@@ -195,20 +199,6 @@
               <summary>自定义扫描 <span>选择候选，再设置验活规则</span></summary>
               <div class="workflow-section">
                 <div class="workflow-heading"><span class="step-index">1</span><div><h3>候选输入</h3><p>仅支持手动 IP 与订阅内容解析。</p></div></div>
-                <!-- 社区候选源已停用；只保留手动 IPv4 与订阅内容 -->
-                <!--
-                <fieldset class="source-fieldset" aria-describedby="proxySourceHint"><legend>社区候选源</legend>
-                  <div class="source-grid" id="proxyScanSources">
-                    <label><input type="checkbox" value="zhaobo" checked /><span>Zhaobo 聚合池</span></label>
-                    <label><input type="checkbox" value="william" /><span>William 台湾 / 韩国</span></label>
-                    <label><input type="checkbox" value="euorg" /><span>EU.org 社区池</span></label>
-                    <label><input type="checkbox" value="cmliussss-proxyip" checked /><span>CMLiussss ProxyIP</span></label>
-                    <label><input type="checkbox" value="090227" checked /><span>090227 优选域名</span></label>
-                    <label><input type="checkbox" value="preferred-imported" checked /><span>v2rayn 导入优选域名</span></label>
-                  </div>
-                  <div class="source-footer"><span class="field-hint" id="proxySourceHint">已选择 3 个社区源。</span><span class="source-actions"><button type="button" class="button ghost small-button" id="selectAllProxySources">全选</button><button type="button" class="button ghost small-button" id="clearProxySources">清空</button></span></div>
-                </fieldset>
-                -->
                 <div class="form-grid input-pair">
                   <label>手动 IPv4<textarea id="proxyScanIPs" rows="5" placeholder="每行或逗号分隔；没有可留空"></textarea></label>
                   <label>订阅内容<textarea id="proxyScanSubscription" rows="5" placeholder="VLESS / Trojan / SS / VMess 或 Clash；没有可留空"></textarea></label>
@@ -231,9 +221,9 @@
               </div>
             </details>
           </section>
-          </div>
         </div>
 
+        <!-- 扫描与测速 -->
         <div class="route-page cfdata-page" data-page="/cfdata">
           <section class="runtime-strip">
             <div><span class="health-dot"></span><strong id="cfdataStatusText">CFdata 状态读取中</strong><small>ip.csv / result.csv</small></div>
@@ -280,6 +270,7 @@
           </section>
         </div>
 
+        <!-- 数据文件 -->
         <div class="route-page" data-page="/files">
           <section class="results-surface" id="files">
             <div class="section-title split-title"><div><p class="overline">ARTIFACTS</p><h2>数据文件</h2></div><button class="button secondary" id="refreshFiles" type="button">↻ 刷新</button></div>
@@ -289,8 +280,8 @@
       </main>
     </div>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="/runtime.js?v=20260915a"></script>
-    <script src="/app.js?v=20260915a"></script>
-    <script src="/events.js?v=20260915a"></script>
+    <script src="/runtime.js?v=20261002a"></script>
+    <script src="/app.js?v=20261002a"></script>
+    <script src="/events.js?v=20261002a"></script>
   </body>
 </html>

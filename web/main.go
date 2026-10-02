@@ -2585,7 +2585,7 @@ func staticHandler() http.Handler {
 	fileServer := http.FileServer(http.FS(sub))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/", "/cfnat", "/cfdata", "/files":
+		case "/", "/cfnat", "/pool", "/cfdata", "/files":
 			http.ServeFileFS(w, r, sub, "index.html")
 			return
 		default:

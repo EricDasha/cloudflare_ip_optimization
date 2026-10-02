@@ -14,10 +14,11 @@ let showAllLive = false;
 let showAllScan = false;
 let latestLogLines = [];
 let fullOptimizationRunning = false;
-const routes = new Set(["/", "/cfnat", "/cfdata", "/files"]);
+const routes = new Set(["/", "/cfnat", "/pool", "/cfdata", "/files"]);
 const routeMeta = {
   "/": ["CONTROL PLANE", "运行总览"],
-  "/cfnat": ["CFNAT", "转发与候选池"],
+  "/cfnat": ["CFNAT", "转发配置"],
+  "/pool": ["CANDIDATE POOL", "候选考场"],
   "/cfdata": ["CFDATA", "扫描与测速"],
   "/files": ["ARTIFACTS", "数据文件"],
 };
