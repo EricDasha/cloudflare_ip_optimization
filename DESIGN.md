@@ -130,6 +130,8 @@ The background optimizer **never probes Active IPs**:
 The GUI is a functional operations console:
 
 - The overview prioritizes active pool, candidate count, process state, the next refresh and one full-pipeline action.
+- The candidate arena (`/pool`) owns the whole examination flow in one place: source-tier bar, subscription status, preferred-domain dual-duty switches with per-domain resolve badges, the three-step manual scan wizard, background optimizer and quality scheduler.
+- Preferred-domain rows show last-resolve state (RESOLVED n IPs / RESOLVE_FAIL); toggling a domain takes effect on the next candidate refresh.
 - Common CFnat and CFdata settings remain visible; all original command flags remain available under advanced sections.
 - Manual candidate scanning remains separate from the WebSocket business probe because a TCP/TLS pass is not proof of node usability.
 - Logs are one shared workspace with process selection, search, level filtering, line limits, pause, follow and copy controls.

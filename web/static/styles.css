@@ -32,6 +32,11 @@
   --red-bg: rgb(248 113 113 / .1);
   --red-line: rgb(248 113 113 / .42);
   --blue: #7cacff;
+  --term-text: #d9e2e6;
+  --term-bg: #05070b;
+  --term-error: #ff9292;
+  --term-success: #86e6ae;
+  --term-muted: #89959b;
 
   --radius: 12px;
   --radius-sm: 8px;
@@ -434,17 +439,17 @@ textarea { min-height: 110px; padding: var(--s3); resize: vertical; font-family:
   padding: var(--s4);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  color: #d9e2e6;
-  background: #05070b;
+  color: var(--term-text);
+  background: var(--term-bg);
   font: 12px/1.65 var(--font-mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   tab-size: 2;
 }
 .log-line { display: block; min-height: 20px; }
-.log-line.error { color: #ff9292; }
-.log-line.success { color: #86e6ae; }
-.log-line.muted { color: #89959b; }
+.log-line.error { color: var(--term-error); }
+.log-line.success { color: var(--term-success); }
+.log-line.muted { color: var(--term-muted); }
 .log-empty { display: grid; min-height: 270px; place-items: center; color: var(--text-3); }
 
 /* ---------- 运行条 / 表单 ---------- */
