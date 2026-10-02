@@ -51,6 +51,10 @@ services:
       PROXY_AUTO_DOMAINS: "true"
       # 优选域名按延迟排序后仅取前 N 个合入候选池，避免过度依赖优选域名。
       PROXY_PREFERRED_MAX_DOMAINS: "20"
+      # C 区：优选域名解析供给——解析产物入候选层，覆盖 baipiao 上游供给位。
+      PROXY_PREFERRED_RESOLVE: "true"
+      PROXY_PREFERRED_IPS_PER_DOMAIN: "4"
+      PROXY_PREFERRED_RESOLVED_CANDIDATES: "64"
       PROXY_CFDATA_CANDIDATES: "300"
       PROXY_OFFICIAL_CANDIDATES: "150"
       PROXY_USER_CANDIDATES: "${PROXY_USER_CANDIDATES:-}"

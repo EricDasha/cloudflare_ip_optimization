@@ -20,7 +20,7 @@ The optimizer maintains three pools with different test costs and lifecycles:
 - **Test**: Low-cost TCP/TLS latency screening
 - **Size**: Large (hundreds to thousands)
 - **Purpose**: Fast discovery of potentially usable IPs
-- Preferred domains are NOT a candidate source anymore: fallback-only, no resolve/probe.
+- Preferred domains now do double duty: each candidate refresh resolves enabled domains into public IPv4 (C-zone supply, capped per-domain and globally, snapshot expires with the refresh cycle), while remaining in `-fallback` for dial-time DNS-based forwarding.
 
 ### 2. Standby Pool (替补池)
 - **Source**: Candidate IPs that pass TCP screening
@@ -75,9 +75,10 @@ Source priority determines **when** IPs are tested, not their final performance 
 
 1. **User** (manual IPs, `PROXY_USER_CANDIDATES`, manual apply) - Tested first, highest priority
 2. **Subscription** (daily third-party maintainer feed, WS-verified into `subscription-pool.json`) - Tested second
-3. **CFdata** (manual-only scan cache) - Tested third
-4. **Official** (CF CIDR sampling) - Fallback expansion only
-5. **Preferred domains** - NOT tested, NOT ranked; fallback-only forwarding (`-fallback`), tried only when the whole IP pool fails to dial
+3. **Preferred resolved** (C-zone: enabled preferred domains resolved per refresh, snapshot expires with the cycle) - Tested third; supersedes the upstream author's IP supply position
+4. **CFdata** (manual-only scan cache) - Tested fourth, demoted to manual fallback supply
+5. **Official** (CF CIDR sampling) - Fallback expansion only
+6. **Preferred domains (raw)** - remain untested as domains; they keep `-fallback` duty only. Resolved IPs from the same domains are tested through the normal pipeline.
 
 The actual Active Pool selection is based on measured performance (Mbps, latency, stability), not source priority.
 
@@ -105,7 +106,7 @@ Optimizer
 Candidate generation and business acceptance are separate stages:
 
 1. CFdata reads the local broad CDN ranges and writes `ip.csv` (manual trigger only).
-2. The candidate cache preserves source order: user-supplied IPs, subscription-feed IPs, CFdata output, then sampled official Cloudflare CIDRs. Preferred domains never enter the candidate IP list.
+2. The candidate cache preserves source order: user-supplied IPs, subscription-feed IPs, preferred-domain resolved IPs (C-zone snapshot, re-resolved each refresh), CFdata output, then sampled official Cloudflare CIDRs.
 3. The first active-pool stage validates the configured TLS SNI, HTTP Host and WebSocket path in parallel.
 4. If VLESS probing is enabled, WS passes are tested sequentially through a short-lived sing-box process. Each pass must complete both the configured `generate_204` request and a bounded download through the same tunnel.
 5. The VLESS probe replaces only the candidate server and port; UUID, TLS/ECH/uTLS and WebSocket settings come from the local outbound template. Results preserve source priority and use measured Mbps, then data-plane latency, within each source tier.
@@ -162,8 +163,11 @@ The "完整优选" browser action runs CFdata, waits for a successful exit, refr
 ### CFdata (manual-only; background vars deprecated)
 - `PROXY_CFDATA_BACKGROUND_ENABLED/MINUTES/TIMEOUT`, `PROXY_CFDATA_SIFT_COUNT`: no longer read; CFdata runs only on explicit user trigger
 
-### Preferred Domains (fallback-only)
-- `PROXY_PREFERRED_MAX_DOMAINS`: compat only (default: 20); domains are never resolved/probed into the candidate pool
+### Preferred Domains (resolve-supply + fallback)
+- `PROXY_PREFERRED_MAX_DOMAINS`: compat only (default: 20); cap on domains participating in resolve-supply and fallback
+- `PROXY_PREFERRED_RESOLVE`: enable C-zone resolve-supply (default: true)
+- `PROXY_PREFERRED_IPS_PER_DOMAIN`: max public IPv4 kept per resolved domain (default: 4)
+- `PROXY_PREFERRED_RESOLVED_CANDIDATES`: global cap on resolved-supply IPs; `0` disables supply (default: 64)
 - `PROXY_PREFERRED_PROBE_MINUTES`, `PROXY_DYNAMIC_DISCOVERY`: deprecated, no longer read
 
 ### Quality Scheduler
