@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // preferredSettingsFile 也定义于 main.go：常量同名不同作用域会冲突，这里不再重复声明。
@@ -115,8 +118,8 @@ func (a *app) rankedEnabledPreferredDomains() []string {
 	return out
 }
 
-// enabledPreferredDomainsForCandidates 取前 limit 个启用域名供给候选快照展示。
-// 注意：优选域名不再解析成 IP 合入候选池，仅作 cfnat 兜底转发。
+// enabledPreferredDomainsForCandidates 取前 limit 个启用域名供给候选快照展示
+// 与 C 区解析（resolvePreferredDomainIPs）。
 func (a *app) enabledPreferredDomainsForCandidates() []string {
 	ranked := a.rankedEnabledPreferredDomains()
 	limit := a.preferredLimitValue()
@@ -154,18 +157,23 @@ func (a *app) getAllPreferredDomains() []string {
 	return a.importedPreferredDomains()
 }
 
-// 优选域名是纯兜底转发目标：不解析、不探测、不合入候选池。
-// 以下函数保留空壳仅防旧调用残留，实际行为：什么都不做。
+// 优选域名双职责：
+//   1. C 区解析供给——enabledPreferredDomainsForCandidates → resolvePreferredDomainIPs，
+//      解析出的 IP 走与订阅同款乡试/殿试入候选（见文件尾 C 区实现）。
+//   2. -fallback 兜底转发——proxyForwardDomains，拨号失败时按当前 DNS 直连域名。
+//
+// runPreferredDomainProbeLoop 保留空壳：旧的域名级慢测循环已废弃，
+// 探测发生在解析出的 IP 上（乡试/殿试管道），不在域名上。
 func (a *app) runPreferredDomainProbeLoop() {
-	log.Printf("preferred-domain probe loop disabled: domains are fallback-only, no resolve/probe")
+	log.Printf("preferred-domain probe loop disabled: candidates come from resolved IPs (C 区), domains stay fallback-only for dialing")
 }
 
 func (a *app) probePreferredDomains(parent context.Context) {
 	_ = parent
-	// 已废弃：优选域名不再解析、不探测、不合入候选池，仅作 cfnat 兜底转发。
+	// 已废弃：域名级慢测不再运行；C 区解析在 refreshProxyCandidates 内完成。
 }
 
-// updatePreferredDomainStatus 保留空壳：优选域名无慢测状态可记录。
+// updatePreferredDomainStatus 保留空壳：域名状态由 C 区解析直接写入 preferredStatus。
 func (a *app) updatePreferredDomainStatus(domain string, st preferredDomainStatus) {
 	_, _ = domain, st
 }
@@ -301,4 +309,166 @@ func (a *app) mergeCfdataIPsIntoCandidates(ips []string) {
 	}
 }
 
-// 说明：net/sort 在此文件中被间接引用，保持显式 import 以通过静态检查。
+// ============================================================================
+// C 区：优选域名解析供给位
+// ============================================================================
+//
+// 职责边界（与 fallback 兜底共存，互不冲突）：
+//   - 解析产物作为 preferred 层候选进入候选缓存，走与订阅/官方段完全相同的
+//     乡试（TLS/WS 初筛）与殿试（VLESS 数据面）管道；域名级不做探测。
+//   - 优选域名本身保留 cfnat -fallback 兜底转发职责（拨号时按当前 DNS 解析）。
+//   - 快照生命周期与候选刷新周期对齐：每次 refreshProxyCandidates 重新解析，
+//     上一轮解析出的 IP 随候选缓存原子替换一并过期，不残留陈旧快照。
+//   - 目的：以第三方维护者的优选结果覆盖原作者上游（baipiao→cfdata）的
+//     日常 IP 供给；cfdata 退为手动扫描兜底层。
+
+const (
+	preferredResolveConcurrency = 8
+	preferredResolveTimeout     = 3 * time.Second
+)
+
+// ipAddrLookup 可注入的 DNS 解析函数；测试用假解析器替换。
+type ipAddrLookup func(ctx context.Context, host string) ([]net.IP, error)
+
+func defaultIPAddrLookup(ctx context.Context, host string) ([]net.IP, error) {
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	ips := make([]net.IP, 0, len(addrs))
+	for _, addr := range addrs {
+		ips = append(ips, addr.IP)
+	}
+	return ips, nil
+}
+
+type preferredResolveOutcome struct {
+	domain string
+	ips    []string
+	failed bool
+}
+
+// resolvePreferredDomainIPList 并发解析优选域名，返回逐域名结果。
+// 纯逻辑层：只做公网 IPv4 过滤、每域名截断与失败记录，不触碰 app 状态。
+func resolvePreferredDomainIPList(parent context.Context, domains []string, perDomain int, lookup ipAddrLookup) []preferredResolveOutcome {
+	outcomes := make([]preferredResolveOutcome, len(domains))
+	if len(domains) == 0 {
+		return outcomes
+	}
+	if lookup == nil {
+		lookup = defaultIPAddrLookup
+	}
+	ctx, cancel := context.WithTimeout(parent, preferredResolveTimeout)
+	defer cancel()
+
+	sem := make(chan struct{}, preferredResolveConcurrency)
+	var wg sync.WaitGroup
+	for index, domain := range domains {
+		wg.Add(1)
+		go func(index int, domain string) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				outcomes[index] = preferredResolveOutcome{domain: domain, failed: true}
+				return
+			}
+			ips, err := lookup(ctx, domain)
+			if err != nil {
+				outcomes[index] = preferredResolveOutcome{domain: domain, failed: true}
+				return
+			}
+			collected := make([]string, 0, perDomain)
+			seen := make(map[string]struct{}, perDomain)
+			for _, ip := range ips {
+				if len(collected) >= perDomain {
+					break
+				}
+				if !isPublicIPv4(ip) {
+					continue
+				}
+				key := ip.To4().String()
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
+				collected = append(collected, key)
+			}
+			outcomes[index] = preferredResolveOutcome{domain: domain, ips: collected}
+		}(index, domain)
+	}
+	wg.Wait()
+	return outcomes
+}
+
+// resolvePreferredDomainIPs 把启用的优选域名解析为公网 IPv4 候选（C 区供给位）。
+// 返回 (ips, errors)：ips 为去重后按总量上限截断的候选；errors 为逐域名失败信息。
+func (a *app) resolvePreferredDomainIPs(parent context.Context, lookup ipAddrLookup) ([]string, []string) {
+	if !envBool("PROXY_PREFERRED_RESOLVE", true) {
+		return nil, nil
+	}
+	domains := a.enabledPreferredDomainsForCandidates()
+	if len(domains) == 0 {
+		return nil, nil
+	}
+	perDomain := envInt("PROXY_PREFERRED_IPS_PER_DOMAIN", 4)
+	if perDomain < 1 || perDomain > 64 {
+		perDomain = 4
+	}
+	totalLimit := envInt("PROXY_PREFERRED_RESOLVED_CANDIDATES", 64)
+	if totalLimit < 0 || totalLimit > 500 {
+		totalLimit = 64
+	}
+	if totalLimit == 0 {
+		return nil, nil
+	}
+
+	outcomes := resolvePreferredDomainIPList(parent, domains, perDomain, lookup)
+
+	now := time.Now()
+	a.preferredMu.Lock()
+	if a.preferredStatus == nil {
+		a.preferredStatus = make(map[string]preferredDomainStatus)
+	}
+	for _, item := range outcomes {
+		st := preferredDomainStatus{
+			Domain:    item.domain,
+			Enabled:   true,
+			LastProbe: now,
+		}
+		if item.failed {
+			st.Stage = "RESOLVE_FAIL"
+			st.LastError = "DNS 解析失败或超时"
+		} else {
+			st.Stage = "RESOLVED"
+			st.IPs = item.ips
+		}
+		a.preferredStatus[item.domain] = st
+	}
+	a.preferredMu.Unlock()
+
+	seen := make(map[string]struct{})
+	ips := make([]string, 0, totalLimit)
+	errs := make([]string, 0)
+	for _, item := range outcomes {
+		if item.failed {
+			errs = append(errs, fmt.Sprintf("优选域名 %s: DNS 解析失败或超时", item.domain))
+			continue
+		}
+		for _, ip := range item.ips {
+			if _, ok := seen[ip]; ok {
+				continue
+			}
+			seen[ip] = struct{}{}
+			ips = append(ips, ip)
+			if len(ips) >= totalLimit {
+				return ips, errs
+			}
+		}
+	}
+	if len(ips) == 0 && len(errs) == 0 {
+		errs = append(errs, "优选域名解析未返回公网 IPv4")
+	}
+	return ips, errs
+}

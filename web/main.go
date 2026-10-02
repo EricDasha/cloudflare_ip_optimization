@@ -1182,19 +1182,20 @@ func applyCandidateSourcePriority(results []proxyScanResult, sourceByIP map[stri
 		return
 	}
 	// 来源优先级决定"什么时候拿它来测试"，不决定最终性能排名。
-	// user > subscription > cfdata > official > preferred > proxy(community fallback)
-	// preferred 只做兜底转发，不再参与 IP 探测排序。
+	// user > subscription > preferred(优选域名解析) > cfdata > official > proxy(社区兜底)
+	// preferred 是 C 区供给位：以第三方维护者的优选结果覆盖原作者上游
+	// (baipiao→cfdata)的日常供给；cfdata 退为手动扫描兜底层。
 	rank := func(ip string) int {
 		switch sourceByIP[ip] {
 		case "user":
 			return 0
 		case "subscription":
 			return 1
-		case "cfdata":
-			return 2
-		case "official":
-			return 3
 		case "preferred":
+			return 2
+		case "cfdata":
+			return 3
+		case "official":
 			return 4
 		case "proxy":
 			return 5
@@ -1300,18 +1301,19 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 		return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t'
 	}))
 	appendGroup("subscription", a.subscriptionPoolIPs(1000-len(resolved)))
+	// C 区供给位：启用的优选域名并发解析出公网 IPv4，作为 preferred 层候选，
+	// 覆盖原作者上游(baipiao→cfdata)的日常 IP 供给；解析产物随本刷新周期过期。
+	// 优选域名本身保留 -fallback 兜底转发职责，与解析供给互不冲突。
+	// 090227 动态发现依旧停用（PROXY_DYNAMIC_DISCOVERY 废弃）。
+	preferredIPs, preferredErrors := a.resolvePreferredDomainIPs(ctx, nil)
+	sourceErrors = append(sourceErrors, preferredErrors...)
+	appendGroup("preferred", preferredIPs)
 	community, communityErrors, err := resolveProxySources(ctx, defaultProxyCandidateSourceIDs, 1000-len(resolved))
 	sourceErrors = append(sourceErrors, communityErrors...)
 	if err != nil {
 		sourceErrors = append(sourceErrors, err.Error())
 	}
 	appendGroup("proxy", community)
-	// v2rayn 导出的固定优选域名：作为独立 preferred 层候选（IP 快照），走同一终审。
-	// 只解析用户当前启用的优选域名（默认全部启用；用户可在 GUI 勾选开关）。
-	// 优选域名不再解析成 IP 合入候选池：仅作 cfnat 兜底转发（-fallback），
-	// 不参与任何探测与 IP 排序，避免“人挤人”顶掉工作 IP。
-	// 090227 动态发现同样停用（PROXY_DYNAMIC_DISCOVERY 废弃）。
-	_ = ctx
 	cfdataLimit := envInt("PROXY_CFDATA_CANDIDATES", 300)
 	if cfdataLimit < 0 || cfdataLimit > 2000 {
 		cfdataLimit = 300
@@ -1358,7 +1360,7 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 	snapshot := proxyCandidateSnapshot{
 		UpdatedAt:        now,
 		NextRefresh:      now.Add(proxyCandidateRefreshInterval),
-		Sources:          []string{"user", "subscription", "cfdata", "official"},
+		Sources:          []string{"user", "subscription", "preferred", "cfdata", "official"},
 		IPs:              ips,
 		SourceByIP:       sourceByIP,
 		PreferredDomains: a.enabledPreferredDomainsForCandidates(),
