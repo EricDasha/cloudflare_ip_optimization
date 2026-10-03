@@ -499,6 +499,8 @@ func main() {
 	mux.HandleFunc("/api/cfnat/proxy-scan", a.handleProxyScan)
 	mux.HandleFunc("/api/cfnat/proxy-candidates", a.handleProxyCandidates)
 	mux.HandleFunc("/api/cfnat/connections", a.handleCFnatConnections)
+	mux.HandleFunc("/api/cfnat/upstreams", a.handleCFnatUpstreams)
+	mux.HandleFunc("/api/cfnat/active/kick", a.handleActiveKick)
 	mux.HandleFunc("/api/cfnat/background-optimizer", a.handleBackgroundOptimizer)
 	mux.HandleFunc("/api/cfnat/proxy-scan/apply", a.handleProxyScanApply)
 	mux.HandleFunc("/api/cfnat/preferred", a.handlePreferredDomains)
@@ -1094,6 +1096,11 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 func (a *app) applyProxyPool(pool, current proxyActivePool) {
 	a.cfnatCtlMu.Lock()
 	defer a.cfnatCtlMu.Unlock()
+	a.applyPoolLocked(pool, current)
+}
+
+// applyPoolLocked 在已持有 cfnatCtlMu 时执行换池（踢人/手动采用等已持锁路径复用）。
+func (a *app) applyPoolLocked(pool, current proxyActivePool) {
 	passed := append([]string(nil), pool.IPs...)
 	cfnatCfg := defaultCFnatConfig()
 	cfnatCfg.Fixed = strings.Join(passed, ",")
@@ -2132,12 +2139,17 @@ func (a *app) handleSubscriptionRefresh(w http.ResponseWriter, r *http.Request) 
 }
 
 func normalizeProxyScan(c proxyScanConfig) (proxyScanConfig, error) {
+	auto := defaultProxyAutoConfig()
 	c.Host = strings.TrimSpace(c.Host)
 	if c.Host == "" {
-		return c, errors.New("SNI/Host 不能为空")
+		// 全自动化：手动优选未填 SNI 时直接用 PROXY_AUTO_HOST，用户无需理解协议细节。
+		c.Host = auto.Host
+	}
+	if c.Host == "" {
+		return c, errors.New("SNI/Host 未配置（请在 .env 设置 PROXY_AUTO_HOST）")
 	}
 	if c.Port == 0 {
-		c.Port = 443
+		c.Port = auto.Port
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		return c, errors.New("端口必须在 1-65535")
@@ -2294,6 +2306,95 @@ func (a *app) handleProxyScanApply(w http.ResponseWriter, r *http.Request) {
 	a.applyProxyPool(pool, current)
 	a.markPoolSwitched(now)
 	writeJSON(w, map[string]any{"ok": true, "applied": len(passed)})
+}
+
+// handleActiveKick 用户手动把某个在位 IP 踢出皇位（卡顿救火）：
+//  1. 从生效池移除该 IP 并重启 cfnat（手动路径，豁免换池冷却）
+//  2. 同步从候选缓存除名，防止后台立刻又把它选回来
+//  3. 剩余 IP 独木难支时不允许踢（避免空池），提示先立即优选补位
+func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.cfnatCtlMu.TryLock() {
+		http.Error(w, "换池操作正在运行，稍后再试", http.StatusTooManyRequests)
+		return
+	}
+	defer a.cfnatCtlMu.Unlock()
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var body struct {
+		IP string `json:"ip"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "无效的请求体", http.StatusBadRequest)
+		return
+	}
+	ip := net.ParseIP(strings.TrimSpace(body.IP))
+	if !isPublicIPv4(ip) {
+		http.Error(w, "无效的 IP", http.StatusBadRequest)
+		return
+	}
+	key := ip.To4().String()
+	current := a.proxyActivePoolSnapshot()
+	remaining, found := withoutPoolIP(current.IPs, key)
+	if !found {
+		http.Error(w, "该 IP 不在生效池中", http.StatusNotFound)
+		return
+	}
+	if len(remaining) == 0 {
+		http.Error(w, "最后一个在位 IP 不能踢：先点「立即优选」补充新池", http.StatusConflict)
+		return
+	}
+	a.removeCandidateIP(key)
+	keptResults := make([]proxyScanResult, 0, len(current.Results))
+	for _, result := range current.Results {
+		if result.IP != key {
+			keptResults = append(keptResults, result)
+		}
+	}
+	now := time.Now()
+	pool := current
+	pool.UpdatedAt = now
+	pool.IPs = remaining
+	pool.Results = keptResults
+	a.applyPoolLocked(pool, current)
+	a.markPoolSwitched(now)
+	log.Printf("active pool kicked %s: %d IPs remain", key, len(remaining))
+	writeJSON(w, map[string]any{"ok": true, "kicked": key, "remaining": len(remaining), "ips": remaining})
+}
+
+// withoutPoolIP 从池中剔除指定 IP；返回 (剩余, 是否找到)。
+func withoutPoolIP(ips []string, ip string) ([]string, bool) {
+	remaining := make([]string, 0, len(ips))
+	found := false
+	for _, item := range ips {
+		if item == ip {
+			found = true
+			continue
+		}
+		remaining = append(remaining, item)
+	}
+	return remaining, found
+}
+
+// removeCandidateIP 把 IP 从候选缓存除名并落盘（踢出皇位后防止立刻被回选）。
+func (a *app) removeCandidateIP(ip string) {
+	a.candidateMu.Lock()
+	snapshot := a.candidates
+	filtered := make([]string, 0, len(snapshot.IPs))
+	for _, item := range snapshot.IPs {
+		if item != ip {
+			filtered = append(filtered, item)
+		}
+	}
+	snapshot.IPs = filtered
+	if snapshot.SourceByIP != nil {
+		delete(snapshot.SourceByIP, ip)
+	}
+	a.candidates = snapshot
+	a.candidateMu.Unlock()
+	_ = a.saveProxyCandidateCache(snapshot)
 }
 
 const maxCandidateSourceBody = 512 * 1024

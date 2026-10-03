@@ -1,3 +1,4 @@
+/* 优选台运行时：$、api、toast、busy。零依赖。 */
 const $ = (id) => document.getElementById(id);
 
 let toastTimer;
@@ -9,51 +10,31 @@ const toast = (msg) => {
   toastTimer = setTimeout(() => el.classList.remove("show"), 3200);
 };
 
-let latestCfdataResults = { liveRows: [], scanRows: [], dataCenters: [], detailFiles: [] };
-let showAllLive = false;
-let showAllScan = false;
-let latestLogLines = [];
-let fullOptimizationRunning = false;
-const routes = new Set(["/", "/cfnat", "/pool", "/cfdata", "/files"]);
-const routeMeta = {
-  "/": ["CONTROL PLANE", "运行总览"],
-  "/cfnat": ["CFNAT", "转发配置"],
-  "/pool": ["CANDIDATE POOL", "候选考场"],
-  "/cfdata": ["CFDATA", "扫描与测速"],
-  "/files": ["ARTIFACTS", "数据文件"],
-};
-
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...opts,
-  });
+  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
   if (!res.ok) throw new Error((await res.text()).trim() || `HTTP ${res.status}`);
   return res.json();
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function withButton(button, pendingLabel, task) {
+/* busy：按钮转圈并禁用，任务完解除。重复点击天然防抖。 */
+async function busy(button, label, task) {
   if (button.disabled) return;
-  const previous = button.textContent;
+  const text = $(label);
+  const prev = text.textContent;
   button.disabled = true;
-  button.classList.add("is-busy");
-  button.textContent = pendingLabel;
+  button.classList.add("busy");
+  text.textContent = "进行中…";
   try {
     return await task();
   } finally {
     button.disabled = false;
-    button.classList.remove("is-busy");
-    button.textContent = previous;
+    button.classList.remove("busy");
+    text.textContent = prev;
   }
 }
 
-function setOptimizationStage(label, progress) {
-  $("optimizationStage").textContent = label;
-  $("optimizationProgress").style.width = `${Math.max(0, Math.min(100, progress))}%`;
-}
-
-function number(id) {
-  return Number($(id).value || 0);
-}
+const fmtTime = (iso) => {
+  if (!iso || String(iso).startsWith("0001-")) return "--";
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+};

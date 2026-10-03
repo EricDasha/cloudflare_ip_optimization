@@ -31,27 +31,22 @@ docker compose build --build-arg BUILDKIT_INLINE_CACHE=1
 docker build -f Dockerfile.multistage -t local/cloudflare-tools:multistage .
 ```
 
-打开 `http://localhost:8080` 后可以：
+打开 `http://localhost:8080` 即进入「优选台」单页控制面——全自动化，用户只有三个动作：
 
-1. 在 `/` 查看进程、生效池和候选池，或点击“完整优选”依次运行 CFdata、候选汇合、WebSocket 初筛、VLESS 数据面终审与 CFnat 换池。
-2. 在 `/` 的日志工作面切换进程、搜索、筛选成功/错误、调整行数、暂停、跟随或复制日志。
-3. 在 `/pool` 经营候选考场：来源分层条（手动 / 订阅 / 优选解析 / CFdata / 官方段）、订阅池与换池保护状态、优选域名双职责开关与解析结果、自定义扫描三步向导、后台慢速优选与线路质量调度。
-4. 在 `/cfnat` 启动、停止、重启 `cfnat`，查看局域网连接；常用参数直接显示，完整 flags 收在“高级参数”。
-5. 在 `/cfdata` 发起扫描、查看实时扫描表、数据中心汇总、`ip.csv` 扫描结果、丢包率与下载测速；并发、端口和强制更新收在“高级参数”。
-6. 在 `/files` 下载 `/data` 中的 `.csv`、`.txt`、`.json`、`.log` 文件。
+1. **看**：在位 IP 一屏尽览——每个 IP 的实时承载连接数（呼吸数字）、殿试成绩（Mbps/延迟）、来源徽标；自动化心跳行显示五层供给（订阅/优选解析/CFdata/官方段/手动）是否活着。
+2. **优选**：点「立即优选」触发一轮完整终审（候选汇合 → WS 乡试 → VLESS 殿试 → 换池）；或在「手动供 IP」粘贴 IP/域名/订阅内容一键入池——按 `.env` 的节点参数自动考试，手动供给登基最高优先且豁免换池冷却。
+3. **踢**：感觉卡顿时，点在位 IP 行的「踢」按钮将其逐出皇位——在途连接瞬断重连、剩余 IP 立即接管，被踢 IP 同步从候选除名防止立刻回选；最后一个 IP 不允许踢（提示先优选补位）。
+
+日志抽屉默认收起，需要排障时展开。除此之外没有页面、没有配置面板、没有参数表单——换池防抖、六小时全量维护、订阅慢扫、优选域名解析、后台慢速优选全部在后台自动运行。
 
 ### 反代 IP 维护
 
-在 `/cfnat` 展开“手动扫描”后选择社区候选源，也可以粘贴自己的 IPv4 列表。候选源通过 DNS 解析读取，不执行第三方脚本，也不会修改 DNS。
+日常供给全自动（订阅慢扫 + 优选域名解析 + CFdata 缓存 + 官方段抽样，全部经真实数据面考试后入池）。需要人工干预时只有两条路：
 
-推荐的手动维护流程：
+1. **手动供 IP**：在优选台「手动供 IP」粘贴 IPv4 列表、节点链接、Clash 配置或 base64 订阅，点「优选入池」——按 `.env` 的节点参数（`PROXY_AUTO_HOST/PATH/PORT`）自动考试，通过者直接登基（最高优先、豁免冷却）。
+2. **手动踢人**：感觉卡顿时点在位 IP 行的「踢」，被踢 IP 立即退出皇位并从候选除名。
 
-1. 填写实际节点使用的 `SNI / Host` 和目标端口。
-2. 选择候选源，按网络情况设置扫描并发、延迟上限和扫描数量。
-3. 点击“开始扫描”，检查 `PASS` 结果与来源错误。
-4. 点击“采用通过 IP”，确认“固定转发 IP”已更新。
-5. 自动池启用 VLESS probe 时，后台会用本地 sing-box 模板先请求 `generate_204`，再读取固定大小的下载响应；手动扫描仍只负责 TCP/TLS 粗筛。
-6. 只有真实节点返回 `204` 且下载校验完成才进入自动池；单纯 TCP/TLS 或 WebSocket `101` 不能证明业务可用。
+自动池启用 VLESS probe 时，后台会用本地 sing-box 模板先请求 `generate_204`，再读取固定大小的下载响应；手动供给的粗筛仍只验 TCP/TLS 可达——登基后由后台殿试继续复核。
 
 内置候选源：
 
@@ -65,7 +60,7 @@ docker build -f Dockerfile.multistage -t local/cloudflare-tools:multistage .
 
 服务端只允许上述固定候选源与订阅维护者清单，不接受任意 URL；第三方 HTTPS 源禁止跨域跳转，正文限制为 512 KiB，不执行脚本。手动导入的节点域名最多 64 个 hostname、共享 3 秒解析期限，并只接受公网 IPv4。所有结果仍拒绝私网、回环、链路本地与组播地址。扫描接口限制请求体为 1 MiB、并发为 `1-500`、扫描数量为 `1-10000`，同一时刻只运行一个扫描任务。
 
-Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新解析全部内置源。成功结果以原子替换方式写入 `/data/proxy-candidates.json`；刷新失败时保留上一次成功候选。页面会显示上次成功时间、下次刷新时间，并提供“立即拉取候选”和“载入自动候选”。
+Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新解析全部内置源。成功结果以原子替换方式写入 `/data/proxy-candidates.json`；刷新失败时保留上一次成功候选。优选台页脚显示下次自动优选时间，点「立即优选」可随时触发全量重考。
 
 启用 `PROXY_AUTO_APPLY` 后，后台先用实际 `Host + WebSocket path` 对全部候选并发执行 TLS 与 WebSocket `101 Switching Protocols` 初筛。启用 `PROXY_VLESS_PROBE` 后，再启动短生命周期 sing-box，以候选 `IP:PROXY_AUTO_PORT` 覆盖模板服务器地址，通过真实 VLESS 链路请求 `generate_204`，随后从 `speed.cloudflare.com` 读取固定大小响应并记录 Mbps。候选按 `user > subscription > preferred > cfdata > official` 分层，层内按下载 Mbps 降序、数据面延迟升序排列；下载失败的候选不会进入 active pool。只有最终通过数量达到 `PROXY_AUTO_MIN_POOL` 且通过换池防抖三道闸（冷却/健康/同池跳过）才替换 `/data/proxy-active.json` 并重启 CFnat。模板、sing-box 或数据面失败均保留旧池。
 
@@ -137,7 +132,7 @@ CFdata 彻底手动化：无后台自启动、无定时扫描；只在用户点�
 | `PROXY_CFDATA_CANDIDATES` | 从 `ip.csv` 读取的候选上限 | `300` |
 | `PROXY_OFFICIAL_CANDIDATES` | 从 Cloudflare 官方 CIDR 均匀抽样的候选数 | `150` |
 | `PROXY_USER_CANDIDATES` | 用户指定的公网 IPv4，逗号或空白分隔 | 空 |
-| `PROXY_BACKGROUND_OPTIMIZER` | 是否启用低占用后台轮转优选；GUI 可覆盖并持久化 | `true` |
+| `PROXY_BACKGROUND_OPTIMIZER` | 是否启用低占用后台轮转优选 | `true` |
 | `PROXY_VLESS_PROBE` | 是否在 WS 初筛后运行真实 VLESS 数据面终审 | `false` |
 | `PROXY_VLESS_TEMPLATE` | 本地 VLESS outbound 或完整 sing-box 配置 | `/data/vless-probe-outbound.json` |
 | `PROXY_VLESS_TEST_URL` | 经 VLESS 请求的轻量验活地址 | `https://www.gstatic.com/generate_204` |
@@ -153,9 +148,9 @@ CFdata 彻底手动化：无后台自启动、无定时扫描；只在用户点�
 第三方「优选域名」是优选 IP 的实时转发别名：每次新 TCP 连接时按域名当前 DNS 解析，天然跟随上游优选结果刷新。本项目中优选域名承担两个职责：
 
 - **解析供给（C 区）**：启用的优选域名在每次候选刷新时并发解析出公网 IPv4，作为 `preferred` 层候选（来源序 `user > subscription > preferred > cfdata > official`），走与订阅同款乡试（TLS/WS 初筛）与殿试（VLESS 数据面）；解析快照随刷新周期过期，重新解析即替换。
-- **直连兜底**：设置 `PROXY_DOMAIN_FORWARD`（逗号分隔的域名，如 `youxuan.cf.090227.xyz,www.visa.cn`），或直接在页面勾选优选域名；这些域名写入 CFnat `-fallback`，主池全部拨号失败时才按顺序尝试。数据面拨号时按域名当前 DNS 解析。
+- **直连兜底**：设置 `PROXY_DOMAIN_FORWARD`（逗号分隔的域名，如 `youxuan.cf.090227.xyz,www.visa.cn`）；这些域名写入 CFnat `-fallback`，主池全部拨号失败时才按顺序尝试。数据面拨号时按域名当前 DNS 解析。
 
-域名解析供给只使用明确配置或页面勾选的域名，不接受任意输入；域名目标不经域名级探测，解析出的 IP 必须先通过真实 Host + WebSocket path 的 `101` 初筛与 VLESS 数据面终审才可进入 IP 生效池。CFnat `-fixed` 参数同时接受 IP 与域名。
+域名解析供给只使用内置清单与 `PROXY_DOMAIN_FORWARD` 明确配置的域名，不接受任意输入；域名目标不经域名级探测，解析出的 IP 必须先通过真实 Host + WebSocket path 的 `101` 初筛与 VLESS 数据面终审才可进入 IP 生效池。CFnat `-fixed` 参数同时接受 IP 与域名。
 
 ## IP 列表获取方式
 

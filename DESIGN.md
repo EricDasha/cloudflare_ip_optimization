@@ -127,17 +127,13 @@ The background optimizer **never probes Active IPs**:
 
 ## Web GUI
 
-The GUI is a functional operations console:
+The GUI is a single-page auto-pilot console ("优选台"). The user has exactly three actions; everything else runs unattended in the background:
 
-- The overview prioritizes active pool, candidate count, process state, the next refresh and one full-pipeline action.
-- The candidate arena (`/pool`) owns the whole examination flow in one place: source-tier bar, subscription status, preferred-domain dual-duty switches with per-domain resolve badges, the three-step manual scan wizard, background optimizer and quality scheduler.
-- Preferred-domain rows show last-resolve state (RESOLVED n IPs / RESOLVE_FAIL); toggling a domain takes effect on the next candidate refresh.
-- Common CFnat and CFdata settings remain visible; all original command flags remain available under advanced sections.
-- Manual candidate scanning remains separate from the WebSocket business probe because a TCP/TLS pass is not proof of node usability.
-- Logs are one shared workspace with process selection, search, level filtering, line limits, pause, follow and copy controls.
-- Buttons expose pending and disabled states so repeated clicks cannot fan out duplicate browser requests.
+- **Observe**: one hero card lists the active pool — per-IP live connection count (from `/api/cfnat/upstreams`, grouped by remote:PROXY_AUTO_PORT, active TCP states only), VLESS exam scores (Mbps/latency) and source badges. A pulse line shows whether each supply tier (subscription / preferred-resolve / cfdata / official / manual) currently contributes candidates.
+- **Optimize**: one button triggers the full pipeline (refresh candidates → WS screening → VLESS final → commit). A paste box feeds manual IPs/domains/subscription text into the same exam; manual supply promotes at highest priority, exempt from pool-switch cooldown.
+- **Kick**: per-IP "踢" removes a pool member on user demand — the pool restarts with the remaining IPs (manual path, no cooldown), and the kicked IP is dropped from the candidate cache so the background does not immediately re-elect it. The last pool member cannot be kicked.
 
-The "完整优选" browser action runs CFdata, waits for a successful exit, refreshes merged candidates, runs the server-side WebSocket final probe, and then renders the returned active pool as the authoritative result. The existing six-hour server scheduler remains the unattended path if the browser closes.
+Logs live in a collapsed drawer. There are no routes, no config forms, no advanced panels; cfnat/cfdata flags come from the environment only. The old multi-page console (overview/forwarding/arena/scan/files) is retired.
 
 ## Failure Boundaries
 
