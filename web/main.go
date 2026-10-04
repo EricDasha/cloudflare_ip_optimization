@@ -47,6 +47,13 @@ const (
 	preferredSettingsFile         = "proxy-preferred.json"
 )
 
+// Candidate collection and result sorting must use the same order. The first
+// source that supplies an IP owns its source label, so this order also defines
+// which source wins when the same address appears in multiple feeds.
+var proxyCandidateSourceOrder = []string{"user", "subscription", "preferred", "cfdata", "official", "proxy"}
+
+var errProxyCandidatesBusy = errors.New("候选源刷新正在运行")
+
 // preferredDomainPattern 匹配 090227 优选目录页面中服务端渲染的域名卡片。
 // 页面为 GBK/UTF-8 双拼，但 copyDomain 参数是 ASCII，可在原始字节上直接匹配。
 var preferredDomainPattern = regexp.MustCompile(`copyDomain\(\s*['"]([a-zA-Z0-9][a-zA-Z0-9.\-]*)['"]\s*\)`)
@@ -106,6 +113,7 @@ type managedProcess struct {
 	bin       string
 	cmd       *exec.Cmd
 	cancel    context.CancelFunc
+	done      chan struct{}
 	startedAt time.Time
 	exitedAt  time.Time
 	exitCode  *int
@@ -236,7 +244,9 @@ func (p *managedProcess) start(dataDir string, args []string, stdin string) erro
 	}
 	p.cmd = cmd
 	p.cancel = cancel
+	p.done = make(chan struct{})
 	p.startedAt = time.Now()
+	done := p.done
 
 	go func() {
 		err := cmd.Wait()
@@ -257,24 +267,36 @@ func (p *managedProcess) start(dataDir string, args []string, stdin string) erro
 		if errors.Is(ctx.Err(), context.Canceled) {
 			p.lastError = "stopped"
 		}
+		close(done)
 	}()
 	return nil
 }
 
 func (p *managedProcess) stop() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.cmd == nil || p.cmd.Process == nil || p.exitCode != nil {
+		p.mu.Unlock()
 		return nil
 	}
-	if p.cancel != nil {
-		p.cancel()
+	cancel := p.cancel
+	proc := p.cmd.Process
+	done := p.done
+	p.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
-	go func(proc *os.Process) {
-		time.Sleep(1500 * time.Millisecond)
-		_ = proc.Kill()
-	}(p.cmd.Process)
-	return nil
+	timer := time.NewTimer(1500 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		if err := proc.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return fmt.Errorf("停止 %s 失败: %w", p.name, err)
+		}
+		<-done
+		return nil
+	}
 }
 
 type cfnatConfig struct {
@@ -719,6 +741,23 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	cfg := defaultProxyAutoConfig()
 	cfg.Concurrency = 4
 	cfg.MaxLatency = 1500
+	current := a.proxyActivePoolSnapshot()
+	// Keep active health independent from candidate rotation. A pool can be
+	// the only remaining source, so an empty candidate batch must not disable
+	// the health gate.
+	healthNow := time.Now()
+	if len(current.IPs) > 0 {
+		healthCtx, healthCancel := context.WithTimeout(parent, 5*time.Second)
+		activeResults := scanProxyWebSockets(healthCtx, current.IPs, cfg)
+		healthCancel()
+		for _, result := range activeResults {
+			ok := result.Error == ""
+			a.recordActiveHealth(result.IP, ok, healthNow)
+			if result.IP == a.quality.activeIP() {
+				a.quality.observeActiveHealth(ok, healthNow)
+			}
+		}
+	}
 
 	// 从 Candidate Pool 获取候选 IP
 	snapshot := a.proxyCandidateSnapshot()
@@ -726,9 +765,9 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 		return
 	}
 
-	// Active 隔离：构建 Active IP 集合，后续批量测试时跳过
+	// Active 隔离：候选轮转不重复测试生效 IP；生效池稍后单独做轻量健康探测。
 	active := make(map[string]struct{})
-	for _, ip := range a.proxyActivePoolSnapshot().IPs {
+	for _, ip := range current.IPs {
 		active[ip] = struct{}{}
 	}
 
@@ -746,15 +785,14 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 			batch = append(batch, ip)
 		}
 	}
-	if len(batch) == 0 {
-		return
-	}
+	// An empty batch is still a valid health-only scheduler round.
 
 	// 第一阶段：WS/TLS 初筛（低成本）
 	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
 	defer cancel()
 	results := scanProxyWebSockets(ctx, batch, cfg)
 	applyCandidateSourcePriority(results, snapshot.SourceByIP)
+	now := time.Now()
 
 	// 第二阶段：VLESS 完整测试（高成本，仅对通过初筛的 IP）
 	passed := make([]string, 0, len(results))
@@ -780,17 +818,9 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	for _, ip := range passed {
 		passedSet[ip] = struct{}{}
 	}
-	now := time.Now()
-	activeSet := make(map[string]struct{}, len(active))
-	for ip := range active {
-		activeSet[ip] = struct{}{}
-	}
 	for _, result := range results {
 		_, ok := passedSet[result.IP]
 		a.quality.observe(result.IP, snapshot.SourceByIP[result.IP], result.DownloadMbps, ok, now)
-		if _, isActive := activeSet[result.IP]; isActive {
-			a.recordActiveHealth(result.IP, ok, now)
-		}
 	}
 
 	// 决策：检查是否有 Standby IP 应该晋升为 Active
@@ -804,15 +834,22 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	if !a.allowPoolSwitch(now, "scheduler") {
 		return
 	}
-	current := a.proxyActivePoolSnapshot()
-	if sameIPSet(current.IPs, []string{decision.ToIP}) {
-		log.Printf("scheduler pool switch skipped: target equals current pool")
+	if latest := a.proxyCandidateSnapshot(); !latest.UpdatedAt.Equal(snapshot.UpdatedAt) {
+		log.Printf("scheduler pool switch skipped: candidate snapshot changed during probe")
+		return
+	}
+	if containsString(current.IPs, decision.ToIP) {
+		log.Printf("scheduler pool switch skipped: target already in current pool")
 		return
 	}
 	pool := current
 	pool.UpdatedAt, pool.Host, pool.Path = now, cfg.Host, cfg.Path
-	pool.IPs, pool.Results = []string{decision.ToIP}, results
-	a.applyProxyPool(pool, current)
+	pool.IPs = replacePoolMember(current.IPs, decision.FromIP, decision.ToIP)
+	pool.Results = mergePoolResults(pool.IPs, current.Results, results)
+	if err := a.applyProxyPool(pool, current); err != nil {
+		a.quality.setError("调度器换池失败: " + err.Error())
+		return
+	}
 	a.quality.commitSwitch(decision, now)
 	a.markPoolSwitched(now)
 }
@@ -936,7 +973,12 @@ func proxyResultSourceRank(results []proxyScanResult, ip string) int {
 func (a *app) refreshAndApplyProxyPool(ctx context.Context) {
 	// CFdata 已解耦为独立后台扫描器，不再在此触发。
 	// Optimizer 只读取 cfdata cache（ip.csv），不启动扫描。
-	if a.refreshProxyCandidates(ctx) {
+	ok, err := a.refreshProxyCandidates(ctx)
+	if err != nil {
+		log.Printf("proxy candidate refresh skipped: %v", err)
+		return
+	}
+	if ok {
 		a.autoApplyProxyPool(ctx)
 	}
 }
@@ -1070,6 +1112,12 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 		a.setProxyPoolError(fmt.Sprintf("%s 终审仅 %d 个通过，低于最小池 %d；保留旧池", finalStage, len(passed), cfg.MinPool), results)
 		return
 	}
+	if latest := a.proxyCandidateSnapshot(); !latest.UpdatedAt.Equal(snapshot.UpdatedAt) {
+		// A source refresh completed while this expensive scan was running.
+		// Never let the old scan overwrite the newer candidate generation.
+		log.Printf("proxy auto apply skipped: candidate snapshot changed during scan")
+		return
+	}
 	current := a.proxyActivePoolSnapshot()
 	domains := a.proxyForwardDomains()
 	now := time.Now()
@@ -1089,18 +1137,21 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 	if !a.allowPoolSwitch(now, "auto-apply") {
 		return
 	}
-	a.applyProxyPool(pool, current)
+	if err := a.applyProxyPool(pool, current); err != nil {
+		a.setProxyPoolError("自动换池失败，保留旧池: "+err.Error(), results)
+		return
+	}
 	a.markPoolSwitched(now)
 }
 
-func (a *app) applyProxyPool(pool, current proxyActivePool) {
+func (a *app) applyProxyPool(pool, current proxyActivePool) error {
 	a.cfnatCtlMu.Lock()
 	defer a.cfnatCtlMu.Unlock()
-	a.applyPoolLocked(pool, current)
+	return a.applyPoolLocked(pool, current)
 }
 
 // applyPoolLocked 在已持有 cfnatCtlMu 时执行换池（踢人/手动采用等已持锁路径复用）。
-func (a *app) applyPoolLocked(pool, current proxyActivePool) {
+func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 	passed := append([]string(nil), pool.IPs...)
 	cfnatCfg := defaultCFnatConfig()
 	cfnatCfg.Fixed = strings.Join(passed, ",")
@@ -1113,31 +1164,33 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) {
 		rollbackCfg.Fallback = strings.Join(current.Domains, ",")
 	}
 	if err := a.cfnat.stop(); err != nil {
-		log.Printf("stop cfnat for auto pool: %v", err)
-		return
+		return fmt.Errorf("停止 cfnat: %w", err)
 	}
-	time.Sleep(300 * time.Millisecond)
 	if err := a.cfnat.start(a.dataDir, cfnatCfg.args(), ""); err != nil {
-		log.Printf("start cfnat with auto pool: %v", err)
-		time.Sleep(300 * time.Millisecond)
+		applyErr := fmt.Errorf("启动新 cfnat: %w", err)
 		if rollbackErr := a.cfnat.start(a.dataDir, rollbackCfg.args(), ""); rollbackErr != nil {
-			log.Printf("rollback cfnat after auto pool failure: %v", rollbackErr)
+			return fmt.Errorf("%w；回滚 cfnat 也失败: %v", applyErr, rollbackErr)
 		}
-		return
+		return applyErr
 	}
 	if err := a.saveProxyActivePool(pool); err != nil {
-		log.Printf("commit proxy active pool: %v; rolling back", err)
-		_ = a.cfnat.stop()
-		time.Sleep(300 * time.Millisecond)
-		if rollbackErr := a.cfnat.start(a.dataDir, rollbackCfg.args(), ""); rollbackErr != nil {
-			log.Printf("rollback cfnat after pool commit failure: %v", rollbackErr)
+		commitErr := fmt.Errorf("保存生效池: %w", err)
+		if stopErr := a.cfnat.stop(); stopErr != nil {
+			return fmt.Errorf("%w；回滚前停止新 cfnat 失败: %v", commitErr, stopErr)
 		}
-		return
+		if rollbackErr := a.cfnat.start(a.dataDir, rollbackCfg.args(), ""); rollbackErr != nil {
+			return fmt.Errorf("%w；回滚 cfnat 也失败: %v", commitErr, rollbackErr)
+		}
+		return commitErr
 	}
 	a.activeMu.Lock()
 	a.activePool = pool
 	a.activeMu.Unlock()
+	if a.quality != nil && len(pool.IPs) > 0 {
+		a.quality.seedActive(pool.IPs[0], pool.UpdatedAt)
+	}
 	log.Printf("proxy active pool applied: %s", strings.Join(passed, ","))
+	return nil
 }
 
 func (a *app) setProxyPoolError(message string, results []proxyScanResult) {
@@ -1193,22 +1246,12 @@ func applyCandidateSourcePriority(results []proxyScanResult, sourceByIP map[stri
 	// preferred 是 C 区供给位：以第三方维护者的优选结果覆盖原作者上游
 	// (baipiao→cfdata)的日常供给；cfdata 退为手动扫描兜底层。
 	rank := func(ip string) int {
-		switch sourceByIP[ip] {
-		case "user":
-			return 0
-		case "subscription":
-			return 1
-		case "preferred":
-			return 2
-		case "cfdata":
-			return 3
-		case "official":
-			return 4
-		case "proxy":
-			return 5
-		default:
-			return 6
+		for rank, source := range proxyCandidateSourceOrder {
+			if sourceByIP[ip] == source {
+				return rank
+			}
 		}
+		return len(proxyCandidateSourceOrder)
 	}
 	for i := range results {
 		results[i].SourceRank = rank(results[i].IP)
@@ -1266,9 +1309,9 @@ func probeProxyWebSocket(ctx context.Context, ip string, cfg proxyAutoConfig) er
 	return nil
 }
 
-func (a *app) refreshProxyCandidates(parent context.Context) bool {
+func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 	if !a.refreshMu.TryLock() {
-		return false
+		return false, errProxyCandidatesBusy
 	}
 	defer a.refreshMu.Unlock()
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
@@ -1293,17 +1336,6 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 			resolved = append(resolved, key)
 		}
 	}
-	officialLimit := envInt("PROXY_OFFICIAL_CANDIDATES", 150)
-	if officialLimit < 0 || officialLimit > 1000 {
-		officialLimit = 150
-	}
-	if officialLimit > 0 {
-		official, officialErr := fetchOfficialCloudflareCandidates(ctx, officialLimit)
-		if officialErr != nil {
-			sourceErrors = append(sourceErrors, "Cloudflare 官方段: "+officialErr.Error())
-		}
-		appendGroup("official", official)
-	}
 	appendGroup("user", strings.FieldsFunc(env("PROXY_USER_CANDIDATES", ""), func(r rune) bool {
 		return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t'
 	}))
@@ -1315,12 +1347,6 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 	preferredIPs, preferredErrors := a.resolvePreferredDomainIPs(ctx, nil)
 	sourceErrors = append(sourceErrors, preferredErrors...)
 	appendGroup("preferred", preferredIPs)
-	community, communityErrors, err := resolveProxySources(ctx, defaultProxyCandidateSourceIDs, 1000-len(resolved))
-	sourceErrors = append(sourceErrors, communityErrors...)
-	if err != nil {
-		sourceErrors = append(sourceErrors, err.Error())
-	}
-	appendGroup("proxy", community)
 	cfdataLimit := envInt("PROXY_CFDATA_CANDIDATES", 300)
 	if cfdataLimit < 0 || cfdataLimit > 2000 {
 		cfdataLimit = 300
@@ -1333,6 +1359,23 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 			appendGroup("cfdata", cfdataIPs)
 		}
 	}
+	officialLimit := envInt("PROXY_OFFICIAL_CANDIDATES", 150)
+	if officialLimit < 0 || officialLimit > 1000 {
+		officialLimit = 150
+	}
+	if officialLimit > 0 {
+		official, officialErr := fetchOfficialCloudflareCandidates(ctx, officialLimit)
+		if officialErr != nil {
+			sourceErrors = append(sourceErrors, "Cloudflare 官方段: "+officialErr.Error())
+		}
+		appendGroup("official", official)
+	}
+	community, communityErrors, err := resolveProxySources(ctx, defaultProxyCandidateSourceIDs, 1000-len(resolved))
+	sourceErrors = append(sourceErrors, communityErrors...)
+	if err != nil {
+		sourceErrors = append(sourceErrors, err.Error())
+	}
+	appendGroup("proxy", community)
 	seen := make(map[string]struct{})
 	ips := make([]string, 0, len(resolved))
 	for _, raw := range resolved {
@@ -1361,13 +1404,13 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 		a.candidateMu.Lock()
 		a.candidates = snapshot
 		a.candidateMu.Unlock()
-		return true
+		return false, errors.New("候选源未返回公网 IPv4")
 	}
 	now := time.Now()
 	snapshot := proxyCandidateSnapshot{
 		UpdatedAt:        now,
 		NextRefresh:      now.Add(proxyCandidateRefreshInterval),
-		Sources:          []string{"user", "subscription", "preferred", "cfdata", "official"},
+		Sources:          append([]string(nil), proxyCandidateSourceOrder...),
 		IPs:              ips,
 		SourceByIP:       sourceByIP,
 		PreferredDomains: a.enabledPreferredDomainsForCandidates(),
@@ -1380,7 +1423,7 @@ func (a *app) refreshProxyCandidates(parent context.Context) bool {
 		log.Printf("save proxy candidate cache: %v", err)
 	}
 	log.Printf("proxy candidate cache refreshed: %d IPv4, next=%s", len(ips), snapshot.NextRefresh.Format(time.RFC3339))
-	return true
+	return true, nil
 }
 
 const bundledOfficialCloudflareIPv4CIDRs = `
@@ -1567,11 +1610,18 @@ func (a *app) handleProxyCandidates(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		writeSnapshot()
 	case http.MethodPost:
-		if !a.refreshProxyCandidates(r.Context()) {
-			http.Error(w, "候选源刷新正在运行", http.StatusTooManyRequests)
+		ok, err := a.refreshProxyCandidates(r.Context())
+		if err != nil {
+			status := http.StatusServiceUnavailable
+			if errors.Is(err, errProxyCandidatesBusy) {
+				status = http.StatusTooManyRequests
+			}
+			http.Error(w, err.Error(), status)
 			return
 		}
-		a.autoApplyProxyPool(r.Context())
+		if ok {
+			a.autoApplyProxyPool(r.Context())
+		}
 		writeSnapshot()
 	default:
 		http.Error(w, "GET or POST required", http.StatusMethodNotAllowed)
@@ -1659,6 +1709,9 @@ func (a *app) activePoolHealthy(ips []string) bool {
 		if st == nil || st.Success == 0 {
 			continue
 		}
+		if st.LastCheck.IsZero() || now.Sub(st.LastCheck) > window {
+			continue
+		}
 		if !st.LastFail.IsZero() && now.Sub(st.LastFail) < window {
 			continue
 		}
@@ -1724,6 +1777,51 @@ func sameIPSet(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+// replacePoolMember keeps the rest of a working pool in service while a
+// scheduler promotion replaces one member. A missing FromIP can happen after
+// a restart or manual kick; in that case replace the first member rather than
+// collapsing the whole pool to a single address.
+func replacePoolMember(current []string, from, to string) []string {
+	pool := append([]string(nil), current...)
+	if len(pool) == 0 {
+		return []string{to}
+	}
+	for i, ip := range pool {
+		if ip == from {
+			pool[i] = to
+			return pool
+		}
+	}
+	pool[0] = to
+	return pool
+}
+
+func mergePoolResults(ips []string, current, fresh []proxyScanResult) []proxyScanResult {
+	byIP := make(map[string]proxyScanResult, len(current)+len(fresh))
+	for _, result := range current {
+		byIP[result.IP] = result
+	}
+	for _, result := range fresh {
+		byIP[result.IP] = result
+	}
+	merged := make([]proxyScanResult, 0, len(ips))
+	for _, ip := range ips {
+		if result, ok := byIP[ip]; ok {
+			merged = append(merged, result)
+		}
+	}
+	return merged
 }
 
 func sameStringSet(a, b []string) bool {
@@ -2063,7 +2161,6 @@ func (a *app) sweepSubscriptions(parent context.Context) {
 		}
 	}
 	a.subMu.Lock()
-	defer a.subMu.Unlock()
 	merged := make(map[string]struct{}, len(a.subIPs))
 	combined := make([]string, 0, len(a.subIPs)+len(verified))
 	for _, ip := range a.subIPs {
@@ -2097,8 +2194,15 @@ func (a *app) sweepSubscriptions(parent context.Context) {
 	a.subLastRun = time.Now()
 	a.subLastError = strings.Join(sourceErrors, " | ")
 	a.subLastCount = len(verified)
-	_ = a.saveSubscriptionPoolLocked()
+	saveErr := a.saveSubscriptionPoolLocked()
+	a.subMu.Unlock()
+	if saveErr != nil {
+		log.Printf("subscription pool save failed: %v", saveErr)
+	}
 	log.Printf("subscription sweep: %d verified of %d extracted (pool=%d)", len(verified), len(fresh), len(combined))
+	// The subscription pool is a candidate source. Refresh its aggregate
+	// snapshot immediately so the next auto-apply round cannot use stale input.
+	go a.refreshAndApplyProxyPool(context.Background())
 }
 
 // interleaveByMaintainer 按维护者轮转打散 IP，保证多维护者公平分享验活预算。
@@ -2303,7 +2407,10 @@ func (a *app) handleProxyScanApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pool := proxyActivePool{UpdatedAt: now, Host: current.Host, Path: current.Path, IPs: passed, Domains: current.Domains, Results: results}
-	a.applyProxyPool(pool, current)
+	if err := a.applyProxyPool(pool, current); err != nil {
+		http.Error(w, "换池失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	a.markPoolSwitched(now)
 	writeJSON(w, map[string]any{"ok": true, "applied": len(passed)})
 }
@@ -2317,6 +2424,16 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
+	if !a.proxyScanMu.TryLock() {
+		http.Error(w, "优选或扫描正在运行，稍后再试", http.StatusTooManyRequests)
+		return
+	}
+	defer a.proxyScanMu.Unlock()
+	if !a.refreshMu.TryLock() {
+		http.Error(w, "候选源刷新正在运行，稍后再试", http.StatusTooManyRequests)
+		return
+	}
+	defer a.refreshMu.Unlock()
 	if !a.cfnatCtlMu.TryLock() {
 		http.Error(w, "换池操作正在运行，稍后再试", http.StatusTooManyRequests)
 		return
@@ -2346,7 +2463,6 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "最后一个在位 IP 不能踢：先点「立即优选」补充新池", http.StatusConflict)
 		return
 	}
-	a.removeCandidateIP(key)
 	keptResults := make([]proxyScanResult, 0, len(current.Results))
 	for _, result := range current.Results {
 		if result.IP != key {
@@ -2358,7 +2474,11 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 	pool.UpdatedAt = now
 	pool.IPs = remaining
 	pool.Results = keptResults
-	a.applyPoolLocked(pool, current)
+	if err := a.applyPoolLocked(pool, current); err != nil {
+		http.Error(w, "踢除换池失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a.removeCandidateIP(key)
 	a.markPoolSwitched(now)
 	log.Printf("active pool kicked %s: %d IPs remain", key, len(remaining))
 	writeJSON(w, map[string]any{"ok": true, "kicked": key, "remaining": len(remaining), "ips": remaining})

@@ -33,6 +33,19 @@ func TestQualityRuntimePersistsAndRestores(t *testing.T) {
 	}
 }
 
+func TestQualityRuntimeSeedActiveDemotesPreviousRepresentative(t *testing.T) {
+	r := testQualityRuntime(t)
+	now := time.Date(2026, 8, 21, 10, 0, 0, 0, time.UTC)
+	r.seedActive("1.1.1.1", now)
+	r.seedActive("8.8.8.8", now.Add(time.Minute))
+	if got := r.data.ActiveIP; got != "8.8.8.8" {
+		t.Fatalf("active representative = %q", got)
+	}
+	if got := r.data.Records["1.1.1.1"].State; got != lineStandby {
+		t.Fatalf("previous representative state = %q, want STANDBY", got)
+	}
+}
+
 func TestQualityRuntimePromotionNeedsThreeObservedRounds(t *testing.T) {
 	r := testQualityRuntime(t)
 	now := time.Date(2026, 8, 21, 10, 0, 0, 0, time.UTC)

@@ -14,7 +14,7 @@
         <span class="brand-glyph" aria-hidden="true">CF</span>
         <div>
           <strong>Cloudflare 优选台</strong>
-          <small id="topbarSub">自动优选运行中</small>
+          <small id="topbarSub">转发状态读取中</small>
         </div>
       </div>
       <div class="top-status">
@@ -63,7 +63,7 @@
       <section class="pulse-line" aria-label="自动化状态">
         <div class="pulse-beacons" id="sourceBeacons"></div>
         <div class="pulse-meta">
-          <span id="nextRefresh">下次自动优选 --</span>
+          <span id="nextRefresh">下次候选刷新 --</span>
           <span class="dot">·</span>
           <span id="lanPeers">局域网 -- 设备</span>
           <button class="linklike" id="logToggle" type="button" aria-expanded="false">日志</button>
@@ -84,11 +84,11 @@
         <pre id="logBox" class="term" role="log" aria-live="polite"></pre>
       </section>
 
-      <footer class="foot">Cloudflare 优选台 · 全自动 · <span id="footClock">--</span></footer>
+      <footer class="foot">Cloudflare 优选台 · 候选刷新与换池由环境配置控制 · <span id="footClock">--</span></footer>
     </main>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script src="/runtime.js?v=20261003a"></script>
-    <script src="/app.js?v=20261003a"></script>
+    <script src="/app.js?v=20261004a"></script>
   </body>
 </html>

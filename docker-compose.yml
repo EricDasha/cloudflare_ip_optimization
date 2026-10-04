@@ -42,8 +42,6 @@ services:
       PROXY_AUTO_MAX_LATENCY: "5000"
       PROXY_AUTO_POOL_SIZE: "5"
       PROXY_AUTO_MIN_POOL: "3"
-      PROXY_AUTO_CFDATA: "false"
-      PROXY_AUTO_CFDATA_TIMEOUT: "600"
       # 优选域名直连：显式指定后并入 CFnat 固定转发池；IP 池结果仍来自 VLESS 终审。
       PROXY_DOMAIN_FORWARD: "${PROXY_DOMAIN_FORWARD:-}"
       # 优选域名兜底转发：置 true 时把已启用的优选域名并入 cfnat -fallback
@@ -58,19 +56,14 @@ services:
       PROXY_CFDATA_CANDIDATES: "300"
       PROXY_OFFICIAL_CANDIDATES: "150"
       PROXY_USER_CANDIDATES: "${PROXY_USER_CANDIDATES:-}"
-      # 低占用后台轮测：每 15 分钟取 24 个候选，并发 4；GUI 可关闭并持久化。
+      # 低占用后台轮测：每 5 分钟取 12 个候选，并发 4；GUI 可关闭并持久化。
       PROXY_BACKGROUND_OPTIMIZER: "true"
       # 质量调度器：候选分批探测，Active 仅轻量探活；Promotion/Failover 由状态机决定
       PROXY_SCHEDULER_PROBE_INTERVAL_SECONDS: "300"
       PROXY_SCHEDULER_BATCH_SIZE: "12"
       PROXY_SCHEDULER_APPLY: "true"
       # CFdata 彻底手动化：无后台自启动、无定时扫描、无 sift 联动。
-      # 以下变量保留仅防旧配置残留，服务端不再读取。
       # 日常 IP 供给走订阅慢扫：PROXY_SUBSCRIPTION_*。
-      PROXY_CFDATA_BACKGROUND_ENABLED: "false"
-      PROXY_CFDATA_BACKGROUND_MINUTES: "60"
-      PROXY_CFDATA_BACKGROUND_TIMEOUT: "600"
-      PROXY_CFDATA_SIFT_COUNT: "40"
       # 订阅日常慢入池：维护者域名清单 + 转换器基地址 + token（token 从 .env 注入）。
       PROXY_SUBSCRIPTION_CONVERTER: "https://vlesdy.trojanjd.dpdns.org/sub"
       PROXY_SUBSCRIPTION_MAINTAINERS: "owo.o00o.ooo,cm.soso.edu.kg,zrf.zrf.me,sub.keaeye.icu,sub.mot.cloudns.biz,sub.mia.xx.kg,sub.lzjbaby.com,sub.xdu.qzz.io"

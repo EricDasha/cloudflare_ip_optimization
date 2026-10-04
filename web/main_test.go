@@ -85,6 +85,70 @@ func TestSameIPSetIgnoresOrder(t *testing.T) {
 	}
 }
 
+func TestCandidateSourcePriorityUsesDeclaredOrder(t *testing.T) {
+	results := []proxyScanResult{
+		{IP: "203.0.113.6", Latency: 1},
+		{IP: "203.0.113.1", Latency: 6},
+		{IP: "203.0.113.4", Latency: 4},
+		{IP: "203.0.113.2", Latency: 2},
+		{IP: "203.0.113.5", Latency: 5},
+		{IP: "203.0.113.3", Latency: 3},
+	}
+	applyCandidateSourcePriority(results, map[string]string{
+		"203.0.113.1": "user",
+		"203.0.113.2": "subscription",
+		"203.0.113.3": "preferred",
+		"203.0.113.4": "cfdata",
+		"203.0.113.5": "official",
+		"203.0.113.6": "proxy",
+	})
+	got := make([]string, len(results))
+	for i, result := range results {
+		got[i] = result.IP
+	}
+	want := []string{"203.0.113.1", "203.0.113.2", "203.0.113.3", "203.0.113.4", "203.0.113.5", "203.0.113.6"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("candidate source order = %v, want %v", got, want)
+	}
+}
+
+func TestReplacePoolMemberPreservesOtherActiveIPs(t *testing.T) {
+	got := replacePoolMember([]string{"1.1.1.1", "2.2.2.2", "3.3.3.3"}, "2.2.2.2", "8.8.8.8")
+	want := []string{"1.1.1.1", "8.8.8.8", "3.3.3.3"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("replaced pool = %v, want %v", got, want)
+	}
+	got = replacePoolMember([]string{"1.1.1.1", "2.2.2.2"}, "missing", "8.8.8.8")
+	if !reflect.DeepEqual(got, []string{"8.8.8.8", "2.2.2.2"}) {
+		t.Fatalf("missing source replacement = %v", got)
+	}
+}
+
+func TestMergePoolResultsKeepsExistingMembers(t *testing.T) {
+	got := mergePoolResults(
+		[]string{"1.1.1.1", "8.8.8.8"},
+		[]proxyScanResult{{IP: "1.1.1.1", Latency: 100}},
+		[]proxyScanResult{{IP: "8.8.8.8", Latency: 20}},
+	)
+	if len(got) != 2 || got[0].IP != "1.1.1.1" || got[0].Latency != 100 || got[1].IP != "8.8.8.8" {
+		t.Fatalf("merged pool results = %#v", got)
+	}
+}
+
+func TestActivePoolHealthRequiresFreshCheck(t *testing.T) {
+	a := &app{activeHealth: map[string]*activeHealthStat{
+		"203.0.113.1": {Success: 1, LastCheck: time.Now().Add(-2 * activeHealthWindow())},
+	}}
+	if a.activePoolHealthy([]string{"203.0.113.1"}) {
+		t.Fatal("stale active health record blocked a pool switch")
+	}
+	now := time.Now()
+	a.activeHealth["203.0.113.1"] = &activeHealthStat{Success: 1, LastCheck: now}
+	if !a.activePoolHealthy([]string{"203.0.113.1"}) {
+		t.Fatal("fresh successful active health record was not accepted")
+	}
+}
+
 func TestSubscriptionMaintainersDefaultList(t *testing.T) {
 	t.Setenv("PROXY_SUBSCRIPTION_MAINTAINERS", "")
 	got := subscriptionMaintainers()

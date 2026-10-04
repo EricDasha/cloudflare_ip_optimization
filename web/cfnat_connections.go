@@ -36,14 +36,16 @@ type upstreamSnapshot struct {
 	Error     string               `json:"error,omitempty"`
 }
 
-// handleCFnatUpstreams 列出 cfnat 当前出站（remote:PROXY_AUTO_PORT）连接按上游 IP 分组，
+// handleCFnatUpstreams 列出 cfnat 当前出站（remote:CFNAT_PORT）连接按上游 IP 分组，
 // 并标记该 IP 是否在生效池内。用户由此看到「在连接的实例正在用哪个 IP」。
 func (a *app) handleCFnatUpstreams(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET required", http.StatusMethodNotAllowed)
 		return
 	}
-	port := defaultProxyAutoConfig().Port
+	// PROXY_AUTO_PORT is the candidate probe destination. CFnat's actual
+	// upstream port is controlled by CFNAT_PORT and may intentionally differ.
+	port := defaultCFnatConfig().Port
 	snapshot := readCFnatUpstreams(port)
 	inPool := make(map[string]bool)
 	for _, ip := range a.proxyActivePoolSnapshot().IPs {

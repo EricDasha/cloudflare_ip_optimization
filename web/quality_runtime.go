@@ -144,6 +144,9 @@ func (r *qualitySchedulerRuntime) seedActive(ip string, now time.Time) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if previous := r.data.Records[r.data.ActiveIP]; previous != nil && previous.IP != ip && previous.State == lineActive {
+		previous.State, previous.StateReason, previous.StateChangedAt = lineStandby, "active_pool_replaced", now
+	}
 	r.data.ActiveIP = ip
 	rec := r.ensureRecordLocked(ip, "active_pool", now)
 	rec.State, rec.StateReason, rec.StateChangedAt = lineActive, reasonPromotedNoActive, now

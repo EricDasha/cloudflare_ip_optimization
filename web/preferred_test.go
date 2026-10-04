@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -14,6 +16,19 @@ func mustIP(t *testing.T, raw string) net.IP {
 		t.Fatalf("invalid IP literal %q", raw)
 	}
 	return ip
+}
+
+func TestPreferredSettingsPersistExplicitEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, preferredSettingsFile)
+	if err := os.WriteFile(path, []byte(`{"enabled":[],"limit":20}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{dataDir: dir}
+	a.loadPreferredSettings()
+	if got := a.enabledPreferredDomains(); len(got) != 0 {
+		t.Fatalf("explicit empty enabled list restored %v", got)
+	}
 }
 
 func TestResolvePreferredDomainIPListFiltersAndTruncates(t *testing.T) {
@@ -83,7 +98,7 @@ func TestResolvePreferredDomainIPsAggregatesAndDedupes(t *testing.T) {
 	a.preferredEnabled = map[string]bool{
 		"bestcf.030101.xyz": true,
 		"cf.090227.xyz":     true,
-		"unused.example":   false,
+		"unused.example":    false,
 	}
 	// preferredLimit 默认路径走 envInt，这里直接给状态位不需要文件。
 	lookup := func(_ context.Context, host string) ([]net.IP, error) {

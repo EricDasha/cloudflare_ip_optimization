@@ -33,8 +33,10 @@ func (a *app) loadPreferredSettings() {
 		return
 	}
 	var stored struct {
-		Enabled []string `json:"enabled"`
-		Limit   int      `json:"limit"`
+		// A pointer distinguishes a missing field (legacy/default settings)
+		// from an explicitly persisted empty list (disable every domain).
+		Enabled *[]string `json:"enabled"`
+		Limit   int       `json:"limit"`
 	}
 	if json.Unmarshal(data, &stored) != nil {
 		return
@@ -42,18 +44,17 @@ func (a *app) loadPreferredSettings() {
 	if stored.Limit >= 1 && stored.Limit <= maxPreferredDomains {
 		a.preferredLimit = stored.Limit
 	}
-	if len(stored.Enabled) == 0 {
+	if stored.Enabled == nil {
 		return
 	}
 	kept := make(map[string]bool)
-	for _, domain := range stored.Enabled {
+	for _, domain := range *stored.Enabled {
 		if validCandidateHostname(domain) {
 			kept[domain] = true
 		}
 	}
-	if len(kept) > 0 {
-		a.preferredEnabled = kept
-	}
+	// Keep an empty map when the user explicitly disabled every domain.
+	a.preferredEnabled = kept
 }
 
 func (a *app) savePreferredSettingsLocked() error {
@@ -158,9 +159,9 @@ func (a *app) getAllPreferredDomains() []string {
 }
 
 // 优选域名双职责：
-//   1. C 区解析供给——enabledPreferredDomainsForCandidates → resolvePreferredDomainIPs，
-//      解析出的 IP 走与订阅同款乡试/殿试入候选（见文件尾 C 区实现）。
-//   2. -fallback 兜底转发——proxyForwardDomains，拨号失败时按当前 DNS 直连域名。
+//  1. C 区解析供给——enabledPreferredDomainsForCandidates → resolvePreferredDomainIPs，
+//     解析出的 IP 走与订阅同款乡试/殿试入候选（见文件尾 C 区实现）。
+//  2. -fallback 兜底转发——proxyForwardDomains，拨号失败时按当前 DNS 直连域名。
 //
 // runPreferredDomainProbeLoop 保留空壳：旧的域名级慢测循环已废弃，
 // 探测发生在解析出的 IP 上（乡试/殿试管道），不在域名上。
@@ -228,7 +229,7 @@ func (a *app) handlePreferredDomains(w http.ResponseWriter, r *http.Request) {
 		a.preferredLastError = ""
 		a.preferredMu.Unlock()
 		// 重新拉取候选，使启用变化立即生效。
-		go a.refreshProxyCandidates(context.Background())
+		go func() { _, _ = a.refreshProxyCandidates(context.Background()) }()
 		writeJSON(w, map[string]any{"ok": true, "enabled": valid, "count": len(valid)})
 	default:
 		http.Error(w, "GET or POST required", http.StatusMethodNotAllowed)

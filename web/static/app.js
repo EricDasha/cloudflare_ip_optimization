@@ -9,29 +9,49 @@
   let lanPeers = -1;
   let logOpen = false;
   let logLines = [];
+  // Manual actions can overlap the regular timers. Ignore responses from an
+  // older request so a slow poll cannot roll the screen back.
+  const pollVersion = Object.create(null);
+  const beginPoll = (name) => {
+    const version = (pollVersion[name] || 0) + 1;
+    pollVersion[name] = version;
+    return version;
+  };
+  const invalidatePoll = (name) => {
+    pollVersion[name] = (pollVersion[name] || 0) + 1;
+    return pollVersion[name];
+  };
+  const isCurrentPoll = (name, version) => pollVersion[name] === version;
 
   /* ---------- 数据拉取 ---------- */
   async function pullStatus() {
+    const version = beginPoll("status");
     try {
       const st = await api("/api/status");
+      if (!isCurrentPoll("status", version)) return;
       const running = !!st.cfnat?.running;
       $("cfnatPulse").className = `pulse ${running ? "ok" : "bad"}`;
       $("cfnatState").textContent = running ? "转发运行中" : "转发已停止";
-      $("topbarSub").textContent = running ? "自动优选运行中" : "转发已停止";
+      $("topbarSub").textContent = running ? "CFnat 转发已启动" : "转发已停止";
     } catch (_) { /* 心跳容错 */ }
   }
 
   async function pullPool() {
+    const version = beginPoll("pool");
     try {
-      poolSnapshot = await api("/api/cfnat/proxy-candidates");
+      const snap = await api("/api/cfnat/proxy-candidates");
+      if (!isCurrentPoll("pool", version)) return;
+      poolSnapshot = snap;
       renderPool();
       renderBeacons();
     } catch (_) { /* 心跳容错 */ }
   }
 
   async function pullUpstreams() {
+    const version = beginPoll("upstreams");
     try {
       const snap = await api("/api/cfnat/upstreams");
+      if (!isCurrentPoll("upstreams", version)) return;
       const map = {};
       for (const u of snap.upstreams || []) map[u.ip] = u;
       upstreams = map;
@@ -40,8 +60,10 @@
   }
 
   async function pullLan() {
+    const version = beginPoll("lan");
     try {
       const snap = await api("/api/cfnat/connections");
+      if (!isCurrentPoll("lan", version)) return;
       lanPeers = (snap.sources || []).length;
       $("lanPeers").textContent = `${lanPeers} 台局域网设备`;
     } catch (_) { /* 心跳容错 */ }
@@ -53,19 +75,21 @@
     const ips = active.ips || [];
     const results = new Map((active.results || []).map((r) => [r.ip, r]));
     const byIp = poolSnapshot?.sourceByIp || {};
-    const upstreamTotal = Object.values(upstreams).reduce((s, u) => s + u.connections, 0);
+    const upstreamTotal = Object.values(upstreams)
+      .filter((u) => u.inPool)
+      .reduce((s, u) => s + (Number(u.connections) || 0), 0);
 
     $("poolHeadline").textContent = ips.length
       ? `${ips.length} 个 IP 在位 · ${upstreamTotal} 条连接在途`
       : "皇位空悬——点「立即优选」开考";
-    $("nextRefresh").textContent = `下次自动优选 ${fmtTime(poolSnapshot?.nextRefresh)}`;
+    $("nextRefresh").textContent = `下次候选刷新 ${fmtTime(poolSnapshot?.nextRefresh)}`;
 
     const box = $("poolRows");
     box.replaceChildren();
     if (!ips.length) {
       const empty = document.createElement("p");
       empty.className = "hero-foot";
-      empty.textContent = "无在位 IP。所有供给层将自动汇流、考试、登基，无需人工干预。";
+      empty.textContent = "无在位 IP。候选会按供给层汇流；是否自动换池由 PROXY_AUTO_APPLY 控制。";
       box.append(empty);
       return;
     }
@@ -73,7 +97,7 @@
     for (const ip of ips) {
       const result = results.get(ip);
       const up = upstreams[ip];
-      const connN = up ? up.connections : 0;
+      const connN = up?.inPool ? (Number(up.connections) || 0) : 0;
 
       const row = document.createElement("div");
       row.className = "ip-row";
@@ -157,11 +181,12 @@
   function renderBeacons() {
     const byIp = poolSnapshot?.sourceByIp || {};
     const tiers = [
+      ["user", "手动"],
       ["subscription", "订阅"],
       ["preferred", "优选解析"],
       ["cfdata", "CFdata"],
       ["official", "官方段"],
-      ["user", "手动"],
+      ["proxy", "社区"],
     ];
     const box = $("sourceBeacons");
     box.replaceChildren();
@@ -184,12 +209,18 @@
 
   /* ---------- 动作一：立即优选 ---------- */
   async function optimize() {
+    const version = invalidatePoll("pool");
+    invalidatePoll("status");
+    invalidatePoll("upstreams");
     try {
       const snap = await busy($("optimizeBtn"), "optimizeLabel", () =>
         api("/api/cfnat/proxy-candidates", { method: "POST", body: "{}" }));
-      poolSnapshot = snap;
-      renderPool();
-      renderBeacons();
+      if (isCurrentPoll("pool", version)) {
+        poolSnapshot = snap;
+        renderPool();
+        renderBeacons();
+      }
+      await Promise.allSettled([pullPool(), pullStatus(), pullUpstreams()]);
       const n = snap.active?.ips?.length || 0;
       const err = snap.active?.error;
       toast(err ? `优选完成但保留旧池：${err}` : `优选完成，${n} 个 IP 在位`);
@@ -206,13 +237,16 @@
       toast("先粘贴 IP、域名或订阅内容");
       return;
     }
+    invalidatePoll("pool");
+    invalidatePoll("status");
+    invalidatePoll("upstreams");
     try {
       const data = await busy($("supplyBtn"), "supplyLabel", () =>
         api("/api/cfnat/proxy-scan/apply", {
           method: "POST",
           body: JSON.stringify({ ips: text, subscription: text, limit: 500 }),
         }));
-      toast(`手动供给已登基：${data.applied || 0} 个 IP`);
+      toast(`手动供给已应用：${data.applied || 0} 个 IP（后台可继续复核）`);
       $("supplyInput").value = "";
       await Promise.allSettled([pullPool(), pullUpstreams()]);
     } catch (e) {
@@ -224,6 +258,9 @@
   async function kickIP(ip, button) {
     if (!window.confirm(`踢掉 ${ip}？\n在途连接会瞬断重连，剩余 IP 立即接管。`)) return;
     button.disabled = true;
+    invalidatePoll("pool");
+    invalidatePoll("status");
+    invalidatePoll("upstreams");
     try {
       const data = await api("/api/cfnat/active/kick", {
         method: "POST",
@@ -241,8 +278,10 @@
   /* ---------- 日志抽屉 ---------- */
   async function pullLogs() {
     if (!logOpen) return;
+    const version = beginPoll("logs");
     try {
       const data = await api(`/api/logs?target=${$("logTarget").value}&lines=200`);
+      if (!isCurrentPoll("logs", version) || !logOpen) return;
       logLines = data.lines || [];
       renderLogs();
     } catch (_) { /* 容错 */ }
