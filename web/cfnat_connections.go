@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"encoding/hex"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -57,17 +56,19 @@ func (a *app) handleCFnatUpstreams(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, snapshot)
 }
 
+// readCFnatUpstreams 统计出站转发的上游分布。显式走 /proc/self/net（不依赖
+// /proc/net symlink），ErrNotExist 不再静默——容器内 procfs 异常必须暴露。
 func readCFnatUpstreams(upstreamPort int) upstreamSnapshot {
 	snapshot := upstreamSnapshot{UpdatedAt: time.Now(), Port: upstreamPort, Upstreams: []upstreamConnection{}}
 	byIP := make(map[string]*upstreamConnection)
 	for _, source := range []struct {
 		path string
 		ipv6 bool
-	}{{"/proc/net/tcp", false}, {"/proc/net/tcp6", true}} {
+	}{{"/proc/self/net/tcp", false}, {"/proc/self/net/tcp6", true}} {
 		f, err := os.Open(source.path)
 		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) && snapshot.Error == "" {
-				snapshot.Error = err.Error()
+			if snapshot.Error == "" {
+				snapshot.Error = source.path + ": " + err.Error()
 			}
 			continue
 		}
@@ -155,11 +156,11 @@ func readCFnatConnections(port int) cfnatConnectionsSnapshot {
 	for _, source := range []struct {
 		path string
 		ipv6 bool
-	}{{"/proc/net/tcp", false}, {"/proc/net/tcp6", true}} {
+	}{{"/proc/self/net/tcp", false}, {"/proc/self/net/tcp6", true}} {
 		f, err := os.Open(source.path)
 		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) && snapshot.Error == "" {
-				snapshot.Error = err.Error()
+			if snapshot.Error == "" {
+				snapshot.Error = source.path + ": " + err.Error()
 			}
 			continue
 		}
