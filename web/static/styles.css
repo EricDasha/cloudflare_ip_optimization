@@ -267,6 +267,18 @@ textarea::placeholder { color: var(--text-3); }
   white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 2;
 }
 
+/* 设备明细表 */
+.table-wrap {
+  width: 100%; max-height: 320px; overflow: auto;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 10px var(--s3); border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+tbody tr:hover td { background: rgb(255 255 255 / .03); }
+th { position: sticky; top: 0; z-index: 1; color: var(--text-3); background: var(--surface-2); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
+.inline-status { color: var(--text-3); font-size: 12px; }
+td .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
 .foot { text-align: center; color: var(--text-3); font-size: 11px; letter-spacing: .04em; }
 
 /* ---------- Snackbar ---------- */

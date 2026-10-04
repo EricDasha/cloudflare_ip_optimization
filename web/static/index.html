@@ -63,11 +63,20 @@
       <section class="pulse-line" aria-label="自动化状态">
         <div class="pulse-beacons" id="sourceBeacons"></div>
         <div class="pulse-meta">
-          <span id="nextRefresh">下次候选刷新 --</span>
+          <span id="nextRefresh">下次自动优选 --</span>
           <span class="dot">·</span>
           <span id="lanPeers">局域网 -- 设备</span>
+          <button class="linklike" id="lanToggle" type="button" aria-expanded="false">设备</button>
           <button class="linklike" id="logToggle" type="button" aria-expanded="false">日志</button>
         </div>
+      </section>
+
+      <!-- 局域网设备明细（cfnat 为四层哑管道，TLS 加密后无 UA 可读，设备识别以 IP 为准） -->
+      <section class="log-drawer" id="lanDrawer" hidden>
+        <div class="table-wrap"><table>
+          <thead><tr><th>局域网设备</th><th>连接数</th><th>TCP 状态</th></tr></thead>
+          <tbody id="lanTableBody"><tr><td colspan="3" class="inline-status">尚未查询</td></tr></tbody>
+        </table></div>
       </section>
 
       <!-- 日志抽屉（默认收起） -->

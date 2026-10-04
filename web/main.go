@@ -50,7 +50,11 @@ const (
 // Candidate collection and result sorting must use the same order. The first
 // source that supplies an IP owns its source label, so this order also defines
 // which source wins when the same address appears in multiple feeds.
-var proxyCandidateSourceOrder = []string{"user", "subscription", "preferred", "cfdata", "official", "proxy"}
+// proxyCandidateSourceOrder 候选供给层（考试优先序）：
+// user > subscription > official > proxy(社区)。
+// preferred 优选域名不再解析供 IP——域名直接升格为 -fixed 转发成员（拨号时活解析）；
+// cfdata(baipiao 上游)已砍——订阅 + 优选域名 + 官方段 + 手动已是充分供给。
+var proxyCandidateSourceOrder = []string{"user", "subscription", "official", "proxy"}
 
 var errProxyCandidatesBusy = errors.New("候选源刷新正在运行")
 
@@ -987,11 +991,11 @@ func (a *app) cfnatStartupConfig() cfnatConfig {
 	cfg := defaultCFnatConfig()
 	a.activeMu.RLock()
 	defer a.activeMu.RUnlock()
-	if len(a.activePool.IPs) > 0 {
-		cfg.Fixed = strings.Join(a.activePool.IPs, ",")
-	}
-	if len(a.activePool.Domains) > 0 {
-		cfg.Fallback = strings.Join(a.activePool.Domains, ",")
+	// 与 applyPoolLocked 一致：登基 IP + 优选域名同为 -fixed 成员（域名拨号时活解析）。
+	fixed := append([]string(nil), a.activePool.IPs...)
+	fixed = append(fixed, a.activePool.Domains...)
+	if len(fixed) > 0 {
+		cfg.Fixed = strings.Join(fixed, ",")
 	}
 	return cfg
 }
@@ -1051,9 +1055,26 @@ func (a *app) importedPreferredDomains() []string {
 	return []string{"bestcf.030101.xyz", "cdn.2020111.xyz", "cdns.doon.eu.org", "cf.0sm.com", "cf.877771.xyz", "cf.877774.xyz", "cf.900501.xyz", "cfip.1323123.xyz", "cfip.cfcdn.vip", "cfip.xxxxxxxx.tk", "cloudflare.182682.xyz", "cloudflare-dl.byoip.top", "cloudflare-ip.mofashi.ltd", "fn.130519.xyz", "freeyx.cloudflare88.eu.org", "nrt.xxxxxxxx.nyc.mn", "nrtcfdns.zone.id", "saas.sin.fan", "tencentapp.cn", "xn--b6gac.eu.org", "777.ai7777777.xyz", "store.ubi.com", "serviceshub.samsclub.com", "www.allianz.com", "www.decathlon.com", "www.asda.com", "www.shopify.com", "cookiebot.com", "bluehost.com", "nexusmods.com", "glassdoor.com", "www.jimdo.com", "openai.com", "www.sage.com", "www.speedtest.net", "investor.apple.com", "markmonitor.com", "store.epicgames.com", "mycareer.verizon.com", "onetrust.com", "www.affirm.com", "www.zendesk.com", "www.doordash.com", "digitalocean.com", "ringcentral.com", "chrono24.com", "www.wto.org", "www.mskcc.org", "cdn.jsdelivr.net", "www.broadcom.com", "www.nestle.com", "homecare.stryker.com", "www.emerson.com", "visit.honeywell.com", "polestar.com", "auctions.ihg.com.cn", "woodsbagot.com", "www.transunion.hk", "www.hongkongairport.com", "deepin.org", "www.police.uk", "www.leics.police.uk", "china.mfa.gov.ua", "www.visa.cn", "visa.com", "www.tpg.com", "www.wilshire.com", "engage.cloudflareclient.com", "cloudflare-eth.com", "cloudflare.dev", "cloudflare.net", "r2.dev", "pages.dev", "cdnjs.com", "cloudflare-ech.com", "static.cloudflareinsights.com", "ln.edu.hk", "www.ntu.edu.sg", "www.ox.ac.uk", "columbia.edu", "www.udacity.com", "for.edu.sg", "www.researchgate.net", "skk.moe", "cf.090227.xyz", "cf.3666888.xyz", "ct.877774.xyz", "ct.cloudflare.byoip.top", "cu.877774.xyz", "cu.cloudflare.byoip.top", "cmcc.877774.xyz", "cm.cloudflare.byoip.top"}
 }
 
+// lockTimeout 自旋等待锁至多 d：手动操作排队接力后台任务，不再立即吃 429 闭门羹。
+// 全局锁序规范：refreshMu → proxyScanMu → cfnatCtlMu，任何交叉持锁都是死锁隐患。
+func lockTimeout(mu *sync.Mutex, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		if mu.TryLock() {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
 func (a *app) autoApplyProxyPool(parent context.Context) {
-	if !a.proxyScanMu.TryLock() {
-		log.Printf("proxy auto apply skipped: another proxy scan is running")
+	// 手动「立即优选」会经此路径：排队等待正在跑的考试，而不是拒绝。
+	if !lockTimeout(&a.proxyScanMu, 60*time.Second) {
+		log.Printf("proxy auto apply skipped: another proxy scan still running after 60s")
+		a.setProxyPoolError("已有优选在运行（等待 60 秒未结束），请稍后再试", nil)
 		return
 	}
 	defer a.proxyScanMu.Unlock()
@@ -1152,17 +1173,18 @@ func (a *app) applyProxyPool(pool, current proxyActivePool) error {
 
 // applyPoolLocked 在已持有 cfnatCtlMu 时执行换池（踢人/手动采用等已持锁路径复用）。
 func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
-	passed := append([]string(nil), pool.IPs...)
+	// 池成员 = 登基 IP + 优选域名（cfnat -fixed 原生收域名，拨号时活解析）。
+	// Fallback 只留用户显式配置的 CFNAT_FALLBACK 兜底目标。
+	fixedMembers := append([]string(nil), pool.IPs...)
+	fixedMembers = append(fixedMembers, pool.Domains...)
 	cfnatCfg := defaultCFnatConfig()
-	cfnatCfg.Fixed = strings.Join(passed, ",")
-	cfnatCfg.Fallback = strings.Join(pool.Domains, ",")
+	cfnatCfg.Fixed = strings.Join(fixedMembers, ",")
+	cfnatCfg.Fallback = strings.TrimSpace(env("CFNAT_FALLBACK", ""))
+	rollbackFixed := append([]string(nil), current.IPs...)
+	rollbackFixed = append(rollbackFixed, current.Domains...)
 	rollbackCfg := defaultCFnatConfig()
-	if len(current.IPs) > 0 {
-		rollbackCfg.Fixed = strings.Join(current.IPs, ",")
-	}
-	if len(current.Domains) > 0 {
-		rollbackCfg.Fallback = strings.Join(current.Domains, ",")
-	}
+	rollbackCfg.Fixed = strings.Join(rollbackFixed, ",")
+	rollbackCfg.Fallback = strings.TrimSpace(env("CFNAT_FALLBACK", ""))
 	if err := a.cfnat.stop(); err != nil {
 		return fmt.Errorf("停止 cfnat: %w", err)
 	}
@@ -1189,7 +1211,7 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 	if a.quality != nil && len(pool.IPs) > 0 {
 		a.quality.seedActive(pool.IPs[0], pool.UpdatedAt)
 	}
-	log.Printf("proxy active pool applied: %s", strings.Join(passed, ","))
+	log.Printf("proxy active pool applied: %s", strings.Join(fixedMembers, ","))
 	return nil
 }
 
@@ -1310,7 +1332,8 @@ func probeProxyWebSocket(ctx context.Context, ip string, cfg proxyAutoConfig) er
 }
 
 func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
-	if !a.refreshMu.TryLock() {
+	// 手动触发的刷新排队等待（后台周期偶发重叠不再闭门羹）；后台自调用同样受益。
+	if !lockTimeout(&a.refreshMu, 60*time.Second) {
 		return false, errProxyCandidatesBusy
 	}
 	defer a.refreshMu.Unlock()
@@ -1340,25 +1363,9 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 		return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t'
 	}))
 	appendGroup("subscription", a.subscriptionPoolIPs(1000-len(resolved)))
-	// C 区供给位：启用的优选域名并发解析出公网 IPv4，作为 preferred 层候选，
-	// 覆盖原作者上游(baipiao→cfdata)的日常 IP 供给；解析产物随本刷新周期过期。
-	// 优选域名本身保留 -fallback 兜底转发职责，与解析供给互不冲突。
-	// 090227 动态发现依旧停用（PROXY_DYNAMIC_DISCOVERY 废弃）。
-	preferredIPs, preferredErrors := a.resolvePreferredDomainIPs(ctx, nil)
-	sourceErrors = append(sourceErrors, preferredErrors...)
-	appendGroup("preferred", preferredIPs)
-	cfdataLimit := envInt("PROXY_CFDATA_CANDIDATES", 300)
-	if cfdataLimit < 0 || cfdataLimit > 2000 {
-		cfdataLimit = 300
-	}
-	if cfdataLimit > 0 {
-		cfdataIPs, cfdataErr := a.cfdataCandidateIPs(cfdataLimit)
-		if cfdataErr != nil {
-			sourceErrors = append(sourceErrors, "CFdata: "+cfdataErr.Error())
-		} else {
-			appendGroup("cfdata", cfdataIPs)
-		}
-	}
+	// 优选域名不再解析供 IP：域名直接升格为 -fixed 转发成员（applyPoolLocked），
+	// 拨号时按当前 DNS 活解析、天然跟随上游刷新——无需快照、无需考试。
+	// cfdata(baipiao 上游)供给已砍：订阅 + 优选域名 + 官方段 + 手动已是充分渠道。
 	officialLimit := envInt("PROXY_OFFICIAL_CANDIDATES", 150)
 	if officialLimit < 0 || officialLimit > 1000 {
 		officialLimit = 150
@@ -2284,8 +2291,8 @@ func (a *app) handleProxyScan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.proxyScanMu.TryLock() {
-		http.Error(w, "已有反代 IP 扫描正在运行", http.StatusTooManyRequests)
+	if !lockTimeout(&a.proxyScanMu, 60*time.Second) {
+		http.Error(w, "已有优选在运行（等待 60 秒未结束），请稍后再试", http.StatusTooManyRequests)
 		return
 	}
 	defer a.proxyScanMu.Unlock()
@@ -2344,8 +2351,8 @@ func (a *app) handleProxyScanApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.proxyScanMu.TryLock() {
-		http.Error(w, "已有反代 IP 扫描正在运行", http.StatusTooManyRequests)
+	if !lockTimeout(&a.proxyScanMu, 60*time.Second) {
+		http.Error(w, "已有优选在运行（等待 60 秒未结束），请稍后再试", http.StatusTooManyRequests)
 		return
 	}
 	defer a.proxyScanMu.Unlock()
@@ -2416,26 +2423,20 @@ func (a *app) handleProxyScanApply(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleActiveKick 用户手动把某个在位 IP 踢出皇位（卡顿救火）：
-//  1. 从生效池移除该 IP 并重启 cfnat（手动路径，豁免换池冷却）
-//  2. 同步从候选缓存除名，防止后台立刻又把它选回来
-//  3. 剩余 IP 独木难支时不允许踢（避免空池），提示先立即优选补位
+// handleActiveKick 用户手动把某个池成员踢出皇位（卡顿救火）：
+//  1. 从生效池移除该成员（IP 或优选域名皆可）并以剩余成员重启 cfnat（手动路径，豁免换池冷却）
+//  2. 踢 IP 时同步从候选缓存除名，防止后台立刻又把它选回来
+//  3. 踢后异步触发补位终审，把池考回 PoolSize 目标规模（5~15 保障）
+//  4. 最后一个成员不允许踢（避免空池），提示先立即优选补位
 func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.proxyScanMu.TryLock() {
-		http.Error(w, "优选或扫描正在运行，稍后再试", http.StatusTooManyRequests)
-		return
-	}
-	defer a.proxyScanMu.Unlock()
-	if !a.refreshMu.TryLock() {
-		http.Error(w, "候选源刷新正在运行，稍后再试", http.StatusTooManyRequests)
-		return
-	}
-	defer a.refreshMu.Unlock()
-	if !a.cfnatCtlMu.TryLock() {
-		http.Error(w, "换池操作正在运行，稍后再试", http.StatusTooManyRequests)
+	// 只拿换池锁（cfnatCtlMu），锁序全局规范 refresh → proxyScan → cfnatCtl，
+	// 绝不交叉持锁。等待而非立即拒绝——用户操作不排队吃闭门羹。
+	if !lockTimeout(&a.cfnatCtlMu, 15*time.Second) {
+		http.Error(w, "换池操作正在运行，请稍后再试", http.StatusTooManyRequests)
 		return
 	}
 	defer a.cfnatCtlMu.Unlock()
@@ -2447,41 +2448,139 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "无效的请求体", http.StatusBadRequest)
 		return
 	}
-	ip := net.ParseIP(strings.TrimSpace(body.IP))
-	if !isPublicIPv4(ip) {
-		http.Error(w, "无效的 IP", http.StatusBadRequest)
+	member := strings.TrimSpace(body.IP)
+	isIP := false
+	if ip := net.ParseIP(member); isPublicIPv4(ip) {
+		member = ip.To4().String()
+		isIP = true
+	} else if !validCandidateHostname(member) {
+		http.Error(w, "无效的 IP 或域名", http.StatusBadRequest)
 		return
 	}
-	key := ip.To4().String()
 	current := a.proxyActivePoolSnapshot()
-	remaining, found := withoutPoolIP(current.IPs, key)
-	if !found {
-		http.Error(w, "该 IP 不在生效池中", http.StatusNotFound)
+	newIPs, ipHit := withoutPoolIP(current.IPs, member)
+	newDomains, domainHit := withoutPoolIP(current.Domains, member)
+	if !ipHit && !domainHit {
+		http.Error(w, "该成员不在生效池中", http.StatusNotFound)
 		return
 	}
-	if len(remaining) == 0 {
-		http.Error(w, "最后一个在位 IP 不能踢：先点「立即优选」补充新池", http.StatusConflict)
+	if len(newIPs)+len(newDomains) == 0 {
+		http.Error(w, "最后一个在位成员不能踢：先点「立即优选」补充新池", http.StatusConflict)
 		return
 	}
 	keptResults := make([]proxyScanResult, 0, len(current.Results))
 	for _, result := range current.Results {
-		if result.IP != key {
+		if result.IP != member {
 			keptResults = append(keptResults, result)
 		}
 	}
 	now := time.Now()
 	pool := current
 	pool.UpdatedAt = now
-	pool.IPs = remaining
+	pool.IPs = newIPs
+	pool.Domains = newDomains
 	pool.Results = keptResults
 	if err := a.applyPoolLocked(pool, current); err != nil {
 		http.Error(w, "踢除换池失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	a.removeCandidateIP(key)
+	if isIP {
+		a.removeCandidateIP(member)
+	}
 	a.markPoolSwitched(now)
-	log.Printf("active pool kicked %s: %d IPs remain", key, len(remaining))
-	writeJSON(w, map[string]any{"ok": true, "kicked": key, "remaining": len(remaining), "ips": remaining})
+	log.Printf("active pool kicked %s: %d IPs + %d domains remain", member, len(newIPs), len(newDomains))
+	writeJSON(w, map[string]any{"ok": true, "kicked": member, "remaining": len(newIPs), "ips": newIPs})
+	// 自动补位：后台考试补满 PoolSize，失败静默（六小时全量维护兜底）。
+	go a.refillPoolAfterKick()
+}
+
+// refillPoolAfterKick 踢人后的自动补位终审：从候选缓存考试新 IP，
+// 保序并入现有在位成员，把池补回 PoolSize 目标（5~15）。
+// 手动踢除的延续语义：不走 allowPoolSwitch 冷却（markPoolSwitched 由本路径自行记录）。
+func (a *app) refillPoolAfterKick() {
+	cfg := defaultProxyAutoConfig()
+	if !cfg.Enabled || cfg.Host == "" || cfg.Path == "" {
+		return
+	}
+	var template map[string]any
+	if cfg.VLESS.Enabled {
+		loaded, err := loadVLESSOutboundTemplate(cfg.VLESS.TemplatePath)
+		if err != nil {
+			log.Printf("kick refill skipped: %v", err)
+			return
+		}
+		template = loaded
+	}
+	// 有考试在跑就静默让位（后台 15 分钟 optimizer 与六小时维护会兜底补池）。
+	if !a.proxyScanMu.TryLock() {
+		return
+	}
+	defer a.proxyScanMu.Unlock()
+	current := a.proxyActivePoolSnapshot()
+	need := cfg.PoolSize - len(current.IPs)
+	if need <= 0 {
+		return
+	}
+	snapshot := a.proxyCandidateSnapshot()
+	active := make(map[string]struct{}, len(current.IPs))
+	for _, ip := range current.IPs {
+		active[ip] = struct{}{}
+	}
+	// 候选取 3 倍余量（WS 通过率折扣），VLESS 探测数控制在 need*3 内。
+	pending := make([]string, 0, need*3)
+	for _, ip := range snapshot.IPs {
+		if len(pending) >= need*3 {
+			break
+		}
+		if _, ok := active[ip]; ok {
+			continue
+		}
+		pending = append(pending, ip)
+	}
+	if len(pending) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+	results := scanProxyWebSockets(ctx, pending, cfg)
+	applyCandidateSourcePriority(results, snapshot.SourceByIP)
+	passed := make([]string, 0, need)
+	if cfg.VLESS.Enabled {
+		passed = probeVLESSPool(ctx, results, cfg.Port, min(cfg.VLESS.MaxCandidates, need*3), cfg.VLESS, template)
+	} else {
+		for _, result := range results {
+			if result.Error == "" {
+				passed = append(passed, result.IP)
+			}
+		}
+	}
+	merged := append([]string(nil), current.IPs...)
+	added := make([]string, 0, need)
+	for _, ip := range passed {
+		if containsString(merged, ip) {
+			continue
+		}
+		merged = append(merged, ip)
+		added = append(added, ip)
+		if len(merged) >= cfg.PoolSize {
+			break
+		}
+	}
+	if len(added) == 0 {
+		log.Printf("kick refill: no new passes (%d tested), pool stays %d IPs", len(pending), len(current.IPs))
+		return
+	}
+	now := time.Now()
+	pool := current
+	pool.UpdatedAt = now
+	pool.IPs = merged
+	pool.Results = mergePoolResults(merged, current.Results, results)
+	if err := a.applyProxyPool(pool, current); err != nil {
+		log.Printf("kick refill apply failed: %v", err)
+		return
+	}
+	a.markPoolSwitched(now)
+	log.Printf("kick refill: +%d IPs -> pool %d IPs", len(added), len(merged))
 }
 
 // withoutPoolIP 从池中剔除指定 IP；返回 (剩余, 是否找到)。

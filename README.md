@@ -33,15 +33,15 @@ docker build -f Dockerfile.multistage -t local/cloudflare-tools:multistage .
 
 打开 `http://localhost:8080` 即进入「优选台」单页控制面。候选缓存会按计划刷新；是否自动重考并替换 active pool 由 `PROXY_AUTO_APPLY` 控制，用户只有三个动作：
 
-1. **看**：在位 IP 一屏尽览——每个 IP 的实时承载连接数（呼吸数字）、殿试成绩（Mbps/延迟）、来源徽标；自动化心跳行显示六层供给（手动/订阅/优选解析/CFdata/官方段/社区）是否活着。
-2. **优选**：点「立即优选」触发一轮完整终审（候选汇合 → WS 乡试 → 可选 VLESS 殿试 → 按配置换池）；或在「手动供 IP」粘贴 IP/域名/订阅内容一键入池——按 `.env` 的节点参数自动考试，手动供给登基最高优先且豁免换池冷却。
-3. **踢**：感觉卡顿时，点在位 IP 行的「踢」按钮将其逐出皇位——在途连接瞬断重连、剩余 IP 立即接管，被踢 IP 同步从候选除名防止立刻回选；最后一个 IP 不允许踢（提示先优选补位）。
+1. **看**：在位 IP 一屏尽览——每个 IP 的实时承载连接数（呼吸数字）、殿试成绩（Mbps/延迟）、来源徽标；优选域名以「域名直连」成员并列显示（DNS 活解析、跟随上游刷新）；自动化心跳行显示供给层（手动/订阅/官方段/社区）是否活着。「设备」抽屉列出局域网连接明细——cfnat 是四层哑管道，TLS 加密后读不到 UA/Host，设备识别以局域网 IP 为准。
+2. **优选**：点「立即优选」触发一轮完整终审（候选汇合 → WS 乡试 → 可选 VLESS 殿试 → 按配置换池）；或在「手动供 IP」粘贴 IP/域名/订阅内容一键入池——按 `.env` 的节点参数自动考试，手动供给登基最高优先且豁免换池冷却。手动操作与后台考试重叠时自动排队等待（最多 60 秒），不再吃「已有扫描」闭门羹。
+3. **踢**：感觉卡顿时，点在位成员（IP 或域名皆可）行的「踢」按钮将其逐出——在途连接瞬断重连、剩余成员立即接管，被踢 IP 同步从候选除名，后台随即自动补考新 IP 把池补回目标规模（`PROXY_AUTO_POOL_SIZE`，建议 5~15）；最后一个成员不允许踢。
 
-日志抽屉默认收起，需要排障时展开。除此之外没有页面、没有配置面板、没有参数表单——候选刷新、订阅慢扫和优选域名解析在后台运行；自动换池与后台慢速调度只有在配置启用后才会执行。
+日志抽屉默认收起，需要排障时展开。除此之外没有页面、没有配置面板、没有参数表单——候选刷新、订阅慢扫在后台运行；自动换池与后台慢速调度只有在配置启用后才会执行。
 
 ### 反代 IP 维护
 
-候选供给会自动汇合（订阅慢扫 + 优选域名解析 + CFdata 缓存 + 官方段抽样），所有进入 active pool 的 IP 都要通过配置的验证流程。自动换池是否启用由 `PROXY_AUTO_APPLY` 决定。需要人工干预时只有两条路：
+候选供给会自动汇合（订阅慢扫 + 官方段抽样 + 手动输入），优选域名以 `-fixed` 直连成员身份常驻转发池；所有进入 active pool 的 IP 都要通过配置的验证流程。自动换池是否启用由 `PROXY_AUTO_APPLY` 决定。需要人工干预时只有两条路：
 
 1. **手动供 IP**：在优选台「手动供 IP」粘贴 IPv4 列表、节点链接、Clash 配置或 base64 订阅，点「优选入池」——按 `.env` 的节点参数（`PROXY_AUTO_HOST/PATH/PORT`）做 TCP/TLS 粗筛，通过者立即应用（最高优先、豁免冷却），后台调度开启时再继续复核。
 2. **手动踢人**：感觉卡顿时点在位 IP 行的「踢」，被踢 IP 立即退出皇位并从候选除名。
@@ -66,9 +66,11 @@ Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新�
 
 CFdata 彻底手动化：无后台自启动、无定时扫描；只在用户显式调用 `/api/cfdata/run` 时执行，结果写入 `ip.csv` 供候选汇合读取。旧的 `PROXY_CFDATA_BACKGROUND_*` / `PROXY_CFDATA_SIFT_COUNT` 变量已废弃且不再读取。
 
-日常 IP 供给走订阅慢扫：服务端按 `PROXY_SUBSCRIPTION_MAINTAINERS`（默认 8 个第三方维护者域名）逐个请求订阅转换器 `PROXY_SUBSCRIPTION_CONVERTER + ?token=…&sub=<维护者>`（token 从 `PROXY_SUBSCRIPTION_TOKEN` 注入，不进仓库），提取明文 IP 与节点域名解析出的 IP，做并发 4、2000 ms 上限的 WS 慢筛后丢入订阅池（`subscription-pool.json`，上限 1000），默认每 `PROXY_SUBSCRIPTION_REFRESH_MINUTES=360` 分钟一轮，也可点“立即拉取订阅”。候选来源优先级为 `user > subscription > preferred > cfdata > official > proxy`；`PROXY_USER_CANDIDATES` 与手动采用永远最高优先。
+日常 IP 供给走订阅慢扫：服务端按 `PROXY_SUBSCRIPTION_MAINTAINERS`（默认 8 个第三方维护者域名）逐个请求订阅转换器 `PROXY_SUBSCRIPTION_CONVERTER + ?token=…&sub=<维护者>`（token 从 `PROXY_SUBSCRIPTION_TOKEN` 注入，不进仓库），提取明文 IP 与节点域名解析出的 IP，做并发 4、2000 ms 上限的 WS 慢筛后丢入订阅池（`subscription-pool.json`，上限 1000），默认每 `PROXY_SUBSCRIPTION_REFRESH_MINUTES=360` 分钟一轮。候选来源优先级为 `user > subscription > official > proxy`；`PROXY_USER_CANDIDATES` 与手动采用永远最高优先。
 
-优选域名双职责：勾选的域名随每次候选刷新（每 6 小时或手动“立即拉取候选”）并发解析出公网 IPv4（每域名上限 `PROXY_PREFERRED_IPS_PER_DOMAIN`，总量上限 `PROXY_PREFERRED_RESOLVED_CANDIDATES`），解析产物作为 `preferred` 层候选走与订阅完全相同的 WS 初筛与 VLESS 数据面终审，覆盖原作者上游（baipiao→CFdata）的日常 IP 供给；同时域名仍保留在 cfnat `-fallback`——主池全部拨号失败时才按域名当前 DNS 直连兜底。解析是随刷新周期过期的快照，重新解析后旧 IP 一并作废，避免陈旧快照滞留；域名级不做探测，IP 级通过殿试才可晋升。
+优选域名直连：启用的优选域名升格为 cfnat `-fixed` 转发成员——与登基 IP 并列轮换，拨号时按域名当前 DNS 活解析，天然跟随第三方维护者刷新；不解析成 IP 快照、不做域名级探测、不进候选池。用户显式配置的 `CFNAT_FALLBACK` 仍是主池全部拨号失败时的最后兜底。cfdata（baipiao 上游）不再供候选——订阅 + 优选域名 + 官方段 + 手动已是充分渠道；CFdata 扫描器保留为手动工具，结果不再汇入候选。
+
+踢人自动补位：在位 IP 被踢后，后台立即从候选缓存考试补考新 IP，保序并入现有成员，把池补回 `PROXY_AUTO_POOL_SIZE` 目标（建议 5~15，默认 10）。手动路径（立即优选 / 手动入池 / 踢人）一律排队等待正在跑的考试（最多 60 秒）而非直接拒绝——「已有扫描」闭门羹不复存在。
 
 换池防抖三道闸（防“一个劲换 IP”）：调度器晋升需连续 3 轮、相对 +25% 且绝对 +80Mbps、上次换池 30 分钟后；连续失败 3 次才判失败；任何自动换池（scheduler / 全量终审）还受全局冷却 `PROXY_POOL_SWITCH_COOLDOWN_MINUTES=30` 约束，且现生效池全部健康（`PROXY_ACTIVE_HEALTH_WINDOW_MINUTES=60` 内无失败）时拒绝顶池；同 IP 集合直接跳过不重启 cfnat。用户手动采用不受冷却限制。
 
@@ -118,14 +120,12 @@ CFdata 彻底手动化：无后台自启动、无定时扫描；只在用户显�
 | `PROXY_AUTO_PORT` | 候选目标端口 | `443` |
 | `PROXY_AUTO_CONCURRENCY` | WS 终审并发 | `20` |
 | `PROXY_AUTO_MAX_LATENCY` | 单 IP 终审超时，毫秒 | `5000` |
-| `PROXY_AUTO_POOL_SIZE` | 自动生效池最大数量 | `5` |
+| `PROXY_AUTO_POOL_SIZE` | 生效池目标规模（5~15 保障，踢人后自动补位回满） | `10` |
 | `PROXY_AUTO_MIN_POOL` | 允许替换旧池的最少通过数量 | `3` |
 | `PROXY_DOMAIN_FORWARD` | 并入 CFnat 固定转发池的优选域名，逗号分隔 | 空 |
 | `PROXY_AUTO_DOMAINS` | 优选域名并入 cfnat 兜底转发（-fallback） | `false`（Compose 为 `true`） |
-| `PROXY_PREFERRED_RESOLVE` | 优选域名解析供给开关（C 区，解析产物入候选层） | `true` |
-| `PROXY_PREFERRED_IPS_PER_DOMAIN` | 解析供给时每域名最多收录的公网 IPv4 数 | `4` |
-| `PROXY_PREFERRED_RESOLVED_CANDIDATES` | 解析供给总量上限，`0` 关闭供给 | `64` |
-| `PROXY_CFDATA_CANDIDATES` | 从 `ip.csv` 读取的候选上限 | `300` |
+| `PROXY_PREFERRED_RESOLVE` / `PROXY_PREFERRED_IPS_PER_DOMAIN` / `PROXY_PREFERRED_RESOLVED_CANDIDATES` | 已废弃不再读取（优选域名直接做 `-fixed` 成员活解析） | -- |
+| `PROXY_CFDATA_CANDIDATES` | 已废弃不再读取（cfdata 不再供候选） | -- |
 | `PROXY_OFFICIAL_CANDIDATES` | 从 Cloudflare 官方 CIDR 均匀抽样的候选数 | `150` |
 | `PROXY_USER_CANDIDATES` | 用户指定的公网 IPv4，逗号或空白分隔 | 空 |
 | `PROXY_BACKGROUND_OPTIMIZER` | 是否启用低占用后台轮转优选 | `true` |
