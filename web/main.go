@@ -32,6 +32,14 @@ import (
 //go:embed static/*
 var staticFS embed.FS
 
+// 构建信息由 build-dist 脚本经 -ldflags -X 注入；本地 go run 无注入时保持 dev。
+// 动机：生产世代曾只能靠路由化石（API 路由出生日期）反推二进制年龄，
+// 一条 GET /api/health 直接定生死。
+var (
+	gitCommit = "dev"
+	buildTime = "unknown"
+)
+
 const (
 	defaultDataDir                = "/data"
 	maxLogBytes                   = 512 * 1024
@@ -45,6 +53,14 @@ const (
 	maxForwardDomains             = 12
 	maxVLESSSpeedProbes           = 6
 	preferredSettingsFile         = "proxy-preferred.json"
+	// 候选池分层配额：优先级决定谁先进（同 IP 先到先得），配额保证单层不能
+	// 吃光整个池（生产曾见 subscription 独占 1000/1000，official=0、proxy=0）。
+	// 总上限 candidatePoolTotalCap 由各层配额之和自然约束（100+600+150+150=1000）。
+	candidatePoolTotalCap     = 1000
+	userCandidatesCap         = 100
+	subscriptionCandidatesCap = 600
+	officialCandidatesFloor   = 150
+	proxyCandidatesFloor      = 150
 )
 
 // Candidate collection and result sorting must use the same order. The first
@@ -713,9 +729,11 @@ func (a *app) runCFdataBackgroundScan() {
 //    - 职责：实际转发用户流量
 //
 // 晋升规则（Promotion Threshold）：
-//   - Standby IP 必须连续 2 轮证明明显优于 Active（RequiredSuperiorRounds=2）
-//   - "明显优于" = 速度提升 ≥15% 且 ≥50Mbps（RelativePromotionGain=0.15, AbsolutePromotionGainMbps=50）
-//   - 距离上次切换必须 >10 分钟（MinimumSwitchInterval=10min）
+//   - Standby IP 必须连续 3 轮证明明显优于 Active（RequiredSuperiorRounds=3）
+//   - 优越判定双轨 superiorTo：
+//     双方有速度成绩 → 相对 ≥25% 且绝对 ≥80Mbps；
+//     任一方缺速度成绩 → WS 延迟改善 ≥25% 且 ≥15ms，且成功率不低于 Active
+//   - 距离上次切换必须 >30 分钟（MinimumSwitchInterval=30min）
 //   - 晋升后，旧 Active 降级为 Standby（不是丢弃）
 //
 // Active 隔离：
@@ -758,7 +776,8 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 			ok := result.Error == ""
 			a.recordActiveHealth(result.IP, ok, healthNow)
 			if result.IP == a.quality.activeIP() {
-				a.quality.observeActiveHealth(ok, healthNow)
+				// 延迟一并入账：Active 靠每轮 WS 健康探测建立延迟基线（WS 轨裁判依据）。
+				a.quality.observeActiveHealth(ok, result.Latency, healthNow)
 			}
 		}
 	}
@@ -824,7 +843,7 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	}
 	for _, result := range results {
 		_, ok := passedSet[result.IP]
-		a.quality.observe(result.IP, snapshot.SourceByIP[result.IP], result.DownloadMbps, ok, now)
+		a.quality.observe(result.IP, snapshot.SourceByIP[result.IP], result.DownloadMbps, result.Latency, ok, now)
 	}
 
 	// 决策：检查是否有 Standby IP 应该晋升为 Active
@@ -1339,12 +1358,19 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 	defer a.refreshMu.Unlock()
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
-	resolved := make([]string, 0, 1000)
+	resolved := make([]string, 0, candidatePoolTotalCap)
 	sourceByIP := make(map[string]string)
 	sourceErrors := []string{}
-	appendGroup := func(source string, values []string) {
+	// appendGroup 按层配额灌入：quota 是本层最多进入候选池的数量，
+	// 总池上限 candidatePoolTotalCap 兜底。优先级仍由「先灌者先得」实现
+	// （同 IP 先到先得，见 sourceByIP 认领），配额保证单层吃不光全池。
+	appendGroup := func(source string, values []string, quota int) {
+		if quota <= 0 {
+			return
+		}
+		added := 0
 		for _, raw := range values {
-			if len(resolved) >= 1000 {
+			if len(resolved) >= candidatePoolTotalCap || added >= quota {
 				return
 			}
 			ip := net.ParseIP(strings.TrimSpace(raw))
@@ -1357,36 +1383,55 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 			}
 			sourceByIP[key] = source
 			resolved = append(resolved, key)
+			added++
 		}
 	}
+	officialLimit := envInt("PROXY_OFFICIAL_CANDIDATES", officialCandidatesFloor)
+	if officialLimit < 0 || officialLimit > candidatePoolTotalCap {
+		officialLimit = officialCandidatesFloor
+	}
+	// user 层：最高优先，小上限全收。
 	appendGroup("user", strings.FieldsFunc(env("PROXY_USER_CANDIDATES", ""), func(r rune) bool {
 		return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t'
-	}))
-	appendGroup("subscription", a.subscriptionPoolIPs(1000-len(resolved)))
+	}), userCandidatesCap)
+	// subscription 层：≤600，且必须为 official/proxy 保底额度让位——
+	// 这正是生产教训（sub 独占 1000/1000，official=0、proxy=0）。
+	reserved := proxyCandidatesFloor
+	if officialLimit > 0 {
+		reserved += officialLimit
+	}
+	subQuota := subscriptionCandidatesCap
+	if remaining := candidatePoolTotalCap - len(resolved) - reserved; remaining < subQuota {
+		subQuota = remaining
+	}
+	if subQuota < 0 {
+		subQuota = 0
+	}
+	appendGroup("subscription", a.subscriptionPoolIPs(subQuota), subQuota)
 	// 优选域名不再解析供 IP：域名直接升格为 -fixed 转发成员（applyPoolLocked），
 	// 拨号时按当前 DNS 活解析、天然跟随上游刷新——无需快照、无需考试。
 	// cfdata(baipiao 上游)供给已砍：订阅 + 优选域名 + 官方段 + 手动已是充分渠道。
-	officialLimit := envInt("PROXY_OFFICIAL_CANDIDATES", 150)
-	if officialLimit < 0 || officialLimit > 1000 {
-		officialLimit = 150
-	}
 	if officialLimit > 0 {
 		official, officialErr := fetchOfficialCloudflareCandidates(ctx, officialLimit)
 		if officialErr != nil {
 			sourceErrors = append(sourceErrors, "Cloudflare 官方段: "+officialErr.Error())
 		}
-		appendGroup("official", official)
+		appendGroup("official", official, officialLimit)
 	}
-	community, communityErrors, err := resolveProxySources(ctx, defaultProxyCandidateSourceIDs, 1000-len(resolved))
-	sourceErrors = append(sourceErrors, communityErrors...)
-	if err != nil {
-		sourceErrors = append(sourceErrors, err.Error())
+	// proxy 层：地板配额已由 sub 的让位计算保证，余量全归社区兜底。
+	communityQuota := candidatePoolTotalCap - len(resolved)
+	if communityQuota > 0 {
+		community, communityErrors, err := resolveProxySources(ctx, defaultProxyCandidateSourceIDs, communityQuota)
+		sourceErrors = append(sourceErrors, communityErrors...)
+		if err != nil {
+			sourceErrors = append(sourceErrors, err.Error())
+		}
+		appendGroup("proxy", community, communityQuota)
 	}
-	appendGroup("proxy", community)
 	seen := make(map[string]struct{})
 	ips := make([]string, 0, len(resolved))
 	for _, raw := range resolved {
-		if len(ips) >= 1000 {
+		if len(ips) >= candidatePoolTotalCap {
 			break
 		}
 		ip := net.ParseIP(raw)
@@ -2915,7 +2960,14 @@ func staticHandler() http.Handler {
 }
 
 func (a *app) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"ok": true, "time": time.Now().Format(time.RFC3339)})
+	writeJSON(w, map[string]any{
+		"ok":   true,
+		"time": time.Now().Format(time.RFC3339),
+		"version": map[string]any{
+			"gitCommit": gitCommit,
+			"buildTime": buildTime,
+		},
+	})
 }
 
 func (a *app) handleConfig(w http.ResponseWriter, r *http.Request) {

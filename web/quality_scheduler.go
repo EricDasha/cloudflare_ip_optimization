@@ -29,8 +29,10 @@ import (
 //
 // 晋升阈值（Promotion Threshold，防抖版）：
 //   - RequiredSuperiorRounds = 3：连续 3 轮证明明显优于 Active
-//   - RelativePromotionGain = 0.25：速度提升 ≥25%
-//   - AbsolutePromotionGainMbps = 80：且绝对提升 ≥80Mbps
+//   - 优越判定双轨（superiorTo）：
+//     轨道A 吞吐轨——双方都有实测速度（avg>0）：相对 ≥25% 且绝对 ≥80Mbps
+//     轨道B WS 轨——任一方缺速度成绩（VLESS 关闭/测速稀疏/Active 未测速）：
+//       延迟相对改善 ≥25% 且绝对改善 ≥15ms，且成功率不低于 Active
 //   - FailureThreshold = 3：连续失败 3 次才判失败（单次抖动不再换池）
 //   - MinimumSwitchInterval = 30min：距离上次切换 >30 分钟
 //
@@ -73,6 +75,7 @@ type lineQuality struct {
 	AverageMbps         float64
 	P95Mbps             float64
 	PeakMbps            float64
+	AverageLatencyMs    float64
 	SuccessRate         float64
 	ConsecutiveSuperior int
 	ConsecutiveFailures int
@@ -82,8 +85,9 @@ type lineQuality struct {
 // schedulerPolicy 定义晋升阈值和切换规则。
 // 这些参数共同防止系统过度抖动（oscillation）：
 //   - CapacityMbps：速度上限，防止异常高值影响评分
-//   - RelativePromotionGain：相对提升阈值（25%）
-//   - AbsolutePromotionGainMbps：绝对提升阈值（80Mbps）
+//   - RelativePromotionGain：相对提升阈值（25%），吞吐轨与 WS 轨共用
+//   - AbsolutePromotionGainMbps：吞吐轨绝对阈值（80Mbps）
+//   - AbsolutePromotionGainMs：WS 轨绝对阈值（15ms 延迟改善）
 //   - RequiredSuperiorRounds：连续证明轮数（3轮）
 //   - FailureThreshold：失败次数阈值（3次）
 //   - MinimumSwitchInterval：最小切换间隔（30分钟）
@@ -91,6 +95,7 @@ type schedulerPolicy struct {
 	CapacityMbps              float64
 	RelativePromotionGain     float64
 	AbsolutePromotionGainMbps float64
+	AbsolutePromotionGainMs   float64
 	RequiredSuperiorRounds    int
 	FailureThreshold          int
 	MinimumSwitchInterval     time.Duration
@@ -101,6 +106,7 @@ func defaultSchedulerPolicy() schedulerPolicy {
 		CapacityMbps:              1024,
 		RelativePromotionGain:     0.25,
 		AbsolutePromotionGainMbps: 80,
+		AbsolutePromotionGainMs:   15,
 		RequiredSuperiorRounds:    3,
 		FailureThreshold:          3,
 		MinimumSwitchInterval:     30 * time.Minute,
@@ -108,7 +114,7 @@ func defaultSchedulerPolicy() schedulerPolicy {
 }
 
 func (p schedulerPolicy) validate() error {
-	if p.CapacityMbps <= 0 || p.RelativePromotionGain < 0 || p.AbsolutePromotionGainMbps < 0 {
+	if p.CapacityMbps <= 0 || p.RelativePromotionGain < 0 || p.AbsolutePromotionGainMbps < 0 || p.AbsolutePromotionGainMs < 0 {
 		return errors.New("scheduler throughput policy must be non-negative")
 	}
 	if p.RequiredSuperiorRounds < 1 || p.FailureThreshold < 1 || p.MinimumSwitchInterval < 0 {
@@ -131,6 +137,35 @@ type schedulerDecision struct {
 	Reason string
 }
 
+// superiorTo 双轨优越判定：candidate 是否明显优于 active。
+//
+// 轨道A 吞吐轨：双方都有实测速度成绩（avg>0）→ 相对 ≥25% 且绝对 ≥80Mbps。
+// 轨道B WS 轨：任一方缺速度成绩（VLESS 关闭 / 测速稀疏 / Active 从未测速）
+//
+//	→ 不再要求不可能的 Mbps 差值，改按可观测的 WS 指标比较：
+//	  延迟相对改善 ≥25% 且绝对改善 ≥15ms，且成功率不低于 Active。
+//
+// 背景：seedActive 立起的 Active 默认 avg=0，旧判据要求 candidate ≥ active+80
+// 在双零情况下恒为假，晋升通路数学上不可达（生产 9106 条记录 0 晋升的根因）。
+func superiorTo(candidate, active lineQuality, policy schedulerPolicy) bool {
+	activeSpeed := effectiveMbps(active.AverageMbps, policy.CapacityMbps)
+	candidateSpeed := effectiveMbps(candidate.AverageMbps, policy.CapacityMbps)
+	if activeSpeed > 0 && candidateSpeed > 0 {
+		return candidateSpeed >= activeSpeed*(1+policy.RelativePromotionGain) &&
+			candidateSpeed >= activeSpeed+policy.AbsolutePromotionGainMbps
+	}
+	// WS 轨：延迟必须双方都有观测值，缺基线不判优（宁可不换，不盲换）。
+	if candidate.AverageLatencyMs <= 0 || active.AverageLatencyMs <= 0 {
+		return false
+	}
+	if candidate.SuccessRate < active.SuccessRate {
+		return false
+	}
+	latencyGain := active.AverageLatencyMs - candidate.AverageLatencyMs
+	return latencyGain >= active.AverageLatencyMs*policy.RelativePromotionGain &&
+		latencyGain >= policy.AbsolutePromotionGainMs
+}
+
 // decideLineSwitch 根据三池模型和晋升阈值决定是否换池。
 //
 // 决策流程：
@@ -139,8 +174,7 @@ type schedulerDecision struct {
 // 3. 如果距离上次切换 < MinimumSwitchInterval（30min），不换
 // 4. 检查是否有 Standby IP 满足晋升条件：
 //   - 连续 ConsecutiveSuperior ≥ RequiredSuperiorRounds（3轮）
-//   - 速度 AverageMbps ≥ Active * (1 + RelativePromotionGain)（25%）
-//   - 速度 AverageMbps ≥ Active + AbsolutePromotionGainMbps（80Mbps）
+//   - superiorTo 双轨复核（吞吐轨或 WS 轨，见函数注释）
 //
 // 5. 满足条件则执行 Promotion，否则保持当前 Active
 func decideLineSwitch(input schedulerInput, policy schedulerPolicy) (schedulerDecision, error) {
@@ -164,16 +198,11 @@ func decideLineSwitch(input schedulerInput, policy schedulerPolicy) (schedulerDe
 	if !input.LastSwitch.IsZero() && input.Now.Sub(input.LastSwitch) < policy.MinimumSwitchInterval {
 		return schedulerDecision{Event: switchNone, FromIP: active.IP}, nil
 	}
-	activeAverage := effectiveMbps(active.AverageMbps, policy.CapacityMbps)
 	for _, candidate := range eligible {
-		candidateAverage := effectiveMbps(candidate.AverageMbps, policy.CapacityMbps)
 		if candidate.ConsecutiveSuperior < policy.RequiredSuperiorRounds {
 			continue
 		}
-		if candidateAverage < activeAverage*(1+policy.RelativePromotionGain) {
-			continue
-		}
-		if candidateAverage < activeAverage+policy.AbsolutePromotionGainMbps {
+		if !superiorTo(candidate, active, policy) {
 			continue
 		}
 		return schedulerDecision{Event: switchPromotion, FromIP: active.IP, ToIP: candidate.IP, Reason: reasonPromotedSuperiorThroughput}, nil

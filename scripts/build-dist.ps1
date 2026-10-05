@@ -7,6 +7,16 @@ $cache = Join-Path $dist ".gocache"
 $staleTmp = Join-Path $dist ".gotmp"
 $singBoxVersion = if ($env:SING_BOX_VERSION) { $env:SING_BOX_VERSION.TrimStart("v") } else { "1.13.18" }
 $singBoxBuildID = "$singBoxVersion|with_utls|static-v1"
+
+# cloudflare-web 构建信息注入（/api/health version 字段）
+$gitCommit = "dev"
+try {
+  $rev = (& git -C $root rev-parse --short HEAD 2>$null)
+  if ($LASTEXITCODE -eq 0 -and $rev) { $gitCommit = "$rev".Trim() }
+} catch {}
+$buildTime = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+$webLdflags = "-s -w -X main.gitCommit=$gitCommit -X main.buildTime=$buildTime"
+
 New-Item -ItemType Directory -Force -Path $linux | Out-Null
 New-Item -ItemType Directory -Force -Path $cache | Out-Null
 if (Test-Path $staleTmp) {
@@ -40,7 +50,7 @@ try {
 
   Invoke-Native "go" @("build", "-trimpath", "-ldflags=-s -w", "-o", (Join-Path $linux "cfdata"), (Join-Path $root "cfdata.go"))
   Invoke-Native "go" @("build", "-trimpath", "-ldflags=-s -w", "-o", (Join-Path $linux "cfnat"), (Join-Path $root "cfnat.go"))
-  Invoke-Native "go" @("build", "-trimpath", "-ldflags=-s -w", "-o", (Join-Path $linux "cloudflare-web"), (Join-Path $root "web"))
+  Invoke-Native "go" @("build", "-trimpath", "-ldflags=$webLdflags", "-o", (Join-Path $linux "cloudflare-web"), (Join-Path $root "web"))
 
   $singBoxBinary = Join-Path $linux "sing-box"
   $singBoxStamp = Join-Path $linux "sing-box.version"

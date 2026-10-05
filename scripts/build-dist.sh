@@ -10,13 +10,21 @@ SING_BOX_VERSION="${SING_BOX_VERSION#v}"
 SING_BOX_BUILD_ID="$SING_BOX_VERSION|with_utls|static-v1"
 mkdir -p "$LINUX" "$CACHE"
 
+# cloudflare-web 构建信息注入（/api/health version 字段）
+GIT_COMMIT="dev"
+if GIT_REV="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)" && [ -n "$GIT_REV" ]; then
+  GIT_COMMIT="$GIT_REV"
+fi
+BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+WEB_LDFLAGS="-s -w -X main.gitCommit=$GIT_COMMIT -X main.buildTime=$BUILD_TIME"
+
 echo "==> build linux/amd64 binaries"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTELEMETRY=off GOCACHE="$CACHE" \
   go build -trimpath -ldflags="-s -w" -o "$LINUX/cfdata" "$ROOT/cfdata.go"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTELEMETRY=off GOCACHE="$CACHE" \
   go build -trimpath -ldflags="-s -w" -o "$LINUX/cfnat" "$ROOT/cfnat.go"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTELEMETRY=off GOCACHE="$CACHE" \
-  go build -trimpath -ldflags="-s -w" -o "$LINUX/cloudflare-web" "$ROOT/web"
+  go build -trimpath -ldflags="$WEB_LDFLAGS" -o "$LINUX/cloudflare-web" "$ROOT/web"
 
 INSTALLED_SING_BOX_VERSION="$(cat "$LINUX/sing-box.version" 2>/dev/null || true)"
 if [ ! -f "$LINUX/sing-box" ] || [ "$INSTALLED_SING_BOX_VERSION" != "$SING_BOX_BUILD_ID" ]; then

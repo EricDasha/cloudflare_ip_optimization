@@ -30,10 +30,15 @@ import (
 
 const proxyQualityFile = "proxy-quality.json"
 
+// qualityRecordsCap 成绩册墓碑上限：超过后淘汰最久未测的非 Active 记录，
+// 防止 proxy-quality.json 无限膨胀（生产已见 9106 条 vs 候选上限 1000）。
+const qualityRecordsCap = 1500
+
 type qualitySample struct {
-	At      time.Time `json:"at"`
-	Mbps    float64   `json:"mbps"`
-	Success bool      `json:"success"`
+	At        time.Time `json:"at"`
+	Mbps      float64   `json:"mbps"`
+	LatencyMs int64     `json:"latencyMs,omitempty"`
+	Success   bool      `json:"success"`
 }
 
 type qualityRecord struct {
@@ -44,6 +49,7 @@ type qualityRecord struct {
 	AverageMbps         float64         `json:"averageMbps"`
 	P95Mbps             float64         `json:"p95Mbps"`
 	PeakMbps            float64         `json:"peakMbps"`
+	AverageLatencyMs    float64         `json:"averageLatencyMs"`
 	SuccessRate         float64         `json:"successRate"`
 	ConsecutiveSuperior int             `json:"consecutiveSuperior"`
 	ConsecutiveFailures int             `json:"consecutiveFailures"`
@@ -55,7 +61,8 @@ type qualityRecord struct {
 func (r qualityRecord) line() lineQuality {
 	return lineQuality{
 		IP: r.IP, State: r.State, StateReason: r.StateReason, AverageMbps: r.AverageMbps,
-		P95Mbps: r.P95Mbps, PeakMbps: r.PeakMbps, SuccessRate: r.SuccessRate,
+		P95Mbps: r.P95Mbps, PeakMbps: r.PeakMbps, AverageLatencyMs: r.AverageLatencyMs,
+		SuccessRate:         r.SuccessRate,
 		ConsecutiveSuperior: r.ConsecutiveSuperior, ConsecutiveFailures: r.ConsecutiveFailures,
 		StateChangedAt: r.StateChangedAt,
 	}
@@ -172,8 +179,9 @@ func (r *qualitySchedulerRuntime) ensureRecordLocked(ip, source string, now time
 //   - 测试失败：增加 ConsecutiveFailures，达到阈值则设为 FAILED
 //
 // 此函数还更新 ConsecutiveSuperior（连续优于 Active 的轮数），
-// 用于晋升决策：Standby IP 必须连续 2 轮证明明显优于 Active 才能晋升。
-func (r *qualitySchedulerRuntime) observe(ip, source string, mbps float64, success bool, now time.Time) {
+// 用于晋升决策：Standby IP 必须连续 3 轮证明明显优于 Active 才能晋升。
+// latencyMs 为本次 WS 探测延迟（毫秒），喂给双轨判据的 WS 轨。
+func (r *qualitySchedulerRuntime) observe(ip, source string, mbps float64, latencyMs int64, success bool, now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec := r.ensureRecordLocked(ip, source, now)
@@ -181,7 +189,11 @@ func (r *qualitySchedulerRuntime) observe(ip, source string, mbps float64, succe
 		rec.State, rec.StateReason, rec.StateChangedAt = lineProbing, reasonProbeStarted, now
 	}
 	rec.LastProbeAt = now
-	rec.Samples = append(rec.Samples, qualitySample{At: now, Mbps: effectiveMbps(mbps, r.policy.CapacityMbps), Success: success})
+	sample := qualitySample{At: now, Mbps: effectiveMbps(mbps, r.policy.CapacityMbps), Success: success}
+	if latencyMs > 0 {
+		sample.LatencyMs = latencyMs
+	}
+	rec.Samples = append(rec.Samples, sample)
 	if len(rec.Samples) > 12 {
 		rec.Samples = append([]qualitySample(nil), rec.Samples[len(rec.Samples)-12:]...)
 	}
@@ -199,10 +211,15 @@ func (r *qualitySchedulerRuntime) observe(ip, source string, mbps float64, succe
 	}
 	r.updateSuperiorLocked(rec)
 	r.data.LastProbeAt = now
+	r.pruneRecordsLocked()
 	_ = r.saveLocked()
 }
 
-func (r *qualitySchedulerRuntime) observeActiveHealth(success bool, now time.Time) {
+// observeActiveHealth 记录 Active 的轻量 WS 健康探测（每轮调度一次）。
+// 除成败外同时记录延迟，让 Active 在 seedActive 之后尽快建立 WS 基线——
+// 否则它只能拿 avg=0 当裁判，WS 轨也因缺基线而长期不可判定。
+// 样本 Mbps 记 0：recalculate 只统计 >0 的速度样本，不会稀释其历史吞吐成绩。
+func (r *qualitySchedulerRuntime) observeActiveHealth(success bool, latencyMs int64, now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec := r.data.Records[r.data.ActiveIP]
@@ -210,6 +227,15 @@ func (r *qualitySchedulerRuntime) observeActiveHealth(success bool, now time.Tim
 		return
 	}
 	rec.LastProbeAt = now
+	sample := qualitySample{At: now, Success: success}
+	if latencyMs > 0 {
+		sample.LatencyMs = latencyMs
+	}
+	rec.Samples = append(rec.Samples, sample)
+	if len(rec.Samples) > 12 {
+		rec.Samples = append([]qualitySample(nil), rec.Samples[len(rec.Samples)-12:]...)
+	}
+	r.recalculateLocked(rec)
 	if success {
 		rec.ConsecutiveFailures = 0
 		if rec.State == lineDegraded {
@@ -228,38 +254,57 @@ func (r *qualitySchedulerRuntime) observeActiveHealth(success bool, now time.Tim
 	_ = r.saveLocked()
 }
 
+// recalculateLocked 从最近样本重算统计值。
+// 速度与延迟分轨统计：AverageMbps 只取 >0 的成功样本（测速缺测记 0 不入账），
+// AverageLatencyMs 只取 >0 的成功样本；SuccessRate 覆盖全部样本。
 func (r *qualitySchedulerRuntime) recalculateLocked(rec *qualityRecord) {
-	values := make([]float64, 0, len(rec.Samples))
+	speeds := make([]float64, 0, len(rec.Samples))
+	latencies := make([]float64, 0, len(rec.Samples))
 	successes := 0
 	for _, sample := range rec.Samples {
 		if sample.Success {
-			values = append(values, sample.Mbps)
 			successes++
+			if sample.Mbps > 0 {
+				speeds = append(speeds, sample.Mbps)
+			}
+			if sample.LatencyMs > 0 {
+				latencies = append(latencies, float64(sample.LatencyMs))
+			}
 		}
 	}
 	rec.SuccessRate = float64(successes) / float64(len(rec.Samples))
-	if len(values) == 0 {
+	if len(speeds) == 0 {
 		rec.AverageMbps, rec.P95Mbps, rec.PeakMbps = 0, 0, 0
+	} else {
+		sort.Float64s(speeds)
+		var total float64
+		for _, value := range speeds {
+			total += value
+		}
+		rec.AverageMbps = total / float64(len(speeds))
+		rec.PeakMbps = speeds[len(speeds)-1]
+		index := int(float64(len(speeds)-1) * 0.95)
+		rec.P95Mbps = speeds[index]
+	}
+	if len(latencies) == 0 {
+		rec.AverageLatencyMs = 0
 		return
 	}
-	sort.Float64s(values)
-	var total float64
-	for _, value := range values {
-		total += value
+	var latencyTotal float64
+	for _, value := range latencies {
+		latencyTotal += value
 	}
-	rec.AverageMbps = total / float64(len(values))
-	rec.PeakMbps = values[len(values)-1]
-	index := int(float64(len(values)-1) * 0.95)
-	rec.P95Mbps = values[index]
+	rec.AverageLatencyMs = latencyTotal / float64(len(latencies))
 }
 
+// updateSuperiorLocked 按双轨判据累计连续优越轮数（见 superiorTo）。
 func (r *qualitySchedulerRuntime) updateSuperiorLocked(rec *qualityRecord) {
 	active := r.data.Records[r.data.ActiveIP]
 	if rec.IP == r.data.ActiveIP || active == nil || rec.State != lineStandby {
 		rec.ConsecutiveSuperior = 0
 		return
 	}
-	if rec.AverageMbps >= active.AverageMbps*(1+r.policy.RelativePromotionGain) && rec.AverageMbps >= active.AverageMbps+r.policy.AbsolutePromotionGainMbps {
+	if superiorTo(rec.line(), active.line(), r.policy) {
 		rec.ConsecutiveSuperior++
 	} else {
 		rec.ConsecutiveSuperior = 0
@@ -286,9 +331,51 @@ func (r *qualitySchedulerRuntime) decide(now time.Time) schedulerDecision {
 		_ = r.saveLocked()
 		return schedulerDecision{Event: switchNone, Reason: err.Error()}
 	}
-	r.data.LastDecision = decision
+	// lastDecision 保真：NONE 不覆盖最后一次真实的 SWITCH/FAILOVER 记录，
+	// 否则每 5 分钟一轮的空决策会把换池审计痕迹冲掉（观测性缺陷）。
+	if decision.Event != switchNone {
+		r.data.LastDecision = decision
+	}
 	_ = r.saveLocked()
 	return decision
+}
+
+// pruneRecordsLocked 成绩册墓碑：超过 qualityRecordsCap 时淘汰最久未测的
+// 非 Active 记录。FAILED 墓场（生产 6609/9106）优先被清出；Active 永不淘汰。
+// 在 observe 持锁路径调用。
+func (r *qualitySchedulerRuntime) pruneRecordsLocked() {
+	if len(r.data.Records) <= qualityRecordsCap {
+		return
+	}
+	type eviction struct {
+		ip string
+		at time.Time
+	}
+	candidates := make([]eviction, 0, len(r.data.Records))
+	for ip, rec := range r.data.Records {
+		if ip == r.data.ActiveIP || rec.State == lineActive {
+			continue
+		}
+		probeAt := rec.LastProbeAt
+		if probeAt.IsZero() {
+			probeAt = rec.StateChangedAt
+		}
+		candidates = append(candidates, eviction{ip: ip, at: probeAt})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if !candidates[i].at.Equal(candidates[j].at) {
+			return candidates[i].at.Before(candidates[j].at)
+		}
+		return candidates[i].ip < candidates[j].ip
+	})
+	excess := len(r.data.Records) - qualityRecordsCap
+	for _, victim := range candidates {
+		if excess <= 0 {
+			break
+		}
+		delete(r.data.Records, victim.ip)
+		excess--
+	}
 }
 
 // commitSwitch 执行晋升切换：旧 Active → Standby，新 IP → Active。
@@ -299,7 +386,7 @@ func (r *qualitySchedulerRuntime) decide(now time.Time) schedulerDecision {
 //   - 更新 ActiveIP、LastSwitchAt、LastDecision
 //
 // 注意：切换是由 decideLineSwitch() 决策的，此函数只负责执行。
-// 决策会考虑 MinimumSwitchInterval（10分钟）防止过度抖动。
+// 决策会考虑 MinimumSwitchInterval（默认 30 分钟）防止过度抖动。
 func (r *qualitySchedulerRuntime) commitSwitch(decision schedulerDecision, now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -301,4 +301,3 @@ func (a *app) mergeCfdataIPsIntoCandidates(ips []string) {
 		_ = a.saveProxyCandidateCache(snapshot)
 	}
 }
-
