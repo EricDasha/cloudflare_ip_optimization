@@ -16,11 +16,11 @@ The Web layer orchestrates these binaries. It does not duplicate their scanning 
 The optimizer maintains three pools with different test costs and lifecycles:
 
 ### 1. Candidate Pool (候选池)
-- **Sources**: User IPs > Subscription Feed > Preferred-domain resolution > CFdata Cache > Official CF CIDR Sampling > enabled community sources
+- **Sources**: User IPs > Subscription Feed > Official CF CIDR Sampling > enabled community sources (each layer quota-capped; see Source Quotas)
 - **Test**: Low-cost TCP/TLS latency screening
 - **Size**: Large (hundreds to thousands)
 - **Purpose**: Fast discovery of potentially usable IPs
-- Preferred domains now do double duty: each candidate refresh resolves enabled domains into public IPv4 (C-zone supply, capped per-domain and globally, snapshot expires with the refresh cycle), while remaining in `-fallback` for dial-time DNS-based forwarding.
+- Preferred domains are not resolved into candidates: they are promoted directly to cfnat `-fixed` members (dial-time live DNS, `applyPoolLocked`) and keep `-fallback` duty when explicitly configured. No snapshot, no domain-level probing, no candidate-pool membership.
 
 ### 2. Standby Pool (替补池)
 - **Source**: Candidate IPs that pass TCP screening
@@ -43,7 +43,8 @@ Candidate Pool (hundreds)
     ▼
 Standby Pool (dozens)
     │
-    │ VLESS full quality test
+    │ Dual-track superiority (superiorTo): throughput when both
+    │ sides have speed data, else WS latency + success rate
     │ Consecutive 3 rounds proving superior (scheduler only)
     │ Min 30min since last switch
     │ + global pool-switch cooldown (30min)
@@ -54,13 +55,23 @@ Active Pool (1-5)
     │ Forward user traffic
     │ Excluded from candidate rotation
     │ Short WS health probe keeps the switch guard current
+    │   AND builds the Active latency baseline for the WS track
 ```
 
 ### Promotion Threshold
 
+Superiority is judged by a single function `superiorTo(candidate, active, policy)` with **two mutually exclusive tracks**:
+
+- **Track A — throughput** (both sides have valid throughput samples, i.e. `avg > 0`): candidate must beat active by **≥25% relative AND ≥80 Mbps absolute**.
+- **Track B — WS metrics** (either side lacks throughput — VLESS probe off, speed samples sparse, or Active never speed-tested): candidate must beat active on **WS latency by ≥25% relative AND ≥15 ms absolute**, with **success rate no worse than Active's**. If either side has no latency baseline yet, the round is simply not judged superior (no blind switching).
+
+> **`Mbps = 0` does not mean "0 Mbps measured".** It means *the sample carries no valid throughput evidence* (not speed-tested, or speed test failed). Averages are computed only over samples with `Mbps > 0`. Never compare two zero averages with an additive threshold — `0 >= 0 + 80` is always false and silently deadlocks promotion. That exact bug produced `SUPERIOR_GT0 = 0 / 9106` records in production before this design.
+
+Active builds its WS baseline from the per-round lightweight health probe (latency + outcome recorded every scheduler round), so Track B has a judge with evidence within one probe interval of any seed.
+
+Other thresholds:
+
 - **RequiredSuperiorRounds**: 3 (must prove superior for 3 consecutive rounds)
-- **RelativePromotionGain**: 25% (speed must improve by ≥25%)
-- **AbsolutePromotionGainMbps**: 80 (and by ≥80Mbps absolute)
 - **FailureThreshold**: 3 (3 consecutive failures before a line is failed; single jitter no longer flips the pool)
 - **MinimumSwitchInterval**: 30 minutes (prevent oscillation)
 - **Global pool-switch cooldown**: 30 minutes (`PROXY_POOL_SWITCH_COOLDOWN_MINUTES`), applies to both scheduler and full auto-apply; manual apply is exempt
@@ -71,15 +82,28 @@ When a Standby IP is promoted, the old Active IP demotes to Standby (preserved f
 
 ## Source Priority
 
-Source priority determines **when** IPs are tested, not their final performance ranking:
+Source priority determines **when** IPs are tested (ingestion order on ties), not their final performance ranking:
 
 1. **User** (manual IPs, `PROXY_USER_CANDIDATES`, manual apply) - Tested first, highest priority
 2. **Subscription** (daily third-party maintainer feed, WS-verified into `subscription-pool.json`) - Tested second
-3. **Preferred resolved** (C-zone: enabled preferred domains resolved per refresh, snapshot expires with the cycle) - Tested third; supersedes the upstream author's IP supply position
-4. **CFdata** (manual-only scan cache) - Tested fourth, demoted to manual fallback supply
-5. **Official** (CF CIDR sampling) - Fallback expansion only
-6. **Community** (enabled allowlisted DNS/API sources) - Last expansion layer
-7. **Preferred domains (raw)** - remain untested as domains; they keep `-fallback` duty only. Resolved IPs from the same domains are tested through the normal pipeline.
+3. **Official** (CF CIDR sampling) - Tested third
+4. **Community** (enabled allowlisted DNS/API sources) - Last expansion layer
+
+Preferred domains are not a candidate source: they are promoted directly to cfnat `-fixed` members with dial-time DNS. CFdata is a manual push source only.
+
+### Source Quotas (anti-monopoly)
+
+Priority alone does not stop one source from eating the whole pool — production once showed `subscription 1000/1000, official 0, proxy 0`. Each refresh therefore applies per-source quotas (ingestion still runs in priority order, so ties go to the higher tier):
+
+| Layer | Quota |
+|---|---|
+| user | ≤ 100 |
+| subscription | ≤ 600, and must yield to the floors below |
+| official | ≥ 150 floor (default `PROXY_OFFICIAL_CANDIDATES`) |
+| proxy (community) | ≥ 150 floor, absorbs remaining capacity |
+| **total** | **≤ 1000** (`candidatePoolTotalCap`, equals the sum of quotas) |
+
+`subscriptionQuota = min(600, 1000 - used - officialFloor - proxyFloor)` makes it mathematically impossible for the subscription layer to starve the floor layers.
 
 The actual Active Pool selection is based on measured performance (Mbps, latency, stability), not source priority.
 
@@ -107,7 +131,7 @@ Optimizer
 Candidate generation and business acceptance are separate stages:
 
 1. CFdata reads the local broad CDN ranges and writes `ip.csv` (manual trigger only).
-2. The candidate cache preserves source order: user-supplied IPs, subscription-feed IPs, preferred-domain resolved IPs (C-zone snapshot, re-resolved each refresh), CFdata output, sampled official Cloudflare CIDRs, then enabled community sources.
+2. The candidate cache preserves source order under per-source quotas: user-supplied IPs (≤100), subscription-feed IPs (≤600 with floor reservation), sampled official Cloudflare CIDRs (≥150 floor), then enabled community sources (≥150 floor); total ≤1000.
 3. The first active-pool stage validates the configured TLS SNI, HTTP Host and WebSocket path in parallel.
 4. If VLESS probing is enabled, WS passes are tested sequentially through a short-lived sing-box process. Each pass must complete both the configured `generate_204` request and a bounded download through the same tunnel.
 5. The VLESS probe replaces only the candidate server and port; UUID, TLS/ECH/uTLS and WebSocket settings come from the local outbound template. Results preserve source priority and use measured Mbps, then data-plane latency, within each source tier.
@@ -164,11 +188,9 @@ Logs live in a collapsed drawer. There are no routes, no config forms, no advanc
 ### CFdata (manual-only; background vars deprecated)
 - `PROXY_CFDATA_BACKGROUND_ENABLED/MINUTES/TIMEOUT`, `PROXY_CFDATA_SIFT_COUNT`: no longer read; CFdata runs only on explicit user trigger
 
-### Preferred Domains (resolve-supply + fallback)
-- `PROXY_PREFERRED_MAX_DOMAINS`: compat only (default: 20); cap on domains participating in resolve-supply and fallback
-- `PROXY_PREFERRED_RESOLVE`: enable C-zone resolve-supply (default: true)
-- `PROXY_PREFERRED_IPS_PER_DOMAIN`: max public IPv4 kept per resolved domain (default: 4)
-- `PROXY_PREFERRED_RESOLVED_CANDIDATES`: global cap on resolved-supply IPs; `0` disables supply (default: 64)
+### Preferred Domains (fixed-member dial + optional fallback)
+- `PROXY_PREFERRED_MAX_DOMAINS`: cap on enabled preferred domains (default: 20)
+- `PROXY_PREFERRED_RESOLVE`, `PROXY_PREFERRED_IPS_PER_DOMAIN`, `PROXY_PREFERRED_RESOLVED_CANDIDATES`: deprecated, no longer read (C-zone resolve-supply was removed; domains dial as `-fixed` members with live DNS)
 - `PROXY_PREFERRED_PROBE_MINUTES`, `PROXY_DYNAMIC_DISCOVERY`: deprecated, no longer read
 
 ### Quality Scheduler
