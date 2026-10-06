@@ -55,22 +55,22 @@ const (
 	preferredSettingsFile         = "proxy-preferred.json"
 	// 候选池分层配额：优先级决定谁先进（同 IP 先到先得），配额保证单层不能
 	// 吃光整个池（生产曾见 subscription 独占 1000/1000，official=0、proxy=0）。
-	// 总上限 candidatePoolTotalCap 由各层配额之和自然约束（100+600+150+150=1000）。
+	// 官方段已砍（用户指令）：bestcf 全量列表 + 订阅已是充分供给。
+	// 总上限 candidatePoolTotalCap 由各层配额之和自然约束（100+600+300=1000）。
 	candidatePoolTotalCap     = 1000
 	userCandidatesCap         = 100
 	subscriptionCandidatesCap = 600
-	officialCandidatesFloor   = 150
-	proxyCandidatesFloor      = 150
+	bestcfCandidatesFloor     = 300
 )
 
 // Candidate collection and result sorting must use the same order. The first
 // source that supplies an IP owns its source label, so this order also defines
 // which source wins when the same address appears in multiple feeds.
 // proxyCandidateSourceOrder 候选供给层（考试优先序）：
-// user > subscription > official > proxy(社区)。
-// preferred 优选域名不再解析供 IP——域名直接升格为 -fixed 转发成员（拨号时活解析）；
-// cfdata(baipiao 上游)已砍——订阅 + 优选域名 + 官方段 + 手动已是充分供给。
-var proxyCandidateSourceOrder = []string{"user", "subscription", "official", "proxy"}
+// user > subscription > bestcf(全量优选)。
+// official 官方段已砍（用户指令）；preferred 优选域名不解析供 IP——域名直接
+// 升格为 -fixed 转发成员（拨号时活解析）；cfdata(baipiao 上游)已砍。
+var proxyCandidateSourceOrder = []string{"user", "subscription", "bestcf"}
 
 var errProxyCandidatesBusy = errors.New("候选源刷新正在运行")
 
@@ -539,6 +539,8 @@ func main() {
 	mux.HandleFunc("/api/cfnat/start", a.handleCFnatStart)
 	mux.HandleFunc("/api/cfnat/stop", a.handleCFnatStop)
 	mux.HandleFunc("/api/cfnat/proxy-scan", a.handleProxyScan)
+	mux.HandleFunc("/api/cfnat/proxy-probe", a.handleProxyProbe)
+	mux.HandleFunc("/api/cfnat/proxy-promote", a.handleProxyPromote)
 	mux.HandleFunc("/api/cfnat/proxy-candidates", a.handleProxyCandidates)
 	mux.HandleFunc("/api/cfnat/connections", a.handleCFnatConnections)
 	mux.HandleFunc("/api/cfnat/upstreams", a.handleCFnatUpstreams)
@@ -663,30 +665,61 @@ var proxyCandidateSources = map[string]proxyCandidateSource{
 			"https://cf.090227.xyz/cmcc?ips=8",
 		},
 	},
-	// bestcf 导航聚合的优选 IP 列表：`IP:端口#备注` 格式，extractPublicIPv4
-	// 按非数字点切分后端口与备注自然落网外，无需新解析器。源生死由维护者
-	// 决定，全部走 HTTPS 白名单校验，单个失败只记 sourceErrors 不拖垮刷新。
+	// bestcf 导航（https://bestcf.pages.dev/#yxym）全量优选 IP 列表：
+	// `IP:端口#备注` 格式，extractPublicIPv4 按非数字点切分后端口与备注
+	// 自然落网外，无需新解析器。页面标注"更新异常"的源不收；源生死由
+	// 维护者决定，全部走 HTTPS 白名单校验，单个失败只记 sourceErrors。
 	"bestcf": {
-		Name: "BestCF 优选 IP 列表",
+		Name: "BestCF 全量优选 IP",
 		URLs: []string{
+			// bestcf.pages.dev 自托管镜像
 			"https://bestcf.pages.dev/cmliu/all.txt",
+			"https://bestcf.pages.dev/cmliu2/all.txt",
 			"https://bestcf.pages.dev/wetest/ipv4.txt",
+			"https://bestcf.pages.dev/uouin/all.txt",
+			"https://bestcf.pages.dev/luoli/all.txt",
+			"https://bestcf.pages.dev/lzj/all.txt",
+			"https://bestcf.pages.dev/xinyitang3/ipv4.txt",
 			"https://bestcf.pages.dev/cfyes/ipv4.txt",
 			"https://bestcf.pages.dev/vvhan/ipv4.txt",
+			"https://bestcf.pages.dev/tiancheng/all.txt",
+			"https://bestcf.pages.dev/gslege/Cfxyz.txt",
+			"https://bestcf.pages.dev/zhixuanwang/ipv4-onlyip.txt",
+			"https://bestcf.pages.dev/s5gy/all.txt",
+			"https://bestcf.pages.dev/nirevil/ipv4.txt",
+			"https://bestcf.pages.dev/ircf/ipv4.txt",
+			"https://bestcf.pages.dev/vps789/top100.txt",
+			// GitHub 原始列表（页面 #yxym 收录的活跃维护者）
+			"https://raw.githubusercontent.com/cmliu/WorkerVless2sub/main/addressesapi.txt",
+			"https://raw.githubusercontent.com/ymyuuu/IPDB/main/BestCF/bestcfv4.txt",
+			"https://raw.githubusercontent.com/yuanxiawan/cfipv4db/main/cfip.txt",
+			"https://raw.githubusercontent.com/LancelotRar/best-cf-ips/main/best-cf-ip-collected.txt",
+			"https://raw.githubusercontent.com/joname1/BestCFip/main/ipv4.txt",
+			"https://raw.githubusercontent.com/ahang39/router/main/all.txt",
+			"https://raw.githubusercontent.com/einsitang/my-fast-cf-ip/master/fastips.txt",
+			"https://raw.githubusercontent.com/hubbylei/bestcf/main/bestcf.txt",
+			"https://raw.githubusercontent.com/gshtwy/CF-DNS-Clone/main/wetest-cloudflare-v4.txt",
+			"https://raw.githubusercontent.com/Senflare/Senflare-IP/main/IPlist-Pro.txt",
+			"https://raw.githubusercontent.com/JieChaoCC/cf-ip-auto/main/data/ipapi.txt",
+			// MJZ / SS / LZ（运营商分网维护）
+			"https://cf.junzhen.qzz.io/best_ips.txt",
+			"https://cf.junzhen.qzz.io/best_ips_bj.txt",
+			"https://raw.githubusercontent.com/svip-s/cloudflare_ip/main/best_ips.txt",
+			"https://raw.githubusercontent.com/love-ztm/cfip/main/best_ips.txt",
+			"https://raw.githubusercontent.com/love-ztm/cfip/main/ubest_ips.txt",
 		},
 	},
 	"preferred-imported": {Name: "v2rayn 导入优选域名"},
 }
 
 var defaultProxyCandidateSourceIDs = []string{
-	// 社区候选源已停用；自动刷新保留 090227 优选目录 + bestcf 聚合列表。
-	"090227",
+	// 供给 = user > subscription > bestcf 全量优选（090227 并入 bestcf 层）。
 	"bestcf",
 }
 
-// bestcfForwardDomainURL 是 bestcf 优选域名迷你列表（`域名:端口#备注` 格式）。
+// bestcfForwardDomainURL 是 bestcf 优选域名全量列表（`域名:端口#备注` 格式）。
 // 域名作为一等公民进池（cfnat -fixed 拨号时活解析），绝不预解析成 IP。
-const bestcfForwardDomainURL = "https://bestcf.pages.dev/domain/mini.txt"
+const bestcfForwardDomainURL = "https://bestcf.pages.dev/domain/all.txt"
 
 func (a *app) runProxyCandidateRefreshLoop() {
 	a.refreshAndApplyProxyPool(context.Background())
@@ -1452,20 +1485,13 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 			added++
 		}
 	}
-	officialLimit := envInt("PROXY_OFFICIAL_CANDIDATES", officialCandidatesFloor)
-	if officialLimit < 0 || officialLimit > candidatePoolTotalCap {
-		officialLimit = officialCandidatesFloor
-	}
 	// user 层：最高优先，小上限全收。
 	appendGroup("user", strings.FieldsFunc(env("PROXY_USER_CANDIDATES", ""), func(r rune) bool {
 		return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t'
 	}), userCandidatesCap)
-	// subscription 层：≤600，且必须为 official/proxy 保底额度让位——
-	// 这正是生产教训（sub 独占 1000/1000，official=0、proxy=0）。
-	reserved := proxyCandidatesFloor
-	if officialLimit > 0 {
-		reserved += officialLimit
-	}
+	// subscription 层：≤600，且必须为 bestcf 保底额度让位——
+	// 生产教训（sub 独占 1000/1000，其余层=0）不允许重演。
+	reserved := bestcfCandidatesFloor
 	subQuota := subscriptionCandidatesCap
 	if remaining := candidatePoolTotalCap - len(resolved) - reserved; remaining < subQuota {
 		subQuota = remaining
@@ -1476,23 +1502,16 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 	appendGroup("subscription", a.subscriptionPoolIPs(subQuota), subQuota)
 	// 优选域名不再解析供 IP：域名直接升格为 -fixed 转发成员（applyPoolLocked），
 	// 拨号时按当前 DNS 活解析、天然跟随上游刷新——无需快照、无需考试。
-	// cfdata(baipiao 上游)供给已砍：订阅 + 优选域名 + 官方段 + 手动已是充分渠道。
-	if officialLimit > 0 {
-		official, officialErr := fetchOfficialCloudflareCandidates(ctx, officialLimit)
-		if officialErr != nil {
-			sourceErrors = append(sourceErrors, "Cloudflare 官方段: "+officialErr.Error())
-		}
-		appendGroup("official", official, officialLimit)
-	}
-	// proxy 层：地板配额已由 sub 的让位计算保证，余量全归社区兜底。
-	communityQuota := candidatePoolTotalCap - len(resolved)
-	if communityQuota > 0 {
-		community, communityErrors, err := resolveProxySources(ctx, defaultProxyCandidateSourceIDs, communityQuota)
-		sourceErrors = append(sourceErrors, communityErrors...)
+	// 官方段已砍（用户指令）：bestcf 全量列表 + 订阅已是充分供给。
+	// bestcf 层：地板配额已由 sub 的让位计算保证，余量全归 bestcf 兜底。
+	bestcfQuota := candidatePoolTotalCap - len(resolved)
+	if bestcfQuota > 0 {
+		bestcf, bestcfErrors, err := resolveProxySources(ctx, defaultProxyCandidateSourceIDs, bestcfQuota)
+		sourceErrors = append(sourceErrors, bestcfErrors...)
 		if err != nil {
 			sourceErrors = append(sourceErrors, err.Error())
 		}
-		appendGroup("proxy", community, communityQuota)
+		appendGroup("bestcf", bestcf, bestcfQuota)
 	}
 	// bestcf 优选域名表：域名作为一等公民进池，绝不解析成 IP。
 	// 拉取失败只记 error，不影响 IP 候选。
@@ -2601,6 +2620,182 @@ func (a *app) handleProxyScanApply(w http.ResponseWriter, r *http.Request) {
 	a.markPoolSwitched(now)
 	log.Printf("manual supply applied: %d IPs + %d domains", len(passed), len(domains))
 	writeJSON(w, map[string]any{"ok": true, "applied": len(passed), "domains": len(domains)})
+}
+
+// handleProxyProbe 单 IP 精密体检：WS 延迟实测 + 可选 VLESS 数据面测速。
+// 供主页每行的「测延迟 / 测速」按钮。只读体检，绝不动池。
+func (a *app) handleProxyProbe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var body struct {
+		IP string `json:"ip"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "无效的请求体", http.StatusBadRequest)
+		return
+	}
+	target := net.ParseIP(strings.TrimSpace(body.IP))
+	if !isPublicIPv4(target) {
+		http.Error(w, "无效的公网 IPv4", http.StatusBadRequest)
+		return
+	}
+	ip := target.To4().String()
+	cfg := defaultProxyAutoConfig()
+	if cfg.Host == "" || cfg.Path == "" {
+		http.Error(w, "未配置 PROXY_AUTO_HOST/PATH，无法体检", http.StatusPreconditionFailed)
+		return
+	}
+	// 第一针：WS 101 握手延迟（三次取最优）。
+	wsLatency := int64(0)
+	for range 3 {
+		ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+		started := time.Now()
+		err := probeProxyWebSocket(ctx, ip, cfg)
+		cancel()
+		if err != nil {
+			continue
+		}
+		if ms := time.Since(started).Milliseconds(); wsLatency == 0 || ms < wsLatency {
+			wsLatency = ms
+		}
+	}
+	if wsLatency == 0 {
+		writeJSON(w, map[string]any{"ok": false, "ip": ip, "error": "WS 握手三次全部失败"})
+		return
+	}
+	// 第二针（可选）：VLESS 数据面真实测速。
+	mbps := 0.0
+	vlessErr := ""
+	if cfg.VLESS.Enabled {
+		template, err := loadVLESSOutboundTemplate(cfg.VLESS.TemplatePath)
+		if err == nil {
+			speedCfg := cfg.VLESS
+			speedBytes := envInt("PROXY_VLESS_SPEED_BYTES", 2097152)
+			if speedBytes < 1048576 || speedBytes > 33554432 {
+				speedBytes = 2097152
+			}
+			speedCfg.TestURL = fmt.Sprintf("https://speed.cloudflare.com/__down?bytes=%d", speedBytes)
+			speedCfg.ExpectedStatus = http.StatusOK
+			speedCfg.ReadLimit = int64(speedBytes)
+			speedCfg.MinBytes = int64(speedBytes)
+			speedCfg.Timeout = 20 * time.Second
+			ctx, cancel := context.WithTimeout(r.Context(), speedCfg.Timeout)
+			metrics, err := probeVLESSCandidateMetrics(ctx, ip, cfg.Port, speedCfg, template)
+			cancel()
+			if err != nil {
+				vlessErr = err.Error()
+			} else {
+				mbps = metrics.Mbps
+			}
+		} else {
+			vlessErr = err.Error()
+		}
+	}
+	resp := map[string]any{"ok": true, "ip": ip, "wsLatencyMs": wsLatency}
+	if cfg.VLESS.Enabled {
+		if vlessErr != "" {
+			resp["vless"] = map[string]any{"ok": false, "error": vlessErr}
+		} else {
+			resp["vless"] = map[string]any{"ok": true, "mbps": mbps}
+		}
+	}
+	writeJSON(w, resp)
+}
+
+// handleProxyPromote 单 IP 顶替：把用户指定的候选 IP 与在位最差成员换座。
+// 手动路径语义：直接换池、不受冷却限制、同 IP 已在位则幂等成功。
+func (a *app) handleProxyPromote(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	// 只拿换池锁；与 kick 同链，等待而非立即拒绝。
+	if !lockTimeout(&a.cfnatCtlMu, 15*time.Second) {
+		http.Error(w, "换池操作正在运行，请稍后再试", http.StatusTooManyRequests)
+		return
+	}
+	defer a.cfnatCtlMu.Unlock()
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var body struct {
+		IP string `json:"ip"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "无效的请求体", http.StatusBadRequest)
+		return
+	}
+	target := net.ParseIP(strings.TrimSpace(body.IP))
+	if !isPublicIPv4(target) {
+		http.Error(w, "无效的公网 IPv4", http.StatusBadRequest)
+		return
+	}
+	ip := target.To4().String()
+	current := a.proxyActivePoolSnapshot()
+	if containsString(current.IPs, ip) {
+		writeJSON(w, map[string]any{"ok": true, "promoted": ip, "already": true})
+		return
+	}
+	if len(current.IPs) == 0 {
+		http.Error(w, "当前池为空，请先立即优选", http.StatusConflict)
+		return
+	}
+	// 顶替前先做一次 WS 体检：考不过的 IP 不允许登基（手动也不能塞废物）。
+	cfg := defaultProxyAutoConfig()
+	if cfg.Host != "" && cfg.Path != "" {
+		ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+		err := probeProxyWebSocket(ctx, ip, cfg)
+		cancel()
+		if err != nil {
+			http.Error(w, "体检未通过，拒绝顶替: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	// 先踢在位最差者：按质量记录里延迟最差者，无记录则末位。
+	victim := a.worstPoolMember(current.IPs)
+	pool := current
+	pool.UpdatedAt = time.Now()
+	pool.IPs = replacePoolMember(current.IPs, victim, ip)
+	pool.Results = mergePoolResults(pool.IPs, current.Results, nil)
+	if err := a.applyPoolLocked(pool, current); err != nil {
+		http.Error(w, "顶替失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a.markPoolSwitched(time.Now())
+	log.Printf("manual promote: %s replaced %s", ip, victim)
+	writeJSON(w, map[string]any{"ok": true, "promoted": ip, "replaced": victim})
+}
+
+// worstPoolMember 挑在位池最差成员：优先拿质量记录里平均延迟最高者，
+// 无记录者视为最差（末位保护：绝不动第一个成员）。
+func (a *app) worstPoolMember(ips []string) string {
+	if len(ips) == 0 {
+		return ""
+	}
+	if len(ips) == 1 {
+		return ips[0]
+	}
+	scores := make(map[string]float64, len(ips))
+	if a.quality != nil {
+		snapshot := a.quality.snapshot()
+		if records, ok := snapshot["records"].([]qualityRecord); ok {
+			for _, rec := range records {
+				if rec.AverageLatencyMs > 0 {
+					scores[rec.IP] = rec.AverageLatencyMs
+				}
+			}
+		}
+	}
+	worst := ips[len(ips)-1]
+	worstLatency := scores[worst]
+	for _, ip := range ips[1:] {
+		if scores[ip] > worstLatency {
+			worst = ip
+			worstLatency = scores[ip]
+		}
+	}
+	return worst
 }
 
 // handleActiveKick 用户手动把某个在位 IP 踢出皇位（卡顿救火）：

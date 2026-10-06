@@ -103,14 +103,14 @@ func TestCandidateSourcePriorityUsesDeclaredOrder(t *testing.T) {
 		"203.0.113.2": "subscription",
 		"203.0.113.3": "preferred",
 		"203.0.113.4": "cfdata",
-		"203.0.113.5": "official",
-		"203.0.113.6": "proxy",
+		"203.0.113.5": "bestcf",
+		"203.0.113.6": "official",
 	})
 	got := make([]string, len(results))
 	for i, result := range results {
 		got[i] = result.IP
 	}
-	// user(1) → subscription(2) → official(5) → proxy(6) → 未知来源按 rank 末尾、层内延迟序
+	// user(1) → subscription(2) → bestcf(5) → 未知/已砍来源按 rank 末尾、层内延迟序
 	want := []string{"203.0.113.1", "203.0.113.2", "203.0.113.5", "203.0.113.6", "203.0.113.3", "203.0.113.4"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("candidate source order = %v, want %v", got, want)
@@ -492,9 +492,9 @@ func TestCandidateSourcePriorityKeepsFailuresOut(t *testing.T) {
 		{IP: "198.51.100.3", Latency: 5, Stage: "WS_FAIL", Error: "failed"},
 	}
 	applyCandidateSourcePriority(results, map[string]string{
-		"198.51.100.1": "official",
-		"198.51.100.2": "proxy",
-		"198.51.100.3": "official",
+		"198.51.100.1": "bestcf",
+		"198.51.100.2": "official",
+		"198.51.100.3": "bestcf",
 	})
 	want := []string{"198.51.100.1", "198.51.100.2", "198.51.100.3"}
 	got := []string{results[0].IP, results[1].IP, results[2].IP}

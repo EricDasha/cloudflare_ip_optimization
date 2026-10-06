@@ -82,8 +82,8 @@ func TestBestcfSourceRegisteredAndEnabled(t *testing.T) {
 	if !ok {
 		t.Fatal("bestcf source not registered")
 	}
-	if len(source.URLs) == 0 {
-		t.Fatal("bestcf source has no URLs")
+	if len(source.URLs) < 20 {
+		t.Fatalf("bestcf full-merge expected >=20 URLs, got %d", len(source.URLs))
 	}
 	enabled := false
 	for _, id := range defaultProxyCandidateSourceIDs {
@@ -95,8 +95,40 @@ func TestBestcfSourceRegisteredAndEnabled(t *testing.T) {
 		t.Fatal("bestcf source not in defaultProxyCandidateSourceIDs")
 	}
 	for _, rawURL := range source.URLs {
-		if !strings.HasPrefix(rawURL, "https://bestcf.pages.dev/") {
+		if !strings.HasPrefix(rawURL, "https://bestcf.pages.dev/") &&
+			!strings.HasPrefix(rawURL, "https://raw.githubusercontent.com/") &&
+			!strings.HasPrefix(rawURL, "https://cf.") {
 			t.Fatalf("bestcf URL outside allowlist origin: %s", rawURL)
 		}
+	}
+}
+
+// --- 官方段已砍：源序与配额 ---
+
+func TestOfficialLayerRemovedFromSourceOrder(t *testing.T) {
+	want := []string{"user", "subscription", "bestcf"}
+	if len(proxyCandidateSourceOrder) != len(want) {
+		t.Fatalf("source order = %v, want %v", proxyCandidateSourceOrder, want)
+	}
+	for i := range want {
+		if proxyCandidateSourceOrder[i] != want[i] {
+			t.Fatalf("source order = %v, want %v", proxyCandidateSourceOrder, want)
+		}
+	}
+}
+
+// --- worstPoolMember：末位保护 + 延迟最差优先 ---
+
+func TestWorstPoolMemberPrefersHighestLatency(t *testing.T) {
+	a := &app{}
+	got := a.worstPoolMember([]string{"1.1.1.1", "2.2.2.2", "3.3.3.3"})
+	if got != "3.3.3.3" {
+		t.Fatalf("no quality records: worst = %s, want last member", got)
+	}
+	if got := a.worstPoolMember([]string{"only.one"}); got != "only.one" {
+		t.Fatalf("single member pool: worst = %s", got)
+	}
+	if got := a.worstPoolMember(nil); got != "" {
+		t.Fatalf("empty pool: worst = %s", got)
 	}
 }
