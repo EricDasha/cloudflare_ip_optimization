@@ -75,8 +75,11 @@ Other thresholds:
 - **FailureThreshold**: 3 (3 consecutive failures before a line is failed; single jitter no longer flips the pool)
 - **MinimumSwitchInterval**: 30 minutes (prevent oscillation)
 - **Global pool-switch cooldown**: 30 minutes (`PROXY_POOL_SWITCH_COOLDOWN_MINUTES`), applies to both scheduler and full auto-apply; manual apply is exempt
-- **Active health gate**: if every active IP has successes and no failure inside the health window (`PROXY_ACTIVE_HEALTH_WINDOW_MINUTES`, default 60), automatic switches are refused
+- **Understaffed exemption**: when the pool shrinks below `PROXY_AUTO_MIN_POOL` (3), the cooldown no longer blocks switches (logged as waived, but not enforced) — backfill outranks anti-flapping. Added after four rapid manual kicks (5→1 IPs) left two passing full exams discarded by cooldown.
+- **Active health gate**: if every active IP has successes and no failure inside the health window (`PROXY_ACTIVE_HEALTH_WINDOW_MINUTES`, default 60), automatic switches are refused. NOTE: this gate does not consider pool size — a healthy single-member pool is still blocked from growing by the automatic path; growth then depends on the manual-apply path (exempt) or the kick-refill queue. Understaffed growth after cooldown waiver replaces the pool outright.
 - **Same-pool skip**: identical IP sets never restart cfnat
+- **Silent-exit audit rule**: any auto-apply exit that discards a passing exam MUST surface a message in the active-pool `Error` field (`setProxyPoolError`), not only in container logs. Exits that previously lied by silence (snapshot-changed abort, gate blockage) now report "保留旧池" with the reason, so the GUI toast reflects reality instead of a false "优选完成".
+- **Kick-refill queueing**: `refillPoolAfterKick` waits up to 3 minutes for an in-flight exam instead of silently yielding. It is a one-shot goroutine per kick — a silent yield loses the backfill forever, because the scheduler only *replaces* members and never grows the pool.
 
 When a Standby IP is promoted, the old Active IP demotes to Standby (preserved for future promotion).
 
