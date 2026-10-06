@@ -1155,6 +1155,7 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 	if latest := a.proxyCandidateSnapshot(); !latest.UpdatedAt.Equal(snapshot.UpdatedAt) {
 		// A source refresh completed while this expensive scan was running.
 		// Never let the old scan overwrite the newer candidate generation.
+		a.setProxyPoolError("候选在考试中途刷新，本轮结果已作废；保留旧池", results)
 		log.Printf("proxy auto apply skipped: candidate snapshot changed during scan")
 		return
 	}
@@ -1174,7 +1175,18 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 		return
 	}
 	// 全量终审换池同样受全局冷却保护，避免与 scheduler 互相顶池。
+	// （残员豁免：池缩到最小数之下时 allowPoolSwitch 放行补员，见函数注释。）
+	// 拦截必须写回 pool.Error——用户点的立即优选若被拦，前端靠它报信；
+	// 只打容器日志等于静默吞单（生产 17:41/17:53 两次"优选完成"假捷报即此）。
 	if !a.allowPoolSwitch(now, "auto-apply") {
+		poolGuard := a.poolGuardStatus()
+		var reason string
+		if next, ok := poolGuard["nextAllowedAt"].(string); ok && next != "" {
+			reason = fmt.Sprintf("自动换池被换池闸拦截，下轮放行约 %s；保留旧池", next)
+		} else {
+			reason = "自动换池被换池闸拦截；保留旧池"
+		}
+		a.setProxyPoolError(reason, results)
 		return
 	}
 	if err := a.applyProxyPool(pool, current); err != nil {
@@ -1728,19 +1740,31 @@ func (a *app) markPoolSwitched(now time.Time) {
 	a.poolGuardMu.Unlock()
 }
 
-// allowPoolSwitch 自动换池三道闸：
-// 1) 全局冷却未过 → 拒绝；2) 现生效池全部健康（近 N 次无失败）→ 拒绝顶池；
-// 3) 通过才允许换池。通过后调用方必须 markPoolSwitched。
+// allowPoolSwitch 自动换池三道半闸：
+// 1) 全局冷却未过 → 拒绝（残员豁免：池 < MinPool 时只走健康/数量闸，不空等）；
+// 2) 现生效池全部健康（近 N 次无失败）→ 拒绝顶池；
+// 3) 残员豁免：现池规模 < 自动换池最小数 → 放行（整池健康也不拦——残员补回优先）；
+// 通过才允许换池。通过后调用方必须 markPoolSwitched。
 func (a *app) allowPoolSwitch(now time.Time, reason string) bool {
+	current := a.proxyActivePoolSnapshot()
+	minPool := defaultProxyAutoConfig().MinPool
+	// 残员豁免先行：池缩到最小数之下时，冷却不再是拒绝理由——补员优先于防抖。
+	// 冷却日志照打（审计不断），但不再拦截。
+	understaffed := len(current.IPs) < minPool
 	cooldown := poolSwitchCooldown()
 	a.poolGuardMu.Lock()
 	last := a.lastPoolSwitchAt
 	a.poolGuardMu.Unlock()
-	if !last.IsZero() && now.Sub(last) < cooldown {
+	if !understaffed && !last.IsZero() && now.Sub(last) < cooldown {
 		log.Printf("pool switch blocked by cooldown (%s ago < %s): %s", now.Sub(last).Round(time.Second), cooldown, reason)
 		return false
 	}
-	current := a.proxyActivePoolSnapshot()
+	if understaffed && !last.IsZero() && now.Sub(last) < cooldown {
+		log.Printf("pool switch cooldown waived for understaffed pool (%d<%d IPs, %s ago < %s): %s", len(current.IPs), minPool, now.Sub(last).Round(time.Second), cooldown, reason)
+	}
+	if understaffed {
+		return true
+	}
 	if len(current.IPs) > 0 && a.activePoolHealthy(current.IPs) {
 		log.Printf("pool switch blocked: active pool healthy, keep working IPs (%s)", reason)
 		return false
@@ -2556,8 +2580,10 @@ func (a *app) refillPoolAfterKick() {
 		}
 		template = loaded
 	}
-	// 有考试在跑就静默让位（后台 15 分钟 optimizer 与六小时维护会兜底补池）。
-	if !a.proxyScanMu.TryLock() {
+	// 锁被占时排队等待而非静默让位：补位是一次性 goroutine，让位即永久丢失
+	// （调度器只顶换不增员，静默让位后池永远回不满）。最多等 3 分钟。
+	if !lockTimeout(&a.proxyScanMu, 3*time.Minute) {
+		log.Printf("kick refill abandoned: proxy scan busy for 3m")
 		return
 	}
 	defer a.proxyScanMu.Unlock()

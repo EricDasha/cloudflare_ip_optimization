@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -150,6 +151,45 @@ func TestActivePoolHealthRequiresFreshCheck(t *testing.T) {
 	a.activeHealth["203.0.113.1"] = &activeHealthStat{Success: 1, LastCheck: now}
 	if !a.activePoolHealthy([]string{"203.0.113.1"}) {
 		t.Fatal("fresh successful active health record was not accepted")
+	}
+}
+
+// 残员豁免：池缩到 MinPool 之下时冷却不再拦补员，且全员健康也不拦——
+// 生产教训：连踢 4 次池剩 1 员，后续两次通过终审的立即优选被冷却闸静默吞单。
+func TestAllowPoolSwitchWaivesUnderstaffedPool(t *testing.T) {
+	now := time.Now()
+	a := &app{
+		dataDir:      t.TempDir(),
+		activeHealth: map[string]*activeHealthStat{},
+		poolGuardMu:  sync.Mutex{},
+	}
+	a.activePool = proxyActivePool{UpdatedAt: now.Add(-time.Minute), Host: "h", Path: "/p", IPs: []string{"10.0.0.1"}}
+	a.markPoolSwitched(now) // 冷却进行中
+	// 残员（1 < MinPool=3）:放行
+	if !a.allowPoolSwitch(now.Add(time.Minute), "test-understaffed") {
+		t.Fatal("understaffed pool (1 < MinPool) was blocked by cooldown")
+	}
+	// 整池（≥ MinPool）:同条件必须拦——防抖闸本体仍在
+	a.activePool = proxyActivePool{UpdatedAt: now.Add(-time.Minute), Host: "h", Path: "/p", IPs: []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"}}
+	if a.allowPoolSwitch(now.Add(time.Minute), "test-fullpool") {
+		t.Fatal("full healthy-cooldown pool passed a switch it should block")
+	}
+}
+
+// 残员豁免不绕健康闸的语义反例：整池且健康 → 健康闸仍拦（冷却过后）。
+func TestAllowPoolSwitchHealthGateStillBlocksHealthyFullPool(t *testing.T) {
+	now := time.Now()
+	a := &app{
+		dataDir:      t.TempDir(),
+		activeHealth: map[string]*activeHealthStat{},
+	}
+	for _, ip := range []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"} {
+		a.activeHealth[ip] = &activeHealthStat{Success: 5, LastCheck: now}
+	}
+	a.activePool = proxyActivePool{UpdatedAt: now.Add(-time.Hour), Host: "h", Path: "/p", IPs: []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}}
+	a.lastPoolSwitchAt = now.Add(-time.Hour) // 冷却已过
+	if a.allowPoolSwitch(now, "test-healthgate") {
+		t.Fatal("all-healthy full pool was not blocked by health gate")
 	}
 }
 
