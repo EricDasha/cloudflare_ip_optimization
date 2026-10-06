@@ -588,6 +588,7 @@ type proxyCandidateSnapshot struct {
 	IPs              []string          `json:"ips"`
 	SourceByIP       map[string]string `json:"sourceByIp,omitempty"`
 	PreferredDomains []string          `json:"preferredDomains,omitempty"`
+	ForwardDomains   []string          `json:"forwardDomains,omitempty"`
 	Errors           []string          `json:"errors"`
 }
 
@@ -662,13 +663,30 @@ var proxyCandidateSources = map[string]proxyCandidateSource{
 			"https://cf.090227.xyz/cmcc?ips=8",
 		},
 	},
+	// bestcf 导航聚合的优选 IP 列表：`IP:端口#备注` 格式，extractPublicIPv4
+	// 按非数字点切分后端口与备注自然落网外，无需新解析器。源生死由维护者
+	// 决定，全部走 HTTPS 白名单校验，单个失败只记 sourceErrors 不拖垮刷新。
+	"bestcf": {
+		Name: "BestCF 优选 IP 列表",
+		URLs: []string{
+			"https://bestcf.pages.dev/cmliu/all.txt",
+			"https://bestcf.pages.dev/wetest/ipv4.txt",
+			"https://bestcf.pages.dev/cfyes/ipv4.txt",
+			"https://bestcf.pages.dev/vvhan/ipv4.txt",
+		},
+	},
 	"preferred-imported": {Name: "v2rayn 导入优选域名"},
 }
 
 var defaultProxyCandidateSourceIDs = []string{
-	// 社区候选源已停用；自动刷新只保留 090227 优选目录 API/域名。
+	// 社区候选源已停用；自动刷新保留 090227 优选目录 + bestcf 聚合列表。
 	"090227",
+	"bestcf",
 }
+
+// bestcfForwardDomainURL 是 bestcf 优选域名迷你列表（`域名:端口#备注` 格式）。
+// 域名作为一等公民进池（cfnat -fixed 拨号时活解析），绝不预解析成 IP。
+const bestcfForwardDomainURL = "https://bestcf.pages.dev/domain/mini.txt"
 
 func (a *app) runProxyCandidateRefreshLoop() {
 	a.refreshAndApplyProxyPool(context.Background())
@@ -1127,7 +1145,43 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 	if len(candidates) == 0 {
 		return
 	}
-	results := scanProxyWebSockets(parent, candidates, cfg)
+	// ---- 三层漏斗 ----
+	// 3层·初筛：全量候选做大规模 TCP/TLS RTT 测试（参考原项目 cfip/scan.go
+	// 的 runRTTTest 分层思想），高并发一次过，按延迟排序取前 N。
+	// 2层·精筛：仅对初筛短名单做 WS 101 精筛 + 可选 VLESS 数据面终审。
+	// 1层·在位：active pool 粘性分发（cfnat -sticky）。
+	prescreenConcurrency := envInt("PROXY_AUTO_PRESCREEN_CONCURRENCY", 200)
+	if prescreenConcurrency < 10 || prescreenConcurrency > 1000 {
+		prescreenConcurrency = 200
+	}
+	shortlistSize := envInt("PROXY_AUTO_SHORTLIST", 60)
+	if shortlistSize < cfg.PoolSize || shortlistSize > 500 {
+		shortlistSize = 60
+	}
+	shortlist := candidates
+	if len(candidates) > shortlistSize {
+		prescreenCfg := proxyScanConfig{
+			Host:        cfg.Host,
+			Port:        cfg.Port,
+			Concurrency: prescreenConcurrency,
+			MaxLatency:  cfg.MaxLatency,
+			TLS:         true,
+		}
+		// scanProxyIPs 返回按 (通过, 延迟升序) 排列；直接取延迟达标的前 N。
+		prescreen := scanProxyIPs(parent, candidates, prescreenCfg)
+		shortlist = make([]string, 0, shortlistSize)
+		for _, result := range prescreen {
+			if result.Error != "" {
+				continue
+			}
+			shortlist = append(shortlist, result.IP)
+			if len(shortlist) >= shortlistSize {
+				break
+			}
+		}
+		log.Printf("tier3 prescreen: %d candidates -> %d shortlist (rtt<=%dms)", len(candidates), len(shortlist), cfg.MaxLatency)
+	}
+	results := scanProxyWebSockets(parent, shortlist, cfg)
 	applyCandidateSourcePriority(results, snapshot.SourceByIP)
 	passed := make([]string, 0, cfg.PoolSize)
 	finalStage := "WS"
@@ -1160,7 +1214,7 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 		return
 	}
 	current := a.proxyActivePoolSnapshot()
-	domains := a.proxyForwardDomains()
+	domains := a.poolDomainMembers()
 	now := time.Now()
 	pool := proxyActivePool{UpdatedAt: now, Host: cfg.Host, Path: cfg.Path, IPs: passed, Domains: domains, Results: results}
 	if sameIPSet(current.IPs, passed) && sameStringSet(current.Domains, domains) {
@@ -1440,6 +1494,12 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 		}
 		appendGroup("proxy", community, communityQuota)
 	}
+	// bestcf 优选域名表：域名作为一等公民进池，绝不解析成 IP。
+	// 拉取失败只记 error，不影响 IP 候选。
+	forwardDomains := a.fetchBestcfForwardDomains(ctx)
+	if len(forwardDomains) == 0 {
+		sourceErrors = append(sourceErrors, "BestCF 优选域名表: 本次未获取到域名")
+	}
 	seen := make(map[string]struct{})
 	ips := make([]string, 0, len(resolved))
 	for _, raw := range resolved {
@@ -1478,6 +1538,7 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 		IPs:              ips,
 		SourceByIP:       sourceByIP,
 		PreferredDomains: a.enabledPreferredDomainsForCandidates(),
+		ForwardDomains:   forwardDomains,
 		Errors:           sourceErrors,
 	}
 	a.candidateMu.Lock()
@@ -2438,6 +2499,26 @@ func (a *app) handleProxyScanApply(w http.ResponseWriter, r *http.Request) {
 	}
 	seen := make(map[string]struct{})
 	ips := make([]string, 0, cfg.Limit)
+	// 域名一等公民轨：直接粘的优选域名（域名 / 域名:端口 / 域名:端口#备注）
+	// 不做任何 DNS 解析，直接进生效池 Domains，cfnat 拨号时活解析。
+	domains := make([]string, 0, maxForwardDomains)
+	addDomain := func(entry string) {
+		if at := strings.IndexAny(entry, "#＃"); at >= 0 {
+			entry = strings.TrimSpace(entry[:at])
+		}
+		if host, _, err := net.SplitHostPort(entry); err == nil {
+			entry = host
+		}
+		entry = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(entry)), ".")
+		if entry == "" || net.ParseIP(entry) != nil || !validCandidateHostname(entry) {
+			return
+		}
+		if _, ok := seen[entry]; ok || len(domains) >= maxForwardDomains {
+			return
+		}
+		seen[entry] = struct{}{}
+		domains = append(domains, entry)
+	}
 	addIP := func(raw string) {
 		ip := net.ParseIP(strings.TrimSpace(raw))
 		if !isPublicIPv4(ip) || len(ips) >= cfg.Limit {
@@ -2449,6 +2530,25 @@ func (a *app) handleProxyScanApply(w http.ResponseWriter, r *http.Request) {
 		}
 		seen[key] = struct{}{}
 		ips = append(ips, key)
+	}
+	// 粘贴文本逐行先走域名轨：域名行收为直连成员，其余走 IP/订阅链路。
+	for _, line := range strings.FieldsFunc(cfg.IPs, func(r rune) bool {
+		return r == '\n' || r == '\r'
+	}) {
+		entry := strings.TrimSpace(line)
+		if entry == "" {
+			continue
+		}
+		probe := entry
+		if at := strings.IndexAny(probe, "#＃"); at >= 0 {
+			probe = strings.TrimSpace(probe[:at])
+		}
+		if host, _, err := net.SplitHostPort(probe); err == nil {
+			probe = host
+		}
+		if net.ParseIP(probe) == nil && validCandidateHostname(probe) {
+			addDomain(entry)
+		}
 	}
 	for _, raw := range strings.FieldsFunc(cfg.IPs, func(r rune) bool { return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t' }) {
 		addIP(raw)
@@ -2469,26 +2569,38 @@ func (a *app) handleProxyScanApply(w http.ResponseWriter, r *http.Request) {
 			passed = append(passed, result.IP)
 		}
 	}
-	if len(passed) == 0 {
+	if len(passed) == 0 && len(domains) == 0 {
 		http.Error(w, "未通过任何 IP", http.StatusBadRequest)
 		return
 	}
 	current := a.proxyActivePoolSnapshot()
 	now := time.Now()
 	// 手动采用是最高优先级：用户显式点了采用，直接换池，不受冷却限制，
-	// 但同池仍跳过，避免无意义重启 cfnat。
-	if sameIPSet(current.IPs, passed) {
-		log.Printf("manual apply skipped: pool unchanged (%d IPs)", len(passed))
+	// 但同池仍跳过，避免无意义重启 cfnat。域名直连成员同理：粘贴的域名
+	// 并入现有域名（保留未提及的旧域名），不预解析、拨号时活解析。
+	mergedDomains := append([]string(nil), current.Domains...)
+	seenDomains := make(map[string]struct{}, len(mergedDomains)+len(domains))
+	for _, domain := range mergedDomains {
+		seenDomains[domain] = struct{}{}
+	}
+	for _, domain := range domains {
+		if _, ok := seenDomains[domain]; !ok {
+			mergedDomains = append(mergedDomains, domain)
+		}
+	}
+	if sameIPSet(current.IPs, passed) && sameStringSet(current.Domains, mergedDomains) {
+		log.Printf("manual apply skipped: pool unchanged (%d IPs, %d domains)", len(passed), len(mergedDomains))
 		writeJSON(w, map[string]any{"ok": true, "applied": 0, "unchanged": true})
 		return
 	}
-	pool := proxyActivePool{UpdatedAt: now, Host: current.Host, Path: current.Path, IPs: passed, Domains: current.Domains, Results: results}
+	pool := proxyActivePool{UpdatedAt: now, Host: current.Host, Path: current.Path, IPs: passed, Domains: mergedDomains, Results: results}
 	if err := a.applyProxyPool(pool, current); err != nil {
 		http.Error(w, "换池失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	a.markPoolSwitched(now)
-	writeJSON(w, map[string]any{"ok": true, "applied": len(passed)})
+	log.Printf("manual supply applied: %d IPs + %d domains", len(passed), len(domains))
+	writeJSON(w, map[string]any{"ok": true, "applied": len(passed), "domains": len(domains)})
 }
 
 // handleActiveKick 用户手动把某个在位 IP 踢出皇位（卡顿救火）：
@@ -2833,6 +2945,89 @@ func (a *app) proxyForwardDomains() []string {
 		if len(domains) >= maxForwardDomains {
 			break
 		}
+	}
+	return domains
+}
+
+// poolDomainMembers 生效池的域名直连成员（一等公民，cfnat -fixed 拨号时活解析）。
+// 合并来源：显式 PROXY_DOMAIN_FORWARD > bestcf 优选域名表（快照 ForwardDomains）> 启用的优选域名。
+// 上限 maxForwardDomains，去重保序，绝无预解析。
+func (a *app) poolDomainMembers() []string {
+	seen := map[string]struct{}{}
+	domains := make([]string, 0, maxForwardDomains)
+	add := func(domain string) {
+		if !validCandidateHostname(domain) {
+			return
+		}
+		if _, ok := seen[domain]; ok || len(domains) >= maxForwardDomains {
+			return
+		}
+		seen[domain] = struct{}{}
+		domains = append(domains, domain)
+	}
+	for _, domain := range envForwardDomains("PROXY_DOMAIN_FORWARD") {
+		add(domain)
+	}
+	snapshot := a.proxyCandidateSnapshot()
+	for _, domain := range snapshot.ForwardDomains {
+		add(domain)
+	}
+	if envBool("PROXY_AUTO_DOMAINS", false) {
+		for _, domain := range snapshot.PreferredDomains {
+			add(domain)
+		}
+	}
+	return domains
+}
+
+// fetchBestcfForwardDomains 拉取 bestcf 优选域名迷你表并解析出域名列表。
+// 输入格式 `域名:端口#备注`（与 bestcf.pages.dev/domain/mini.txt 一致），
+// 也兼容裸域名。只留主机名，端口与备注全部剥去；绝不解析 DNS。
+func (a *app) fetchBestcfForwardDomains(ctx context.Context) []string {
+	body, err := fetchHTTPSBody(ctx, bestcfForwardDomainURL)
+	if err != nil {
+		return nil
+	}
+	return extractForwardDomainList(string(body))
+}
+
+// extractForwardDomainList 从 `域名:端口#备注` / `IP:端口#备注` 混合文本中
+// 提取可转发域名。IP 行天然被 validCandidateHostname 排除（它是 IP 校验的
+// 反面：net.ParseIP 命中即弃）。
+func extractForwardDomainList(text string) []string {
+	seen := make(map[string]struct{})
+	domains := make([]string, 0, maxForwardDomains)
+	for _, line := range strings.FieldsFunc(text, func(r rune) bool {
+		return r == '\n' || r == '\r'
+	}) {
+		entry := strings.TrimSpace(line)
+		if entry == "" {
+			continue
+		}
+		if at := strings.IndexAny(entry, "#＃"); at >= 0 {
+			entry = strings.TrimSpace(entry[:at])
+		}
+		if host, _, err := net.SplitHostPort(entry); err == nil {
+			entry = host
+		} else if idx := strings.LastIndex(entry, ":"); idx >= 0 && !strings.Contains(entry, "]") {
+			// 无方括号的 尾端口 形式（example.com:443）
+			candidate := strings.TrimSpace(entry[:idx])
+			if _, err := strconv.Atoi(strings.TrimSpace(entry[idx+1:])); err == nil {
+				entry = candidate
+			}
+		}
+		entry = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(entry)), ".")
+		if entry == "" || net.ParseIP(entry) != nil || !validCandidateHostname(entry) {
+			continue
+		}
+		if _, ok := seen[entry]; ok {
+			continue
+		}
+		seen[entry] = struct{}{}
+		if len(domains) >= maxForwardDomains {
+			break
+		}
+		domains = append(domains, entry)
 	}
 	return domains
 }
