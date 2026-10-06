@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"math/rand"
@@ -76,6 +77,31 @@ func (m *IPManager) nextTargets(port, count int) []string {
 	return generateTargets(ips, port)
 }
 
+// nextTargetsForClient 按客户端来源做粘性分发：同一台设备的所有连接
+// 哈希到同一上游 IP（count>1 时其后目标按序排列，即拨号失败的回退顺序）。
+// clientHost 为空时退化为严格轮转。池成员变更后映射随代重排，属预期。
+func (m *IPManager) nextTargetsForClient(clientHost string, port, count int) []string {
+	if clientHost == "" {
+		return m.nextTargets(port, count)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if count <= 0 || len(m.ipAddresses) == 0 {
+		return nil
+	}
+	if count > len(m.ipAddresses) {
+		count = len(m.ipAddresses)
+	}
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(clientHost))
+	start := int(hash.Sum32() % uint32(len(m.ipAddresses)))
+	ips := make([]string, count)
+	for i := range ips {
+		ips[i] = m.ipAddresses[(start+i)%len(m.ipAddresses)]
+	}
+	return generateTargets(ips, port)
+}
+
 type result struct {
 	ip          string        // IP地址
 	dataCenter  string        // 数据中心
@@ -108,6 +134,7 @@ func main() {
 	num := flag.Int("num", 1, "单连接拨号失败时按顺序尝试的目标数量")
 	port := flag.Int("port", 443, "转发的目标端口")
 	random := flag.Bool("random", true, "是否随机生成IP，如果为false，则从CIDR中拆分出所有IP")
+	sticky := flag.Bool("sticky", true, "设备粘性：同一客户端 IP 的所有连接固定走同一上游（拨号失败才顺延）")
 	maxThreads := flag.Int("task", 100, "并发请求最大协程数")
 	useTLS := flag.Bool("tls", true, "是否为 TLS 端口")
 
@@ -304,7 +331,14 @@ func main() {
 			log.Printf("客户端来源: %s 连接建立，当前活跃连接数: %d", clientAddr, atomic.LoadInt32(&activeConnections))
 			// 多目标参数仅作为“失败时按顺序回退”，不再并发竞速，
 			// 从而保证一次前端逻辑连接只产生一个真实上游会话。
-			primary := ipManager.nextTargets(*port, *num)
+			// 粘性模式：同设备所有连接哈希到同一上游；拨号失败按序回退不变。
+			clientHost, _, _ := net.SplitHostPort(clientAddr)
+			var primary []string
+			if *sticky {
+				primary = ipManager.nextTargetsForClient(clientHost, *port, *num)
+			} else {
+				primary = ipManager.nextTargets(*port, *num)
+			}
 			var fallback []string
 			if fallbackManager != nil {
 				fallback = fallbackManager.nextTargets(*port, 1)

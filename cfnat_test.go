@@ -30,6 +30,73 @@ func TestIPManagerNextTargetsRoundRobin(t *testing.T) {
 	}
 }
 
+func TestIPManagerStickySameClientSameUpstream(t *testing.T) {
+	m := NewIPManager()
+	m.SetIPAddresses([]string{"192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4"})
+
+	first := m.nextTargetsForClient("192.168.1.11", 443, 1)
+	if len(first) != 1 {
+		t.Fatalf("expected 1 target, got %v", first)
+	}
+	// 同一设备多次连接（含并发语义）必须命中同一上游。
+	for range 10 {
+		again := m.nextTargetsForClient("192.168.1.11", 443, 1)
+		if !reflect.DeepEqual(again, first) {
+			t.Fatalf("sticky broken: first=%v again=%v", first, again)
+		}
+	}
+	// 不推进轮转指针：粘性分发不干扰 Round-Robin 状态。
+	if got := m.nextTargets(443, 1); !reflect.DeepEqual(got, []string{"192.0.2.1:443"}) {
+		t.Fatalf("sticky advanced round-robin cursor: %v", got)
+	}
+}
+
+func TestIPManagerStickyDifferentClientsSpread(t *testing.T) {
+	m := NewIPManager()
+	m.SetIPAddresses([]string{"192.0.2.1", "192.0.2.2", "192.0.2.3"})
+
+	seen := map[string]string{}
+	for _, client := range []string{"192.168.1.11", "192.168.1.12", "192.168.1.13", "192.168.1.14"} {
+		targets := m.nextTargetsForClient(client, 443, 1)
+		if len(targets) != 1 {
+			t.Fatalf("client %s: expected 1 target, got %v", client, targets)
+		}
+		seen[client] = targets[0]
+	}
+	distinct := map[string]struct{}{}
+	for _, target := range seen {
+		distinct[target] = struct{}{}
+	}
+	if len(distinct) < 2 {
+		t.Fatalf("4 clients all hashed to one upstream: %v", seen)
+	}
+}
+
+func TestIPManagerStickyFallbackOrderKept(t *testing.T) {
+	m := NewIPManager()
+	m.SetIPAddresses([]string{"192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4"})
+
+	targets := m.nextTargetsForClient("192.168.1.50", 443, 3)
+	if len(targets) != 3 {
+		t.Fatalf("expected 3 fallback targets, got %v", targets)
+	}
+	// 回退顺序必须是从粘性锚点起的连续序列。
+	start := targets[0]
+	rest := m.nextTargetsForClient("192.168.1.50", 443, 3)
+	if !reflect.DeepEqual(targets, rest) {
+		t.Fatalf("sticky fallback order unstable: %v vs %v", targets, rest)
+	}
+	_ = start
+}
+
+func TestIPManagerStickyEmptyClientFallsBackToRoundRobin(t *testing.T) {
+	m := NewIPManager()
+	m.SetIPAddresses([]string{"192.0.2.1", "192.0.2.2"})
+	if got := m.nextTargetsForClient("", 443, 1); !reflect.DeepEqual(got, []string{"192.0.2.1:443"}) {
+		t.Fatalf("empty client should use round-robin start, got %v", got)
+	}
+}
+
 func TestIPManagerNextTargetsLimitsToPool(t *testing.T) {
 	m := NewIPManager()
 	m.SetIPAddresses([]string{"2001:db8::1", "2001:db8::2"})
