@@ -79,6 +79,29 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .top-status { display: flex; align-items: center; gap: var(--s2); color: var(--text-2); font-size: 13px; }
 .state-label { min-width: 48px; }
 
+/* ---------- 页签导航（多页制） ---------- */
+.pagenav { display: flex; align-items: center; gap: var(--s1); margin-left: var(--s4); }
+.pagenav-link {
+  padding: 6px 14px; border-radius: var(--radius-sm);
+  color: var(--text-2); text-decoration: none; font-size: 13px;
+  border: 1px solid transparent;
+  transition: background .15s ease, color .15s ease;
+}
+.pagenav-link:hover { color: var(--text-1); background: var(--accent-soft); }
+.pagenav-link.active {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border-color: var(--line);
+}
+.kick.probe, .kick.promote {
+  min-width: 34px;
+  font-size: 12px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+.kick.promote { background: rgb(74 222 128 / .16); color: rgb(134 239 172); }
+.kick.probe:disabled, .kick.promote:disabled, .kick:disabled { opacity: .5; cursor: wait; }
+
 .pulse {
   display: inline-block; width: 10px; height: 10px; border-radius: 50%;
   background: var(--text-3);

@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="dark" />
     <link rel="icon" href="data:," />
     <title>Cloudflare 优选台</title>
-    <link rel="stylesheet" href="/styles.css?v=20261003a" />
+    <link rel="stylesheet" href="/styles.css?v=20261007a" />
   </head>
   <body>
     <header class="topbar">
@@ -17,6 +17,11 @@
           <small id="topbarSub">转发状态读取中</small>
         </div>
       </div>
+      <nav class="pagenav" aria-label="页面">
+        <a href="#/" class="pagenav-link" data-page="home">主页</a>
+        <a href="#/supply" class="pagenav-link" data-page="supply">供给</a>
+        <a href="#/logs" class="pagenav-link" data-page="logs">日志</a>
+      </nav>
       <div class="top-status">
         <span class="pulse" id="cfnatPulse" title="CFnat 进程"></span>
         <span id="cfnatState" class="state-label">…</span>
@@ -24,80 +29,96 @@
     </header>
 
     <main class="stage">
-      <!-- 在位皇族：唯一主角 -->
-      <section class="hero-card" aria-label="生效池">
-        <div class="hero-head">
-          <div>
-            <p class="overline">ACTIVE POOL · 在位皇族</p>
-            <h1 id="poolHeadline">读取中…</h1>
+      <!-- ============ 页一：主页（在位 + 池候选 + 手动体检/顶替） ============ -->
+      <section class="page" id="page-home" aria-label="主页">
+        <section class="hero-card" aria-label="生效池">
+          <div class="hero-head">
+            <div>
+              <p class="overline">TIER 1 · 正在工作</p>
+              <h1 id="poolHeadline">读取中…</h1>
+            </div>
+            <div class="hero-actions">
+              <button class="btn primary" id="optimizeBtn" type="button">
+                <span class="spin" aria-hidden="true"></span><span id="optimizeLabel">立即优选</span>
+              </button>
+            </div>
           </div>
-          <div class="hero-actions">
-            <button class="btn primary" id="optimizeBtn" type="button">
-              <span class="spin" aria-hidden="true"></span><span id="optimizeLabel">立即优选</span>
+          <div id="poolRows" class="pool-rows" aria-live="polite"></div>
+          <p class="hero-foot" id="poolFoot"></p>
+        </section>
+
+        <section class="hero-card" aria-label="池候选">
+          <div class="hero-head">
+            <div>
+              <p class="overline">POOL · 候选池精选</p>
+              <h2 id="benchHead">前 24 名候选</h2>
+            </div>
+            <div class="hero-actions">
+              <button class="linklike" id="benchRefresh" type="button">刷新</button>
+            </div>
+          </div>
+          <div id="benchRows" class="pool-rows" aria-live="polite"></div>
+          <p class="hero-foot" id="benchFoot">按延迟排序；「顶替」= 体检通过后换掉在位最差成员。</p>
+        </section>
+      </section>
+
+      <!-- ============ 页二：供给（手动入池 + 源心跳 + 设备） ============ -->
+      <section class="page" id="page-supply" aria-label="供给" hidden>
+        <section class="supply-card" aria-label="手动供 IP">
+          <div class="supply-head">
+            <div>
+              <p class="overline">MANUAL SUPPLY · 手动供 IP</p>
+              <h2>粘贴 IP / 域名 / 订阅内容，通过考试直接登基</h2>
+            </div>
+          </div>
+          <div class="supply-row">
+            <textarea id="supplyInput" rows="3"
+              placeholder="1.2.3.4, 5.6.7.8&#10;优选域名直接用不解析&#10;或 vless://… 节点链接 / Clash 配置 / base64 订阅"></textarea>
+            <button class="btn accent" id="supplyBtn" type="button">
+              <span class="spin" aria-hidden="true"></span><span id="supplyLabel">优选入池</span>
             </button>
           </div>
-        </div>
-        <div id="poolRows" class="pool-rows" aria-live="polite"></div>
-        <p class="hero-foot" id="poolFoot"></p>
-      </section>
+          <p class="supply-note" id="supplyNote">域名一行一个（可带 :端口 与 #备注）；优选按 .env 里的节点参数自动考试。</p>
+        </section>
 
-      <!-- 手动供 IP：唯一输入 -->
-      <section class="supply-card" aria-label="手动供 IP">
-        <div class="supply-head">
-          <div>
-            <p class="overline">MANUAL SUPPLY · 手动供 IP</p>
-            <h2>粘贴 IP / 域名 / 订阅内容，通过考试直接登基</h2>
+        <section class="pulse-line" aria-label="供给心跳">
+          <div class="pulse-beacons" id="sourceBeacons"></div>
+          <div class="pulse-meta">
+            <span id="nextRefresh">下次自动优选 --</span>
+            <span class="dot">·</span>
+            <span id="lanPeers">局域网 -- 设备</span>
           </div>
-        </div>
-        <div class="supply-row">
-          <textarea id="supplyInput" rows="3"
-            placeholder="1.2.3.4, 5.6.7.8&#10;或 vless://… 节点链接 / Clash 配置 / base64 订阅"></textarea>
-          <button class="btn accent" id="supplyBtn" type="button">
-            <span class="spin" aria-hidden="true"></span><span id="supplyLabel">优选入池</span>
-          </button>
-        </div>
-        <p class="supply-note" id="supplyNote">留空并点击可清空输入；优选按 .env 里的节点参数自动考试。</p>
+        </section>
+
+        <section class="log-drawer" id="lanDrawer" aria-label="局域网设备">
+          <div class="table-wrap"><table>
+            <thead><tr><th>局域网设备</th><th>连接数</th><th>TCP 状态</th></tr></thead>
+            <tbody id="lanTableBody"><tr><td colspan="3" class="inline-status">尚未查询</td></tr></tbody>
+          </table></div>
+        </section>
       </section>
 
-      <!-- 自动化心跳 -->
-      <section class="pulse-line" aria-label="自动化状态">
-        <div class="pulse-beacons" id="sourceBeacons"></div>
-        <div class="pulse-meta">
-          <span id="nextRefresh">下次自动优选 --</span>
-          <span class="dot">·</span>
-          <span id="lanPeers">局域网 -- 设备</span>
-          <button class="linklike" id="lanToggle" type="button" aria-expanded="false">设备</button>
-          <button class="linklike" id="logToggle" type="button" aria-expanded="false">日志</button>
-        </div>
+      <!-- ============ 页三：日志 ============ -->
+      <section class="page" id="page-logs" aria-label="日志" hidden>
+        <section class="log-drawer" id="logDrawer" aria-label="日志">
+          <div class="log-toolbar">
+            <select id="logTarget" aria-label="日志进程">
+              <option value="cfnat">CFnat</option>
+              <option value="cfdata">CFdata</option>
+            </select>
+            <input id="logQuery" type="search" placeholder="筛选" aria-label="筛选日志" />
+            <label class="toggle"><input id="logFollow" type="checkbox" checked />跟随</label>
+            <button class="btn ghost small" id="logCopy" type="button">复制</button>
+          </div>
+          <pre id="logBox" class="term" role="log" aria-live="polite"></pre>
+        </section>
       </section>
 
-      <!-- 局域网设备明细（cfnat 为四层哑管道，TLS 加密后无 UA 可读，设备识别以 IP 为准） -->
-      <section class="log-drawer" id="lanDrawer" hidden>
-        <div class="table-wrap"><table>
-          <thead><tr><th>局域网设备</th><th>连接数</th><th>TCP 状态</th></tr></thead>
-          <tbody id="lanTableBody"><tr><td colspan="3" class="inline-status">尚未查询</td></tr></tbody>
-        </table></div>
-      </section>
-
-      <!-- 日志抽屉（默认收起） -->
-      <section class="log-drawer" id="logDrawer" hidden>
-        <div class="log-toolbar">
-          <select id="logTarget" aria-label="日志进程">
-            <option value="cfnat">CFnat</option>
-            <option value="cfdata">CFdata</option>
-          </select>
-          <input id="logQuery" type="search" placeholder="筛选" aria-label="筛选日志" />
-          <label class="toggle"><input id="logFollow" type="checkbox" checked />跟随</label>
-          <button class="btn ghost small" id="logCopy" type="button">复制</button>
-        </div>
-        <pre id="logBox" class="term" role="log" aria-live="polite"></pre>
-      </section>
-
-      <footer class="foot">Cloudflare 优选台 · 候选刷新与换池由环境配置控制 · <span id="footClock">--</span></footer>
+      <footer class="foot">Cloudflare 优选台 · 三层漏斗 + 设备粘性 · <span id="footClock">--</span></footer>
     </main>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="/runtime.js?v=20261003a"></script>
-    <script src="/app.js?v=20261004a"></script>
+    <script src="/runtime.js?v=20261007a"></script>
+    <script src="/app.js?v=20261007a"></script>
   </body>
 </html>
