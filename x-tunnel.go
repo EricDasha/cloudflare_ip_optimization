@@ -1,3 +1,10 @@
+//go:build ignore
+
+// 停用：EdgeTunnel 实验代码，依赖 uuid / gorilla-websocket / xtaci/smux 三包，
+// 这三个依赖从未进入 go.mod，导致 `go build ./...` 与 `go vet ./...` 必然失败。
+// 保留文件仅为历史参考（副本见 original/x-tunnel.go），不参与任何构建。
+// 如要复活：go get github.com/google/uuid github.com/gorilla/websocket github.com/xtaci/smux
+// 后再移除本标签。
 package main
 
 import (

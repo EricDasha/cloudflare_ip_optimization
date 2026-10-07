@@ -16,7 +16,8 @@ The Web layer orchestrates these binaries. It does not duplicate their scanning 
 The optimizer maintains three pools with different test costs and lifecycles:
 
 ### 1. Candidate Pool (候选池)
-- **Sources**: User IPs > Subscription Feed > Official CF CIDR Sampling > enabled community sources (each layer quota-capped; see Source Quotas)
+- **Sources**: User IPs > Subscription Feed > bestcf tables (each
+  layer quota-capped; see Source Quotas)
 - **Test**: Low-cost TCP/TLS latency screening
 - **Size**: Large (hundreds to thousands)
 - **Purpose**: Fast discovery of potentially usable IPs
@@ -88,27 +89,37 @@ When a Standby IP is promoted, the old Active IP demotes to Standby (preserved f
 Source priority determines **when** IPs are tested (ingestion order on ties), not their final performance ranking:
 
 1. **User** (manual IPs, `PROXY_USER_CANDIDATES`, manual apply) - Tested first, highest priority
-2. **Subscription** (daily third-party maintainer feed, WS-verified into `subscription-pool.json`) - Tested second
-3. **Official** (CF CIDR sampling) - Tested third
-4. **Community** (enabled allowlisted DNS/API sources) - Last expansion layer
+2. **Subscription** (third-party maintainer feed, WS-verified into `subscription-pool.json`) - Tested second
+3. **bestcf** (the merged bestcf table: IP lists, ISP feeds, and mirrors) - the expansion layer
 
-Preferred domains are not a candidate source: they are promoted directly to cfnat `-fixed` members with dial-time DNS. CFdata is a manual push source only.
+Preferred domains are not a candidate source: they are promoted directly to cfnat `-fixed` members with dial-time DNS. CFdata is a manual push source only. The official Cloudflare CIDR sampling layer was **removed** (user directive) — `PROXY_OFFICIAL_CANDIDATES` is no longer read.
 
 ### Source Quotas (anti-monopoly)
 
 Priority alone does not stop one source from eating the whole pool — production once showed `subscription 1000/1000, official 0, proxy 0`. Each refresh therefore applies per-source quotas (ingestion still runs in priority order, so ties go to the higher tier):
 
-| Layer | Quota |
-|---|---|
-| user | ≤ 100 |
-| subscription | ≤ 600, and must yield to the floors below |
-| official | ≥ 150 floor (default `PROXY_OFFICIAL_CANDIDATES`) |
-| proxy (community) | ≥ 150 floor, absorbs remaining capacity |
-| **total** | **≤ 1000** (`candidatePoolTotalCap`, equals the sum of quotas) |
+| Layer | Quota | Constant |
+|---|---|---|
+| user | ≤ 100 | `userCandidatesCap` |
+| subscription | ≤ 600 | `subscriptionCandidatesCap` |
+| bestcf | ≥ 300 floor, absorbs remaining capacity | `bestcfCandidatesFloor` |
+| **total** | **≤ 1000** | `candidatePoolTotalCap` |
 
-`subscriptionQuota = min(600, 1000 - used - officialFloor - proxyFloor)` makes it mathematically impossible for the subscription layer to starve the floor layers.
+`subscriptionQuota = min(600, total - used - bestcfFloor)` makes it mathematically impossible for the subscription layer to starve the bestcf floor.
 
 The actual Active Pool selection is based on measured performance (Mbps, latency, stability), not source priority.
+
+## Repository Layout
+
+The repository root is a **set of single-file `main` programs**, not a buildable package:
+
+| File | Built by | Notes |
+|---|---|---|
+| `cfnat.go` | `go build cfnat.go` | the forwarder; `cfnat_test.go` runs via `go test cfnat.go cfnat_test.go` |
+| `cfdata.go` | `go build cfdata.go` | manual IP discovery scanner |
+| `x-tunnel.go` | never | **disabled** — depends on uuid / gorilla-websocket / xtaci/smux, which are absent from `go.mod` |
+
+All root files carry `//go:build ignore`, because otherwise `go build ./...` fails on duplicate `main`/`location` declarations (and on `x-tunnel.go`'s missing imports). `go build ./...` therefore only compiles `./web`, which is where the web console lives.
 
 ## CFdata Manual-Only
 
@@ -192,9 +203,14 @@ Logs live in a collapsed drawer. There are no routes, no config forms, no advanc
 - `PROXY_CFDATA_BACKGROUND_ENABLED/MINUTES/TIMEOUT`, `PROXY_CFDATA_SIFT_COUNT`: no longer read; CFdata runs only on explicit user trigger
 
 ### Preferred Domains (fixed-member dial + optional fallback)
-- `PROXY_PREFERRED_MAX_DOMAINS`: cap on enabled preferred domains (default: 20)
+- `PROXY_PREFERRED_MAX_DOMAINS`: cap on enabled preferred domains (default: 20). The hard code constant is `maxForwardDomains = 12`.
 - `PROXY_PREFERRED_RESOLVE`, `PROXY_PREFERRED_IPS_PER_DOMAIN`, `PROXY_PREFERRED_RESOLVED_CANDIDATES`: deprecated, no longer read (C-zone resolve-supply was removed; domains dial as `-fixed` members with live DNS)
 - `PROXY_PREFERRED_PROBE_MINUTES`, `PROXY_DYNAMIC_DISCOVERY`: deprecated, no longer read
+
+### VLESS Data-Plane Probe
+- `PROXY_VLESS_PROBE`: enable the real sing-box data-plane check (default: false)
+- `PROXY_VLESS_TEST_URL`: liveness URL through the tunnel (default: `https://www.gstatic.com/generate_204`, expects 204)
+- `PROXY_VLESS_SPEED_URL`: **speed-test download endpoint** (default: `https://speed.cloudflare.com/__down?bytes={bytes}`). The `{bytes}` placeholder is substituted with `PROXY_VLESS_SPEED_BYTES`. Override this when the tunnel cannot finish the default endpoint inside `PROXY_VLESS_SPEED_TIMEOUT` — measured from production, `speed.cloudflare.com` is reachable directly (~5.5 Mbps) but routinely exceeds the budget through the VLESS→WS→TLS tunnel.
 
 ### Quality Scheduler
 - `PROXY_SCHEDULER_APPLY`: Enable automatic pool switching (default: true)

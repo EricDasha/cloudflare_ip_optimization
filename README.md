@@ -123,7 +123,7 @@ CFdata 彻底手动化：无后台自启动、无定时扫描；只在用户显�
 
 Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨在 Active 上位后一个探测周期内即可开判。
 
-**候选源配额（防单源垄断）**：刷新按优先序灌入但每层封顶——`user ≤100`、`subscription ≤600`（须为保底让位）、`official ≥150`、`proxy ≥150`（吸收余量），总池 ≤1000。`subscriptionQuota = min(600, 1000 - 已用 - official保底 - proxy保底)`，订阅层在数学上吃不光保底层。
+**候选源配额（防单源垄断）**：刷新按优先序灌入但每层封顶——`user ≤100`、`subscription ≤600`（须为保底让位）、`bestcf ≥300`（吸收余量），总池 ≤1000。`subscriptionQuota = min(600, 1000 - 已用 - bestcf保底)`，订阅层在数学上吃不光保底层。官方 Cloudflare CIDR 采样层已下线（`PROXY_OFFICIAL_CANDIDATES` 不再读取）。
 
 ### VLESS 探针模板
 
@@ -177,7 +177,7 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 | `PROXY_AUTO_DOMAINS` | 优选域名并入 cfnat 兜底转发（-fallback） | `false`（Compose 为 `true`） |
 | `PROXY_PREFERRED_RESOLVE` / `PROXY_PREFERRED_IPS_PER_DOMAIN` / `PROXY_PREFERRED_RESOLVED_CANDIDATES` | 已废弃不再读取（优选域名直接做 `-fixed` 成员活解析） | -- |
 | `PROXY_CFDATA_CANDIDATES` | 已废弃不再读取（cfdata 不再供候选） | -- |
-| `PROXY_OFFICIAL_CANDIDATES` | 从 Cloudflare 官方 CIDR 均匀抽样的候选数 | `150` |
+| `PROXY_OFFICIAL_CANDIDATES` | 已废弃不再读取（官方 CIDR 采样层已下线） | -- |
 | `PROXY_USER_CANDIDATES` | 用户指定的公网 IPv4，逗号或空白分隔 | 空 |
 | `PROXY_BACKGROUND_OPTIMIZER` | 是否启用低占用后台轮转优选 | `true` |
 | `PROXY_SCHEDULER_APPLY` | 调度器是否允许自动换池（仍需 `PROXY_AUTO_APPLY=true`） | `true` |

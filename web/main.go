@@ -953,7 +953,7 @@ func rankVLESSPassesBySpeedWithProbe(
 	if speedTimeout < 5 || speedTimeout > 120 {
 		speedTimeout = 20
 	}
-	speedCfg.TestURL = fmt.Sprintf("https://speed.cloudflare.com/__down?bytes=%d", speedBytes)
+	speedCfg.TestURL = vlessSpeedTestURL(speedBytes)
 	speedCfg.ExpectedStatus = http.StatusOK
 	speedCfg.ReadLimit = int64(speedBytes)
 	speedCfg.MinBytes = int64(speedBytes)
@@ -2677,7 +2677,7 @@ func (a *app) handleProxyProbe(w http.ResponseWriter, r *http.Request) {
 			if speedBytes < 1048576 || speedBytes > 33554432 {
 				speedBytes = 2097152
 			}
-			speedCfg.TestURL = fmt.Sprintf("https://speed.cloudflare.com/__down?bytes=%d", speedBytes)
+			speedCfg.TestURL = vlessSpeedTestURL(speedBytes)
 			speedCfg.ExpectedStatus = http.StatusOK
 			speedCfg.ReadLimit = int64(speedBytes)
 			speedCfg.MinBytes = int64(speedBytes)
@@ -3682,7 +3682,7 @@ func (a *app) knownResultIP(ip string) bool {
 }
 
 func downloadSpeedViaCloudflareIP(ctx context.Context, ip string, size int) (map[string]any, error) {
-	host := "speed.cloudflare.com"
+	host := defaultVLESSSpeedHost
 	dialer := &net.Dialer{Timeout: 8 * time.Second}
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12},

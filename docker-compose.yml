@@ -34,7 +34,7 @@ services:
       CFNAT_CODE: "200"
 
       # 每 6 小时以实际 Host + WebSocket path 终审候选；至少 3 个通过才替换固定池。
-      PROXY_AUTO_APPLY: "true"
+      PROXY_AUTO_APPLY: "${PROXY_AUTO_APPLY:-true}"
       PROXY_AUTO_HOST: "${PROXY_AUTO_HOST:?set PROXY_AUTO_HOST in .env}"
       PROXY_AUTO_PATH: "${PROXY_AUTO_PATH:?set PROXY_AUTO_PATH in .env}"
       PROXY_AUTO_PORT: "443"
@@ -47,14 +47,13 @@ services:
       # 优选域名兜底转发：置 true 时把已启用的优选域名并入 cfnat -fallback
       # （上限 12 个），仅在固定 IP 池全部拨号失败时才直连域名，不解析不探测。
       PROXY_AUTO_DOMAINS: "true"
-      # 优选域名按延迟排序后仅取前 N 个合入候选池，避免过度依赖优选域名。
+      # 优选域名入池上限（代码常量 maxForwardDomains=12，此处仅可下调）。
       PROXY_PREFERRED_MAX_DOMAINS: "20"
-      # C 区：优选域名解析供给——解析产物入候选层，覆盖 baipiao 上游供给位。
-      PROXY_PREFERRED_RESOLVE: "true"
-      PROXY_PREFERRED_IPS_PER_DOMAIN: "4"
-      PROXY_PREFERRED_RESOLVED_CANDIDATES: "64"
-      PROXY_CFDATA_CANDIDATES: "300"
-      PROXY_OFFICIAL_CANDIDATES: "150"
+      # 已停用、不再被代码读取（保留会误导运维，此处显式留空记录）：
+      #   PROXY_PREFERRED_RESOLVE / PROXY_PREFERRED_IPS_PER_DOMAIN /
+      #   PROXY_PREFERRED_RESOLVED_CANDIDATES  —— C 区解析供给已拆，域名活解析直连
+      #   PROXY_CFDATA_CANDIDATES                  —— cfdata 手动化，供给走订阅+bestcf
+      #   PROXY_OFFICIAL_CANDIDATES                —— 官方 CIDR 层已砍
       PROXY_USER_CANDIDATES: "${PROXY_USER_CANDIDATES:-}"
       # 低占用后台轮测：每 5 分钟取 12 个候选，并发 4；GUI 可关闭并持久化。
       PROXY_BACKGROUND_OPTIMIZER: "true"

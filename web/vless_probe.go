@@ -33,10 +33,29 @@ type vlessProbeConfig struct {
 	MinBytes       int64
 }
 
+// defaultVLESSSpeedHost 是 VLESS 测速的默认下载主机（Cloudflare 官方测速端点）。
+const defaultVLESSSpeedHost = "speed.cloudflare.com"
+
 type vlessProbeMetrics struct {
 	Bytes    int64
 	Duration time.Duration
 	Mbps     float64
+}
+
+// vlessSpeedTestURL 决定 VLESS 数据面测速的下载端点。
+//
+// 默认 speed.cloudflare.com：从生产容器直连时可达（实测约 5.5 Mbps），
+// 但经 sing-box 隧道（VLESS→WS→TLS→目标）常在 20s 预算内跑不完而超时。
+// 故支持 PROXY_VLESS_SPEED_URL 覆盖；其中 {bytes} 会被替换为实际请求字节数。
+func vlessSpeedTestURL(size int) string {
+	candidate := strings.TrimSpace(env("PROXY_VLESS_SPEED_URL", ""))
+	if candidate == "" {
+		candidate = "https://" + defaultVLESSSpeedHost + "/__down?bytes={bytes}"
+	}
+	if !strings.Contains(candidate, "{bytes}") {
+		return candidate
+	}
+	return strings.ReplaceAll(candidate, "{bytes}", strconv.Itoa(size))
 }
 
 func defaultVLESSProbeConfig() vlessProbeConfig {

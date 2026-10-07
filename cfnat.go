@@ -1,3 +1,8 @@
+//go:build ignore
+
+// 独立 main 程序：只用 `go build cfnat.go` 单独构建（见 scripts/build-dist.ps1）。
+// 本文件与 cfdata.go 都声明 func main，若不加此标签，`go build ./...` 会因
+// main/location 重复声明而失败，也会连带编译到 x-tunnel.go 的缺失依赖。
 package main
 
 import (

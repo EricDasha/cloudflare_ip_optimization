@@ -1,3 +1,6 @@
+//go:build ignore
+
+// cfnat.go 的单元测试，用 `go test cfnat.go cfnat_test.go` 显式运行。
 package main
 
 import (

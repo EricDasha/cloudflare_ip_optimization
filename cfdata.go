@@ -1,3 +1,7 @@
+//go:build ignore
+
+// 独立 main 程序：只用 `go build cfdata.go` 单独构建（见 scripts/build-dist.ps1）。
+// 理由同 cfnat.go：本目录是多个单文件 main 的集合，不可作为 ./... 包编译。
 package main
 
 import (
