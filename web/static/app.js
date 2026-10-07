@@ -393,7 +393,12 @@
   /* ---------- 动作四：单 IP 顶替 ---------- */
   async function promoteIP(ip, button) {
     if (!window.confirm(`让 ${ip} 顶替在位最差成员？\n体检通过即换座，立即生效。`)) return;
-    button.disabled = true;
+    await doPromote(ip, button);
+  }
+
+  // doPromote 是顶替的实际动作，供 B 榜按钮与「指定登基」输入框共用。
+  async function doPromote(ip, button) {
+    if (button) button.disabled = true;
     invalidatePoll("pool");
     invalidatePoll("status");
     invalidatePoll("upstreams");
@@ -406,8 +411,33 @@
         ? `${ip} 已在位，无需顶替`
         : `${ip} 已顶替 ${data.replaced} 登基`);
       await Promise.allSettled([pullPool(), pullUpstreams()]);
+      return true;
     } catch (e) {
       toast(`顶替失败：${e.message}`);
+      return false;
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  /* ---------- 动作四之一：指定任意 IP 登基 ---------- */
+  async function pinSpecifiedIP() {
+    const input = $("pinIp");
+    const button = $("pinBtn");
+    const ip = input.value.trim();
+    if (!ip) {
+      toast("先填一个公网 IPv4");
+      input.focus();
+      return;
+    }
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
+      toast("格式不对，要 IPv4 四段，如 104.16.0.1");
+      return;
+    }
+    button.disabled = true;
+    try {
+      const ok = await doPromote(ip, null);
+      if (ok) input.value = "";
     } finally {
       button.disabled = false;
     }
@@ -458,6 +488,10 @@
   $("optimizeBtn").addEventListener("click", optimize);
   $("supplyBtn").addEventListener("click", supply);
   $("benchRefresh").addEventListener("click", pullPool);
+  $("pinBtn").addEventListener("click", pinSpecifiedIP);
+  $("pinIp").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") pinSpecifiedIP();
+  });
   $("logTarget").addEventListener("change", pullLogs);
   $("logQuery").addEventListener("input", renderLogs);
   $("logCopy").addEventListener("click", async () => {

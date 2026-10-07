@@ -213,6 +213,16 @@ h2 { font-size: 15px; line-height: 1.35; color: var(--text-2); font-weight: 600;
 .btn.ghost:hover { color: var(--text); background: rgb(255 255 255 / .06); }
 .btn.small { min-height: 36px; font-size: 12px; }
 .btn:disabled { cursor: wait; opacity: .55; }
+
+/* 指定 IP 登基：候选池之外也能手动点名 */
+.pin-input {
+  width: 210px; min-height: 36px; padding: var(--s2) var(--s3);
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  color: var(--text); background: var(--surface-2);
+  font: 13px/1.4 var(--font-mono);
+}
+.pin-input:hover, .pin-input:focus-visible { border-color: var(--line-strong); }
+.pin-input::placeholder { color: var(--text-3); }
 .btn .spin {
   display: none; width: 13px; height: 13px;
   border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;

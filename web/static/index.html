@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="dark" />
     <link rel="icon" href="data:," />
     <title>Cloudflare 优选台</title>
-    <link rel="stylesheet" href="/styles.css?v=20261007a" />
+    <link rel="stylesheet" href="/styles.css?v=20261007b" />
   </head>
   <body>
     <header class="topbar">
@@ -54,11 +54,14 @@
               <h2 id="benchHead">前 24 名候选</h2>
             </div>
             <div class="hero-actions">
+              <input id="pinIp" class="pin-input" type="text" inputmode="decimal"
+                placeholder="指定 IP 登基，如 104.16.0.1" aria-label="指定 IP 登基" />
+              <button class="btn ghost small" id="pinBtn" type="button">登基</button>
               <button class="linklike" id="benchRefresh" type="button">刷新</button>
             </div>
           </div>
           <div id="benchRows" class="pool-rows" aria-live="polite"></div>
-          <p class="hero-foot" id="benchFoot">按延迟排序；「顶替」= 体检通过后换掉在位最差成员。</p>
+          <p class="hero-foot" id="benchFoot">按延迟排序；「顶替」= 体检通过后换掉在位最差成员。也可在上方直接输入任意公网 IPv4 指定登基。</p>
         </section>
       </section>
 
@@ -118,7 +121,7 @@
     </main>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="/runtime.js?v=20261007a"></script>
-    <script src="/app.js?v=20261007a"></script>
+    <script src="/runtime.js?v=20261007b"></script>
+    <script src="/app.js?v=20261007b"></script>
   </body>
 </html>
