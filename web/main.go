@@ -1409,6 +1409,42 @@ func applyCandidateSourcePriority(results []proxyScanResult, sourceByIP map[stri
 	})
 }
 
+// poolEntryMaxLatencyMs 是「进池延迟上限」：任何 IP 想进生效池（手动顶替、
+// 踢人补位、调度器换池），其 WS 握手延迟都必须低于此值。
+//
+// 由来：生产事故。池里混入 connect 1168ms 的 IP，设备粘性把 LAN 设备锁死
+// 在它上面，YouTube 评论区直接加载不出来。WS 握手「通」不代表「快」——
+// 换入前必须比速度。
+//
+// 参考实测（同一 SNI，NAS 现场）：好 IP connect 59~64ms / WS ~190ms；
+// 官方 anycast 基线 connect 155ms；坏 IP connect 231ms（3.7x）/ 1168ms（18x）。
+// 默认 800ms 明显高于基线、又远低于两个坏 IP。
+func poolEntryMaxLatencyMs() int64 {
+	ms := int64(envInt("PROXY_POOL_MAX_ENTRY_LATENCY_MS", 800))
+	if ms < 50 || ms > 5000 {
+		ms = 800
+	}
+	return ms
+}
+
+// measurePoolEntryLatency 三次 WS 握手取最优延迟（毫秒）。任一次都不通则返回 0。
+func measurePoolEntryLatency(ctx context.Context, ip string, cfg proxyAutoConfig) int64 {
+	best := int64(0)
+	for range 3 {
+		started := time.Now()
+		probeCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+		err := probeProxyWebSocket(probeCtx, ip, cfg)
+		cancel()
+		if err != nil {
+			continue
+		}
+		if ms := time.Since(started).Milliseconds(); best == 0 || ms < best {
+			best = ms
+		}
+	}
+	return best
+}
+
 func probeProxyWebSocket(ctx context.Context, ip string, cfg proxyAutoConfig) error {
 	dialer := &net.Dialer{}
 	raw, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(cfg.Port)))
@@ -2741,14 +2777,20 @@ func (a *app) handleProxyPromote(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "当前池为空，请先立即优选", http.StatusConflict)
 		return
 	}
-	// 顶替前先做一次 WS 体检：考不过的 IP 不允许登基（手动也不能塞废物）。
+	// 顶替前体检两道关：WS 握手必须通，且延迟必须低于进池上限。
+	// 旧实现只考握手，于是 1168ms 的慢 IP 也能堂堂正正换进池，
+	// 再被设备粘性锁死——生产事故的根因。
 	cfg := defaultProxyAutoConfig()
 	if cfg.Host != "" && cfg.Path != "" {
-		ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
-		err := probeProxyWebSocket(ctx, ip, cfg)
+		measureCtx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		latency := measurePoolEntryLatency(measureCtx, ip, cfg)
 		cancel()
-		if err != nil {
-			http.Error(w, "体检未通过，拒绝顶替: "+err.Error(), http.StatusBadRequest)
+		if latency == 0 {
+			http.Error(w, "体检未通过（WS 握手三次全败），拒绝顶替", http.StatusBadRequest)
+			return
+		}
+		if ceiling := poolEntryMaxLatencyMs(); latency > ceiling {
+			http.Error(w, fmt.Sprintf("延迟 %dms 超过进池上限 %dms，拒绝顶替：握手虽通但太慢，进池会拖垮粘在那台设备上的所有连接", latency, ceiling), http.StatusBadRequest)
 			return
 		}
 	}
@@ -2923,6 +2965,9 @@ func (a *app) refillPoolAfterKick() {
 	results := scanProxyWebSockets(ctx, pending, cfg)
 	applyCandidateSourcePriority(results, snapshot.SourceByIP)
 	passed := make([]string, 0, need)
+	// 进池延迟上限：踢人补位也不能塞慢 IP。旧实现只看 WS 通不通，
+	// 于是补位反复塞进 1 秒级 IP，粘性设备随即卡死。
+	ceiling := poolEntryMaxLatencyMs()
 	if cfg.VLESS.Enabled {
 		passed = probeVLESSPool(ctx, results, cfg.Port, min(cfg.VLESS.MaxCandidates, need*3), cfg.VLESS, template)
 	} else {
@@ -2932,9 +2977,35 @@ func (a *app) refillPoolAfterKick() {
 			}
 		}
 	}
+	// 只保留延迟达标的候选；全都不达标则宁可让池子短一点也不塞废物。
+	fast := make([]string, 0, len(passed))
+	slowRejected := 0
+	for idx, ip := range passed {
+		latency := int64(0)
+		if idx < len(results) {
+			for _, r := range results {
+				if r.IP == ip {
+					latency = r.Latency
+					break
+				}
+			}
+		}
+		if latency > ceiling {
+			slowRejected++
+			continue
+		}
+		fast = append(fast, ip)
+	}
+	if slowRejected > 0 {
+		log.Printf("kick refill rejected %d slow candidates (WS latency > %dms)", slowRejected, ceiling)
+	}
+	if len(fast) == 0 {
+		log.Printf("kick refill aborted: no candidate under the %dms entry ceiling", ceiling)
+		return
+	}
 	merged := append([]string(nil), current.IPs...)
 	added := make([]string, 0, need)
-	for _, ip := range passed {
+	for _, ip := range fast {
 		if containsString(merged, ip) {
 			continue
 		}

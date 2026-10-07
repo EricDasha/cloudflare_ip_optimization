@@ -199,6 +199,11 @@ Logs live in a collapsed drawer. There are no routes, no config forms, no advanc
 - `PROXY_POOL_SWITCH_COOLDOWN_MINUTES`: Global cooldown between automatic pool switches (default: 30, min: 5); manual apply is exempt
 - `PROXY_ACTIVE_HEALTH_WINDOW_MINUTES`: Active pool health window (default: 60, min: 10); an all-healthy pool blocks automatic switches
 
+### Pool Entry Latency Ceiling
+- `PROXY_POOL_MAX_ENTRY_LATENCY_MS`: WS-handshake latency ceiling for **entering** the active pool (default: 800, clamped to 50..5000). Applies to manual promote, kick-refill, and scheduler replacement alike.
+
+A WS handshake that completes is not the same as a fast IP. Production measured on the NAS against the same SNI: good members `connect 59-64ms / WS ~190ms`, the official anycast baseline `connect 155ms`, and two members that passed every handshake check yet ran `connect 231ms` and `connect 1168ms`. Because device stickiness pins one LAN device to one upstream for long stretches, a single slow member does not merely degrade the pool — it pins that device to a 1.1-second path, and YouTube comments stop loading. So entry now requires both **reachable** and **fast**; refill aborts rather than fill with a slow IP, leaving the pool short instead of poisoned.
+
 ### CFdata (manual-only; background vars deprecated)
 - `PROXY_CFDATA_BACKGROUND_ENABLED/MINUTES/TIMEOUT`, `PROXY_CFDATA_SIFT_COUNT`: no longer read; CFdata runs only on explicit user trigger
 
