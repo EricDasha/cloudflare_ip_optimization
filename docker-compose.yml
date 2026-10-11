@@ -75,6 +75,9 @@ services:
       # 换池防抖：自动换池全局冷却 +生效池健康窗口。
       PROXY_POOL_SWITCH_COOLDOWN_MINUTES: "30"
       PROXY_ACTIVE_HEALTH_WINDOW_MINUTES: "60"
+      # 机房软偏好（可选）：候选充裕时只取偏好机房、匮乏时其余补位（只重排不拒收）。
+      # 移动/广电常 HKG，电信/联通常 SJC/LAX——以实测为准；留空禁用。
+      PROXY_POOL_COLO_PREFER: "${PROXY_POOL_COLO_PREFER:-}"
 
       # WS 101 通过后，使用 /data 中的本地 VLESS outbound 模板做真实数据面终审。
       PROXY_VLESS_PROBE: "true"
