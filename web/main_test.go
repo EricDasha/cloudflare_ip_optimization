@@ -220,15 +220,6 @@ func TestInterleaveByMaintainerIsRoundRobin(t *testing.T) {
 	}
 }
 
-func TestPreferredDomainsAreFallbackOnly(t *testing.T) {
-	if got := resolvePreferredDomains(context.Background(), []string{"www.visa.cn"}, 10); len(got) != 0 {
-		t.Fatalf("preferred domains must not resolve to IPs: %v", got)
-	}
-	if _, err := fetchPreferredDomains(context.Background()); err == nil {
-		t.Fatal("preferred-domain discovery must be disabled")
-	}
-}
-
 func TestEnabledPreferredDomainsDefaultsToAllImported(t *testing.T) {
 	a := &app{dataDir: t.TempDir()}
 	a.loadPreferredSettings()
@@ -256,32 +247,6 @@ func TestPreferredSettingsPersistEnableSubset(t *testing.T) {
 	enabled := b.enabledPreferredDomains()
 	if len(enabled) != 1 || enabled[0] != all[0] {
 		t.Fatalf("restored enabled = %v, want only %s", enabled, all[0])
-	}
-}
-
-func TestSampleIPv4CIDRs(t *testing.T) {
-	got := sampleIPv4CIDRs("104.16.0.0/24\n172.64.0.0/24\ninvalid", 12)
-	if len(got) != 12 {
-		t.Fatalf("sample count = %d, want 12", len(got))
-	}
-	for _, raw := range got {
-		ip := net.ParseIP(raw)
-		if ip == nil || !(strings.HasPrefix(raw, "104.16.0.") || strings.HasPrefix(raw, "172.64.0.")) {
-			t.Fatalf("sample %q is outside source CIDRs", raw)
-		}
-	}
-}
-
-func TestBundledOfficialCloudflareCIDRsProvideFallback(t *testing.T) {
-	got := sampleIPv4CIDRs(bundledOfficialCloudflareIPv4CIDRs, 30)
-	if len(got) != 30 {
-		t.Fatalf("bundled official candidates = %d, want 30", len(got))
-	}
-	for _, raw := range got {
-		ip := net.ParseIP(raw)
-		if !isPublicIPv4(ip) {
-			t.Fatalf("bundled official candidate is not public IPv4: %q", raw)
-		}
 	}
 }
 

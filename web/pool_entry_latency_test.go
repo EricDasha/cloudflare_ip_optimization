@@ -52,6 +52,7 @@ func TestPoolEntryLatencyCeilingIsConfigurable(t *testing.T) {
 
 // measurePoolEntryLatency 必须握手全败时返回 0 —— 调用方把 0 当作「不通」
 // 而拒绝顶替，这是阻止垃圾 IP 进池的最后一道闸。
+// 新增断言：全败时失败计数=3、机房码为空（丢包率语义由三值返回承载）。
 func TestMeasurePoolEntryLatencyReturnsZeroWhenUnreachable(t *testing.T) {
 	cfg := proxyAutoConfig{
 		Host: "example.invalid",
@@ -60,8 +61,15 @@ func TestMeasurePoolEntryLatencyReturnsZeroWhenUnreachable(t *testing.T) {
 	}
 	// 203.0.113.0/24 是 RFC 5737 保留测试段，保证不可达。
 	// 该地址不立即 RST，故每轮耗满 6s 上限，三轮约 18s。
-	if got := measurePoolEntryLatency(context.Background(), "203.0.113.1", cfg); got != 0 {
+	got, colo, fails := measurePoolEntryLatency(context.Background(), "203.0.113.1", cfg)
+	if got != 0 {
 		t.Fatalf("unreachable IP should measure 0, got %dms", got)
+	}
+	if fails != 3 {
+		t.Fatalf("unreachable IP should fail all 3 probes, got %d", fails)
+	}
+	if colo != "" {
+		t.Fatalf("unreachable IP should have empty colo, got %q", colo)
 	}
 }
 

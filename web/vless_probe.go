@@ -36,10 +36,76 @@ type vlessProbeConfig struct {
 // defaultVLESSSpeedHost 是 VLESS 测速的默认下载主机（Cloudflare 官方测速端点）。
 const defaultVLESSSpeedHost = "speed.cloudflare.com"
 
+// vlessSpeedPartialFloor 测速时间预算耗尽时的最低诚实样本量：低于此值读到的
+// 字节不足以判断速率（可能只是握手回包），仍按失败处理。
+const vlessSpeedPartialFloor = 64 * 1024
+
+// speedSamplerSlice 分片采样周期：片内字节计入 slices，供 EWMA 平滑。
+const speedSamplerSlice = 250 * time.Millisecond
+
 type vlessProbeMetrics struct {
 	Bytes    int64
 	Duration time.Duration
 	Mbps     float64
+}
+
+// speedSampler 分片采样读取器：边读边按固定时间片记字节账。
+// 意义：CDN 突发尖峰会被 EWMA 衰减，持续速率主导排序（CFST 同源思想）。
+type speedSampler struct {
+	r        io.Reader
+	slices   []int64
+	deadline time.Time
+	current  int64
+}
+
+func newSpeedSampler(r io.Reader) *speedSampler {
+	return &speedSampler{r: r, deadline: time.Now().Add(speedSamplerSlice)}
+}
+
+func (s *speedSampler) copyTo(dst io.Writer) (int64, error) {
+	buf := make([]byte, 16*1024)
+	var total int64
+	for {
+		n, err := s.r.Read(buf)
+		if n > 0 {
+			written, werr := dst.Write(buf[:n])
+			total += int64(written)
+			s.current += int64(written)
+			if werr != nil {
+				return total, werr
+			}
+		}
+		if err != nil {
+			if s.current > 0 {
+				s.slices = append(s.slices, s.current)
+			}
+			// EOF 是读尽而非读败——io.Copy 同义：正常收尾不报错。
+			if err == io.EOF {
+				return total, nil
+			}
+			return total, err
+		}
+		if now := time.Now(); now.After(s.deadline) {
+			s.slices = append(s.slices, s.current)
+			s.current = 0
+			s.deadline = now.Add(speedSamplerSlice)
+		}
+	}
+}
+
+// ewmaMbpsFromSlices 对每时间片字节数做指数加权移动平均（α=0.3）：
+// 瞁发尖峰按 (1-α)^k 衰减，持续速率主导结果。片数 < 4 时返回 0，
+// 由调用方回退到「总量/总时长」的朴素均值。
+func ewmaMbpsFromSlices(slices []int64, sliceDur time.Duration) float64 {
+	if len(slices) < 4 || sliceDur <= 0 {
+		return 0
+	}
+	const alpha = 0.3
+	var ew float64
+	for _, b := range slices {
+		ew = alpha*float64(b) + (1-alpha)*ew
+	}
+	return ew * 8 / sliceDur.Seconds() / 1_000_000
 }
 
 // vlessSpeedTestURL 决定 VLESS 数据面测速的下载端点。
@@ -367,14 +433,25 @@ func probeVLESSCandidateMetrics(ctx context.Context, candidateIP string, candida
 	}
 	defer resp.Body.Close()
 	started := time.Now()
-	n, readErr := io.Copy(io.Discard, io.LimitReader(resp.Body, cfg.ReadLimit))
+	sampler := newSpeedSampler(io.LimitReader(resp.Body, cfg.ReadLimit))
+	n, readErr := sampler.copyTo(io.Discard)
 	metrics.Bytes = n
 	metrics.Duration = time.Since(started)
 	if metrics.Duration <= 0 {
 		metrics.Duration = time.Millisecond
 	}
-	metrics.Mbps = float64(n*8) / metrics.Duration.Seconds() / 1_000_000
+	if ewma := ewmaMbpsFromSlices(sampler.slices, speedSamplerSlice); ewma > 0 {
+		metrics.Mbps = ewma
+	} else {
+		metrics.Mbps = float64(n*8) / metrics.Duration.Seconds() / 1_000_000
+	}
 	if readErr != nil {
+		// 时间预算耗尽而样本已足：这是「慢」不是「坏」——按实读字节给
+		// 诚实低速分。旧实现一票归零，800KB/20s 的慢 IP 与死 IP 同等待遇，
+		// 吞吐轨因此对慢线全盲（生产实测痛点）。
+		if ctx.Err() != nil && n >= vlessSpeedPartialFloor {
+			return metrics, nil
+		}
 		return metrics, fmt.Errorf("读取 VLESS 测试响应失败: %w", readErr)
 	}
 	if resp.StatusCode != cfg.ExpectedStatus {

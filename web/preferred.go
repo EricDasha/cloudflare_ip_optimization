@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // preferredSettingsFile 也定义于 main.go：常量同名不同作用域会冲突，这里不再重复声明。
@@ -300,4 +301,16 @@ func (a *app) mergeCfdataIPsIntoCandidates(ips []string) {
 		a.candidates = snapshot
 		_ = a.saveProxyCandidateCache(snapshot)
 	}
+}
+
+// preferredDomainStatus 是单个优选域名的慢测快照，供 GUI 展示。
+type preferredDomainStatus struct {
+	Domain    string    `json:"domain"`
+	Enabled   bool      `json:"enabled"`
+	IPs       []string  `json:"ips,omitempty"`
+	Latency   int64     `json:"latency,omitempty"`
+	Mbps      float64   `json:"mbps,omitempty"`
+	Stage     string    `json:"stage,omitempty"`
+	LastProbe time.Time `json:"lastProbe,omitempty"`
+	LastError string    `json:"lastError,omitempty"`
 }
