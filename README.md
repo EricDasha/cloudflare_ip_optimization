@@ -120,10 +120,17 @@ CFdata 彻底手动化：无后台自启动、无定时扫描；只在用户显�
 - **吞吐轨**：双方都有有效吞吐成绩（`avg > 0`）→ 候选须 ≥ Active×1.25 **且** ≥ Active+80Mbps。
 - **WS 轨**：任一方缺吞吐成绩（VLESS 关闭 / 测速稀疏 / Active 未测速）→ 改比 WS 延迟：改善 ≥25% **且** ≥15ms，且成功率不低于 Active；任一方没有延迟基线则本轮不判优。
 - **`Mbps = 0` 的含义是"该样本没有有效吞吐成绩"，不是"实测 0 Mbps"**。平均值只对 `Mbps > 0` 的样本计算。切勿用 `0 >= 0 + 80` 形态的加法门槛比较两个零值——那会把晋升通路静默锁死（生产曾因此 9106 条记录 0 晋升）。
+- **测速超时不再归零**（v2）：时间预算耗尽但已读满 64 KiB 的候选按实读字节得**诚实低速分**（EWMA 平滑，突发尖峰被衰减）——`800KB/20s` 的慢 IP 现在拿 ~0.3 Mbps 而非 0 分，吞吐轨不再对慢线全盲；真跑不动的依旧 0 分走 WS 轨。
 
-Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨在 Active 上位后一个探测周期内即可开判。
+**机房感知（colo）**：WS 握手响应的 `CF-RAY` 头被解析出三字机房码（如 HKG），随成绩单存档并在优选台徽标显示。`PROXY_POOL_COLO_PREFER=HKG,SJC` 启用**软偏好**：终审/补位选才时偏好机房排前、区内保序——充裕时整池收敛到偏好机房，匮乏时其余机房照常补位；只重排不淘汰，永不因偏好缩短池子。调度器晋升（superiorTo）保持纯质量判定不参与偏好。
+
+Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨在 Active 上位后一个探测周期内即可开判。入池体检为三次握手取最优，失败次数一并记档（`3 测 2 失` 在体检注记可见）——丢手即质量，股神/CFST 多发采样思想的正统继承。
 
 **候选源配额（防单源垄断）**：刷新按优先序灌入但每层封顶——`user ≤100`、`subscription ≤600`（须为保底让位）、`bestcf ≥300`（吸收余量），总池 ≤1000。`subscriptionQuota = min(600, 1000 - 已用 - bestcf保底)`，订阅层在数学上吃不光保底层。官方 Cloudflare CIDR 采样层已下线（`PROXY_OFFICIAL_CANDIDATES` 不再读取）。
+
+**渠道健康账**：`/api/status` 的 `sources` 节逐源记录抓取次数、成功次数、累计 IP 数与最近一次成败——bestcf 的每个 URL、订阅的每个维护者、user/域名表各一席。哪个源死了，一眼可辨；渠道审计以此为准。
+
+**扫描节流诊断**：初筛（TCP/TLS RTT）并发默认 100（`PROXY_AUTO_PRESCREEN_CONCURRENCY`）。若连续几轮考试通过数**递减**、停一阵又自愈，多半是被运营商/CF 判为网络扫描触发临时限流（CFST 社区实证经验）——把并发回调（如 50），等几轮恢复后再逐步升回。
 
 ### VLESS 探针模板
 
@@ -131,7 +138,7 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 
 将一个 sing-box VLESS outbound 保存为 `./data/vless-probe-outbound.json`。也可以放入完整 sing-box 配置，服务端会提取第一个 `type: "vless"` 的 outbound。文件应包含真实 `uuid`、TLS `server_name`、WebSocket `path` 与 `headers.Host`；`server` 和 `server_port` 会在每次探测时替换为候选 IP 与 `PROXY_AUTO_PORT`。
 
-`./data` 已被 Git 忽略，模板不会进入仓库。服务端不会通过 API 返回模板内容；每次生成的临时 sing-box 配置权限为 `0600`，进程退出后立即删除，错误文本会脱敏 UUID、Host、SNI 和 path。
+`./data` 已被 Git 忽略，模板不会进入仓库。服务端不会通过 API 返回模板内容——文件接口（`/api/files`、`/api/file/`）对模板基名（含自定义 `PROXY_VLESS_TEMPLATE`）与 sing-box 探针临时配置残留一律拒收；每次生成的临时 sing-box 配置权限为 `0600`，进程退出后立即删除，错误文本会脱敏 UUID、Host、SNI 和 path。
 
 镜像固定从 Go module tag `v1.13.18` 构建 sing-box，依赖由 Go checksum database 校验。构建使用 `CGO_ENABLED=0` 且只启用节点所需的 `with_utls` tag，以保持 scratch 镜像兼容并减少体积。上游许可文本保存在 `third_party/sing-box/LICENSE`，并复制到镜像 `/usr/share/licenses/sing-box/LICENSE`；这不代表当前仓库其余源码采用同一许可证。
 
@@ -173,16 +180,19 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 | `PROXY_AUTO_MAX_LATENCY` | 单 IP 终审超时，毫秒 | `5000` |
 | `PROXY_AUTO_POOL_SIZE` | 生效池目标规模（5~15 保障，踢人后自动补位回满） | `5` |
 | `PROXY_AUTO_MIN_POOL` | 允许替换旧池的最少通过数量 | `3` |
+| `PROXY_AUTO_PRESCREEN_CONCURRENCY` | 三层漏斗初筛（TCP/TLS RTT）并发；过高会触发扫描限流（见诊断指引） | `100` |
+| `PROXY_AUTO_SHORTLIST` | 初筛短名单容量，按延迟升序取前 N 进精筛 | `60` |
 | `PROXY_DOMAIN_FORWARD` | 并入 CFnat 固定转发池的优选域名，逗号分隔 | 空 |
 | `PROXY_AUTO_DOMAINS` | 优选域名并入 cfnat 兜底转发（-fallback） | `false`（Compose 为 `true`） |
 | `PROXY_PREFERRED_RESOLVE` / `PROXY_PREFERRED_IPS_PER_DOMAIN` / `PROXY_PREFERRED_RESOLVED_CANDIDATES` | 已废弃不再读取（优选域名直接做 `-fixed` 成员活解析） | -- |
 | `PROXY_CFDATA_CANDIDATES` | 已废弃不再读取（cfdata 不再供候选） | -- |
-| `PROXY_OFFICIAL_CANDIDATES` | 已废弃不再读取（官方 CIDR 采样层已下线） | -- |
+| `PROXY_OFFICIAL_CANDIDATES` | 已废弃不再读取（官方 CIDR 采样层已下线，内置 snapshot 与采样器已随死码清除） | -- |
 | `PROXY_USER_CANDIDATES` | 用户指定的公网 IPv4，逗号或空白分隔 | 空 |
 | `PROXY_BACKGROUND_OPTIMIZER` | 是否启用低占用后台轮转优选 | `true` |
 | `PROXY_SCHEDULER_APPLY` | 调度器是否允许自动换池（仍需 `PROXY_AUTO_APPLY=true`） | `true` |
 | `PROXY_SCHEDULER_PROBE_INTERVAL_SECONDS` | 后台调度探测间隔，秒 | `300` |
 | `PROXY_SCHEDULER_BATCH_SIZE` | 每轮调度候选数 | `12` |
+| `PROXY_POOL_COLO_PREFER` | 机房软偏好（IATA 码，如 `HKG,SJC`）：充裕取偏好、匮乏放行，只重排不拒收 | 空（禁用） |
 | `PROXY_VLESS_PROBE` | 是否在 WS 初筛后运行真实 VLESS 数据面终审 | `false` |
 | `PROXY_VLESS_TEMPLATE` | 本地 VLESS outbound 或完整 sing-box 配置 | `/data/vless-probe-outbound.json` |
 | `PROXY_VLESS_TEST_URL` | 经 VLESS 请求的轻量验活地址 | `https://www.gstatic.com/generate_204` |

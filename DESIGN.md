@@ -111,15 +111,35 @@ The actual Active Pool selection is based on measured performance (Mbps, latency
 
 ## Repository Layout
 
-The repository root is a **set of single-file `main` programs**, not a buildable package:
+The repository root is a **set of single-file `main` programs**, plus the web console package:
 
 | File | Built by | Notes |
 |---|---|---|
 | `cfnat.go` | `go build cfnat.go` | the forwarder; `cfnat_test.go` runs via `go test cfnat.go cfnat_test.go` |
 | `cfdata.go` | `go build cfdata.go` | manual IP discovery scanner |
-| `x-tunnel.go` | never | **disabled** — depends on uuid / gorilla-websocket / xtaci/smux, which are absent from `go.mod` |
+| `docs/legacy/x-tunnel.go` | never | **archived** — an unrelated WS+smux+ECH tunnel that shipped in the original author's bundle; kept under `docs/legacy/` for reference only |
 
-All root files carry `//go:build ignore`, because otherwise `go build ./...` fails on duplicate `main`/`location` declarations (and on `x-tunnel.go`'s missing imports). `go build ./...` therefore only compiles `./web`, which is where the web console lives.
+Root files carry `//go:build ignore`, because otherwise `go build ./...` fails on duplicate `main`/`location` declarations. `go build ./...` therefore only compiles `./web`, which is where the web console lives.
+
+### Web package layout (one domain per file, all `package main`)
+
+`web/main.go` was reduced from a 4,341-line monolith to domain files during the rework (function count conserved; pure mechanical move, no logic change):
+
+| File | Domain |
+|---|---|
+| `main.go` | app struct, entrypoint, background loop wiring, healthcheck subcommand |
+| `config.go` | env parsing + config readers (incl. colo preference) |
+| `process.go` | managedProcess, cfnat/cfdata process configs |
+| `candidates.go` | candidate sources table, quotas, refresh, fetchers, per-source health ledger |
+| `funnel.go` | three-tier funnel: prescreen → WS screening → VLESS final; colo capture; soft-preference reorder |
+| `pool.go` | active pool persistence, switch guard, kick/refill/promote helpers |
+| `subscription.go` | subscription sweep + pool |
+| `httpapi.go` | all HTTP handlers |
+| `cfdata_web.go` | cfdata results/speed/detail web views |
+| `fileserver.go` | static assets, `/api/files`, `/api/file/` (VLESS template denied) |
+| `vless_probe.go` | sing-box VLESS probe + speed sampler (EWMA) |
+| `quality_runtime.go` / `quality_scheduler.go` | quality records store + promotion state machine |
+| `preferred.go` / `subscription_candidates.go` / `cfnat_connections.go` | preferred domains, subscription hostname extraction, connection views |
 
 ## CFdata Manual-Only
 
@@ -132,27 +152,28 @@ User (explicit /api/cfdata/run request)
     ▼
 ip.csv (cache)
     │
-    │ Read-only access
+    │ Read-only access (results display only; no candidate feeding)
     ▼
-Optimizer
+Web results pages
 ```
 
-- There is no background loop, no periodic scan, and no post-scan sift; the optimizer only reads the existing cache.
-- Optimizer reads from cache via `cfdataCandidateIPs()` - never triggers CFdata scan
+- There is no background loop, no periodic scan, and no post-scan sift.
+- CFdata output is display-only; its IPs no longer feed the candidate pool (official CIDR layer, cfdata supply and the `cfdataCandidateIPs()` reader were removed with the supply rework).
 
 ## Candidate Pipeline
 
 Candidate generation and business acceptance are separate stages:
 
-1. CFdata reads the local broad CDN ranges and writes `ip.csv` (manual trigger only).
-2. The candidate cache preserves source order under per-source quotas: user-supplied IPs (≤100), subscription-feed IPs (≤600 with floor reservation), sampled official Cloudflare CIDRs (≥150 floor), then enabled community sources (≥150 floor); total ≤1000.
-3. The first active-pool stage validates the configured TLS SNI, HTTP Host and WebSocket path in parallel.
-4. If VLESS probing is enabled, WS passes are tested sequentially through a short-lived sing-box process. Each pass must complete both the configured `generate_204` request and a bounded download through the same tunnel.
-5. The VLESS probe replaces only the candidate server and port; UUID, TLS/ECH/uTLS and WebSocket settings come from the local outbound template. Results preserve source priority and use measured Mbps, then data-plane latency, within each source tier.
-6. A new pool is committed only when it meets the configured minimum size and CFnat starts successfully.
-7. Any probe, template or process failure leaves the previous active pool and cache in place.
+1. Supply layers merge under per-source quotas: user-supplied IPs (≤100), subscription-feed IPs (≤600 with floor reservation), bestcf community tables (≥300 floor, absorbing remaining capacity); total ≤1000. Preferred domains are promoted directly to cfnat `-fixed` members and never enter the candidate pool. The official Cloudflare CIDR sampling layer is **removed** (user directive); its bundled snapshot, fetcher and sampler were deleted as dead code.
+2. The first active-pool stage validates the configured TLS SNI, HTTP Host and WebSocket path in parallel, and records the serving datacenter (colo) from the `CF-RAY` response header.
+3. If VLESS probing is enabled, WS passes are tested sequentially through a short-lived sing-box process. Each pass must complete both the configured `generate_204` request and a bounded download through the same tunnel; a speed test that exhausts its time budget with ≥64 KiB read yields an honest partial score (EWMA-smoothed) instead of zero.
+4. The VLESS probe replaces only the candidate server and port; UUID, TLS/ECH/uTLS and WebSocket settings come from the local outbound template. Results preserve source priority and use measured Mbps, then data-plane latency, within each source tier; the colo soft-preference (`PROXY_POOL_COLO_PREFER`) then reorders passing candidates — preferred colos first, scarcity backfills from the rest, never rejecting or shrinking the list.
+5. A new pool is committed only when it meets the configured minimum size and CFnat starts successfully.
+6. Any probe, template or process failure leaves the previous active pool and cache in place.
 
 `proxy-candidates.json` is discovery state. `proxy-active.json` is last-known-good forwarding state. They must not be treated as interchangeable.
+
+Every supply channel keeps a health ledger (`/api/status` → `sources`): fetches, successes, cumulative IP count, last success/failure per bestcf URL, per subscription maintainer, and per logical layer (user env, subscription pool, forward-domains table). Dead channels are visible at a glance.
 
 The CFnat data plane never launches these probes. It assigns one upstream target to each new TCP connection using strict round-robin, keeps that session pinned, and only attempts the next target after a TCP dial failure. The fixed pool holds public IPv4 only; preferred domains live exclusively in `-fallback` and are tried only when every fixed IP fails to dial. Domain targets resolve their current DNS (and therefore the operator's current preferred IP) at dial time, under the same session-pinning semantics.
 
@@ -170,7 +191,7 @@ current evidence without changing existing CFnat sessions:
 
 The GUI is a single-page console ("优选台"). Candidate refresh and subscription maintenance run unattended; automatic active-pool replacement is controlled by `PROXY_AUTO_APPLY`. The user has exactly three actions:
 
-- **Observe**: one hero card lists the active pool — per-IP live connection count (from `/api/cfnat/upstreams`, counting only entries marked `inPool`, grouped by remote:CFNAT_PORT, active TCP states only), VLESS exam scores (Mbps/latency) and source badges. A pulse line shows whether each supply tier (manual / subscription / preferred-resolve / cfdata / official / community) currently contributes candidates.
+- **Observe**: one hero card lists the active pool — per-IP live connection count (from `/api/cfnat/upstreams`, counting only entries marked `inPool`, grouped by remote:CFNAT_PORT, active TCP states only), VLESS exam scores (Mbps/latency), colo badges (from the WS-probe `CF-RAY` header) and source badges. The supply pulse line reflects the four live channels only (manual / subscription / bestcf / domain-direct), fed by the per-source health ledger in `/api/status`; retired channels (preferred-resolve / cfdata / official / community) are no longer rendered as dead beacons.
 - **Optimize**: one button triggers the full pipeline (refresh candidates → WS screening → optional VLESS final → commit when auto apply is enabled). A paste box performs the explicit manual TCP/TLS screening path and applies passing IPs immediately; background scheduling can continue the full WS/VLESS review. Manual supply has highest priority and is exempt from pool-switch cooldown.
 - **Kick**: per-IP "踢" removes a pool member on user demand — the pool restarts with the remaining IPs (manual path, no cooldown), and the kicked IP is dropped from the candidate cache so the background does not immediately re-elect it. The last pool member cannot be kicked.
 
@@ -203,6 +224,22 @@ Logs live in a collapsed drawer. There are no routes, no config forms, no advanc
 - `PROXY_POOL_MAX_ENTRY_LATENCY_MS`: WS-handshake latency ceiling for **entering** the active pool (default: 800, clamped to 50..5000). Applies to manual promote, kick-refill, and scheduler replacement alike.
 
 A WS handshake that completes is not the same as a fast IP. Production measured on the NAS against the same SNI: good members `connect 59-64ms / WS ~190ms`, the official anycast baseline `connect 155ms`, and two members that passed every handshake check yet ran `connect 231ms` and `connect 1168ms`. Because device stickiness pins one LAN device to one upstream for long stretches, a single slow member does not merely degrade the pool — it pins that device to a 1.1-second path, and YouTube comments stop loading. So entry now requires both **reachable** and **fast**; refill aborts rather than fill with a slow IP, leaving the pool short instead of poisoned.
+
+### Pool Entry Loss Note
+Entry measurement is best-of-three handshakes; the failure count is recorded alongside (体检注记 "N/3 通过"). Loss is a soft signal — entry gates only reject all-fail and over-ceiling — but it surfaces in probe responses so a flaky 2/3 member is distinguishable from a clean 3/3 one. (股神/CFST multi-sample heritage.)
+
+### Pool Colo Soft-Preference
+- `PROXY_POOL_COLO_PREFER`: comma/space-separated IATA colo codes (e.g. `HKG,SJC`), default empty = disabled.
+
+Colo is captured at the WS 101 response (`CF-RAY` header, CFST-style `[A-Z]{3}` extraction) and rides on scan results. The preference is a **reorder, never a gate**: passing candidates are stably partitioned — preferred colos first, internal order preserved (Mbps / source+latency rankings untouched) — and the existing truncation does the rest. Abundant preferred candidates fill the pool entirely; scarcity backfills from other colos; the list never shrinks because of preference. Scheduler promotion (`superiorTo`) stays quality-pure. An IP without colo evidence falls to the non-preferred partition, never rejected. Anycast means colo is fresh-at-probe information, not a permanent property — treat it as evidence, not guarantee.
+
+### Scan-Throttle Guard
+- `PROXY_AUTO_PRESCREEN_CONCURRENCY`: prescreen (TCP/TLS RTT) concurrency, default 100 (was 200; clamped 10..1000).
+
+CFST community evidence: high-concurrency probing can be classified as network scanning by ISPs/Cloudflare and rate-limited temporarily — symptom: pass counts decay across successive rounds, self-heal after a pause. Diagnosis guidance is in the README; lower this value when the decay pattern appears.
+
+### VLESS Speed v2 (honest partial scores)
+The speed probe samples reads in 250ms slices and smooths them with hand-rolled EWMA (α=0.3, burst spikes damped). A candidate that exhausts its time budget with ≥64 KiB read receives an **honest partial score** instead of zero — previously an 800KB/20s member scored 0 and fell to the WS track indistinguishably from a dead one, blinding the throughput track to slow-but-working lines. True failures (status mismatch, read error without budget exhaustion, <64 KiB) still error out.
 
 ### CFdata (manual-only; background vars deprecated)
 - `PROXY_CFDATA_BACKGROUND_ENABLED/MINUTES/TIMEOUT`, `PROXY_CFDATA_SIFT_COUNT`: no longer read; CFdata runs only on explicit user trigger
