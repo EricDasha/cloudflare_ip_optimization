@@ -31,3 +31,7 @@ web/main.go.*
 # Platform noise
 .DS_Store
 Thumbs.db
+
+# 外部作者源码快照（股神原包）与浏览器自动化日志：只作参考，不入库
+/original/
+/.playwright-mcp/
