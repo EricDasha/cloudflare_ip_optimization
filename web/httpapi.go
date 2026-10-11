@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -492,7 +493,18 @@ func (a *app) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"cfnat": a.cfnatStartupConfig(), "cfdata": defaultCFdataConfig(), "backgroundOptimizer": a.backgroundOptimizerStatus(), "qualityScheduler": a.qualitySnapshot()})
+	auto := defaultProxyAutoConfig()
+	writeJSON(w, map[string]any{"cfnat": a.cfnatStartupConfig(), "cfdata": defaultCFdataConfig(), "backgroundOptimizer": a.backgroundOptimizerStatus(), "qualityScheduler": a.qualitySnapshot(), "vlessProbe": auto.VLESS.Enabled, "poolColoPrefer": strings.Join(sortedKeys(poolColoPreferenceSet()), ",")})
+}
+
+// sortedKeys 把偏好机房集合排成稳定序列（前端展示用）。
+func sortedKeys(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {

@@ -1,14 +1,64 @@
-/* 优选台全部逻辑：多页路由（主页/供给/日志）+ 五个用户动作。 */
+/* 皇位厅全部逻辑：单页三区（在位/供给/候选）+ 日志设备双抽屉 + 五个用户动作。
+   零依赖。API 契约见 web/httpapi.go；mock 形状见 docs/ui-demo/index.html。 */
 (() => {
-  const SRC_LABEL = {
-    user: "手动", subscription: "订阅", preferred: "优选解析",
-    cfdata: "CFdata", official: "官方段", proxy: "社区", bestcf: "BestCF",
+  const $ = (id) => document.getElementById(id);
+  let toastTimer;
+  const toast = (msg) => {
+    const t = $("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove("show"), 3200);
   };
-  let poolSnapshot = null;   // proxy-candidates 快照
+  async function api(path, opts = {}) {
+    const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+    if (!res.ok) throw new Error((await res.text()).trim() || `HTTP ${res.status}`);
+    return res.json();
+  }
+  async function busy(button, label, task) {
+    if (button.disabled) return;
+    const text = $(label);
+    const prev = text.textContent;
+    button.disabled = true;
+    button.classList.add("busy");
+    text.textContent = "进行中…";
+    try {
+      return await task();
+    } finally {
+      button.disabled = false;
+      button.classList.remove("busy");
+      text.textContent = prev;
+    }
+  }
+  const fmtTime = (iso) => {
+    if (!iso || String(iso).startsWith("0001-")) return "--";
+    const d = new Date(iso);
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
+  const fmtAgo = (iso) => {
+    if (!iso || String(iso).startsWith("0001-")) return "–";
+    const mins = Math.max(0, Math.round((Date.now() - new Date(iso)) / 60000));
+    if (mins < 1) return "刚刚";
+    if (mins < 60) return `${mins}分钟前`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}小时前`;
+    return `${Math.floor(hours / 24)}天前`;
+  };
+
+  /* 来源徽标：现行四层 + 陈旧缓存的宽容映射（旧快照里的已废层名不断档显示）。 */
+  const SRC_LABEL = {
+    user: "手动", subscription: "订阅", bestcf: "BestCF",
+    preferred: "优选解析", cfdata: "CFdata", official: "官方段", proxy: "社区",
+  };
+  const LIVE_TIERS = [["user", "手动"], ["subscription", "订阅"], ["bestcf", "BestCF"]];
+
+  let poolSnapshot = null;   // proxy-candidates 快照（含 active）
   let upstreams = {};        // ip -> {connections, states, inPool}
-  let lanPeers = -1;
+  let sourceHealth = {};     // /api/status.sources 健康账
+  let vlessOn = false;       // /api/config.vlessProbe
+  let coloPrefer = "";       // /api/config.poolColoPrefer
   let logLines = [];
-  let currentPage = "home";
+
   // Manual actions can overlap the regular timers. Ignore responses from an
   // older request so a slow poll cannot roll the screen back.
   const pollVersion = Object.create(null);
@@ -23,48 +73,40 @@
   };
   const isCurrentPoll = (name, version) => pollVersion[name] === version;
 
-  /* ---------- 路由 ---------- */
-  function route() {
-    const hash = location.hash || "#/";
-    currentPage = hash.startsWith("#/supply") ? "supply"
-      : hash.startsWith("#/logs") ? "logs"
-      : "home";
-    for (const page of ["home", "supply", "logs"]) {
-      const el = $(`page-${page}`);
-      if (el) el.hidden = page !== currentPage;
-    }
-    for (const link of document.querySelectorAll(".pagenav-link")) {
-      link.classList.toggle("active", link.dataset.page === currentPage);
-    }
-    if (currentPage === "logs") pullLogs();
-  }
-  window.addEventListener("hashchange", route);
-
   /* ---------- 数据拉取 ---------- */
+  async function pullConfig() {
+    try {
+      const cfg = await api("/api/config");
+      vlessOn = !!cfg.vlessProbe;
+      coloPrefer = String(cfg.poolColoPrefer || "");
+    } catch (_) { /* 心跳容错 */ }
+  }
   async function pullStatus() {
     const version = beginPoll("status");
     try {
       const st = await api("/api/status");
       if (!isCurrentPoll("status", version)) return;
       const running = !!st.cfnat?.running;
-      $("cfnatPulse").className = `pulse ${running ? "ok" : "bad"}`;
+      $("cfnatDot").className = `st ${running ? "ok" : "idle"}`;
+      $("cfnatDot").textContent = running ? "●" : "◌";
       $("cfnatState").textContent = running ? "转发运行中" : "转发已停止";
-      $("topbarSub").textContent = running ? "CFnat 转发已启动 · 设备粘性" : "转发已停止";
+      if (st.sources && typeof st.sources === "object") {
+        sourceHealth = st.sources;
+        renderHealth();
+      }
     } catch (_) { /* 心跳容错 */ }
   }
-
   async function pullPool() {
     const version = beginPoll("pool");
     try {
       const snap = await api("/api/cfnat/proxy-candidates");
       if (!isCurrentPoll("pool", version)) return;
       poolSnapshot = snap;
-      renderPool();
+      renderThrone();
       renderBench();
-      renderBeacons();
+      renderHealth();
     } catch (_) { /* 心跳容错 */ }
   }
-
   async function pullUpstreams() {
     const version = beginPoll("upstreams");
     try {
@@ -73,131 +115,80 @@
       const map = {};
       for (const u of snap.upstreams || []) map[u.ip] = u;
       upstreams = map;
-      renderPool();
+      renderThrone();
     } catch (_) { /* 心跳容错 */ }
   }
-
   async function pullLan() {
     const version = beginPoll("lan");
     try {
       const snap = await api("/api/cfnat/connections");
       if (!isCurrentPoll("lan", version)) return;
-      lanPeers = (snap.sources || []).length;
-      $("lanPeers").textContent = `${lanPeers} 台局域网设备`;
       renderLan(snap.sources || []);
     } catch (_) { /* 心跳容错 */ }
   }
 
-  /* ---------- 局域网设备明细 ----------
-     cfnat 是四层哑管道：TLS 加密后无 UA/Host 可读，设备识别以局域网 IP 为准。 */
-  function renderLan(sources) {
-    const body = $("lanTableBody");
-    if (!body) return;
-    body.replaceChildren();
-    if (!sources.length) {
-      const tr = document.createElement("tr");
-      const td = document.createElement("td");
-      td.colSpan = 3;
-      td.className = "inline-status";
-      td.textContent = "当前无局域网连接";
-      tr.append(td);
-      body.append(tr);
-      return;
-    }
-    const frag = document.createDocumentFragment();
-    for (const s of sources) {
-      const tr = document.createElement("tr");
-      const states = Object.entries(s.states || {}).map(([k, v]) => `${k} × ${v}`).join(" · ");
-      for (const [value, cls] of [[s.ip || "--", "mono"], [s.connections ?? 0, ""], [states || "--", ""]]) {
-        const td = document.createElement("td");
-        td.textContent = String(value);
-        if (cls) td.className = cls;
-        tr.append(td);
-      }
-      frag.append(tr);
-    }
-    body.append(frag);
-  }
-
-  /* ---------- 通用行渲染（在位 + B 榜共用） ---------- */
-  function buildRow({ addr, label, badgeCls, connN, connUnit, scoreParts, actions }) {
+  /* ---------- 通用行渲染（在位 + 候选共用） ---------- */
+  function buildRow({ addr, colo, label, connLive, connN, connUnit, scoreParts, actions }) {
     const row = document.createElement("div");
     row.className = "ip-row";
-
     const main = document.createElement("div");
     main.className = "ip-main";
-    const a = document.createElement("span");
-    a.className = "ip-addr";
-    a.textContent = addr;
-    const src = document.createElement("span");
-    src.className = "ip-src";
-    const badge = document.createElement("span");
-    badge.className = `src-badge ${badgeCls}`;
-    badge.textContent = label;
-    src.append(badge);
-    main.append(a, src);
-
+    main.append(Object.assign(document.createElement("span"), { className: "ip-addr mono", textContent: addr }));
+    if (colo) main.append(Object.assign(document.createElement("span"), { className: "chip mono", textContent: colo }));
+    main.append(Object.assign(document.createElement("span"), { className: "src", textContent: label }));
     const conn = document.createElement("div");
-    conn.className = `ip-conn${connN ? " live" : ""}`;
+    conn.className = connLive ? "ip-conn live" : "ip-conn quiet";
     const n = document.createElement("span");
     n.className = "n";
     n.textContent = connN;
-    const u = document.createElement("span");
-    u.className = "u";
-    u.textContent = connUnit;
-    conn.append(n, u);
-
+    if (connLive) n.dataset.conn = addr;
+    conn.append(n, Object.assign(document.createElement("span"), { className: "u", textContent: connUnit }));
     const score = document.createElement("div");
     score.className = "ip-score";
     for (const [big, unit] of scoreParts) {
       const item = document.createElement("span");
       item.className = "score-item";
-      const b = document.createElement("b");
-      b.textContent = big;
-      item.append(b);
-      if (unit) {
-        const s = document.createElement("span");
-        s.textContent = unit;
-        item.append(s);
-      }
+      item.append(Object.assign(document.createElement("b"), { textContent: big }));
+      if (unit) item.append(document.createTextNode(" " + unit));
       score.append(item);
     }
-
     row.append(main, conn, score);
+    const act = document.createElement("div");
+    act.className = "rowbtn";
     for (const action of actions) {
       const btn = document.createElement("button");
-      btn.className = action.cls || "kick";
+      btn.className = "btn mini";
       btn.type = "button";
       btn.textContent = action.text;
       if (action.title) btn.title = action.title;
       btn.addEventListener("click", () => action.run(btn));
-      row.append(btn);
+      act.append(btn);
     }
+    row.append(act);
     return row;
   }
 
-  /* ---------- 渲染：在位皇族（1 层） ---------- */
-  function renderPool() {
+  /* ---------- 渲染：在位（壹） ---------- */
+  function renderThrone() {
     const active = poolSnapshot?.active || {};
     const ips = active.ips || [];
+    const domains = active.domains || [];
     const results = new Map((active.results || []).map((r) => [r.ip, r]));
     const byIp = poolSnapshot?.sourceByIp || {};
     const upstreamTotal = Object.values(upstreams)
       .filter((u) => u.inPool)
       .reduce((s, u) => s + (Number(u.connections) || 0), 0);
-
-    $("poolHeadline").textContent = ips.length
-      ? `${ips.length} IP + ${(active.domains || []).length} 域名在位 · ${upstreamTotal} 条连接在途`
-      : "皇位空悬——点「立即优选」开考";
-    $("nextRefresh").textContent = `下次候选刷新 ${fmtTime(poolSnapshot?.nextRefresh)}`;
-
-    const box = $("poolRows");
+    $("tallyPool").textContent = ips.length;
+    $("tallyDom").textContent = domains.length;
+    $("tallyConn").textContent = upstreamTotal;
+    $("coloLine").textContent = coloLineText(ips, results);
+    const box = $("throneRows");
     if (!box) return;
     box.replaceChildren();
-    if (!ips.length && !(active.domains || []).length) {
+    if (!ips.length && !domains.length) {
       const empty = document.createElement("p");
-      empty.className = "hero-foot";
-      empty.textContent = "无在位成员。候选会按供给层汇流；是否自动换池由 PROXY_AUTO_APPLY 控制。";
+      empty.className = "foot";
+      empty.textContent = "皇位空悬——点「立即优选」开考。候选会按供给层汇流；是否自动换池由 PROXY_AUTO_APPLY 控制。";
       box.append(empty);
       return;
     }
@@ -212,36 +203,66 @@
       if (!scoreParts.length) scoreParts.push(["在位", "体检随时点"]);
       frag.append(buildRow({
         addr: ip,
-        label: SRC_LABEL[byIp[ip]] || "已登基",
-        badgeCls: byIp[ip] || "",
+        colo: result?.colo || "",
+        label: SRC_LABEL[byIp[ip]] || byIp[ip] || "已登基",
+        connLive: connN > 0,
         connN: String(connN),
         connUnit: "连接",
         scoreParts,
         actions: [
-          { text: "测", cls: "kick probe", title: "测 WS 延迟" + (vlessEnabled() ? " + VLESS 速度" : ""), run: (btn) => probeIP(ip, btn) },
-          { text: "踢", title: "把这个 IP 踢出皇位并立即生效", run: (btn) => kickIP(ip, btn) },
+          { text: "测", title: "测 WS 延迟" + (vlessOn ? " + VLESS 速度" : ""), run: (btn) => probeIP(ip, btn) },
+          { text: "踢", title: "把这个 IP 踢出在位并立即生效", run: (btn) => kickIP(ip, btn) },
         ],
       }));
     }
     // 优选域名行：升格为 -fixed 直连成员，拨号时按当前 DNS 活解析。
-    for (const domain of active.domains || []) {
-      frag.append(buildRow({
-        addr: domain,
-        label: "域名直连",
-        badgeCls: "preferred",
-        connN: "—",
-        connUnit: "活解析",
-        scoreParts: [["跟随上游", "DNS 活解析"]],
-        actions: [
-          { text: "踢", title: "把该域名踢出转发池", run: (btn) => kickIP(domain, btn) },
-        ],
-      }));
+    for (const domain of domains) {
+      const row = document.createElement("div");
+      row.className = "ip-row";
+      const main = document.createElement("div");
+      main.className = "ip-main";
+      main.append(Object.assign(document.createElement("span"), { className: "ip-addr mono", textContent: domain }));
+      main.append(Object.assign(document.createElement("span"), { className: "chip mono", textContent: "DNS" }));
+      main.append(Object.assign(document.createElement("span"), { className: "src", textContent: "域名直连" }));
+      const conn = document.createElement("div");
+      conn.className = "ip-conn quiet";
+      conn.append(Object.assign(document.createElement("span"), { className: "n", textContent: "—" }));
+      conn.append(Object.assign(document.createElement("span"), { className: "u", textContent: "活解析" }));
+      const score = document.createElement("div");
+      score.className = "ip-score";
+      const s = document.createElement("span");
+      s.className = "score-item";
+      s.append(Object.assign(document.createElement("b"), { textContent: "跟随上游" }));
+      s.append(document.createTextNode(" DNS 活解析"));
+      score.append(s);
+      const act = document.createElement("div");
+      act.className = "rowbtn";
+      const kick = document.createElement("button");
+      kick.className = "btn mini";
+      kick.type = "button";
+      kick.textContent = "踢";
+      kick.title = "把该域名踢出转发池";
+      kick.addEventListener("click", () => kickIP(domain, kick));
+      act.append(kick);
+      row.append(main, conn, score, act);
+      frag.append(row);
     }
     box.append(frag);
-    $("poolFoot").textContent = "「测」= 重新体检（WS 延迟 + VLESS 测速）；踢后后台自动补位；设备粘性下同设备恒走同一上游。";
+  }
+  function coloLineText(ips, results) {
+    if (!ips.length) return "机房 –";
+    const dist = {};
+    for (const ip of ips) {
+      const c = results.get(ip)?.colo || "未知";
+      dist[c] = (dist[c] || 0) + 1;
+    }
+    let line = "机房 " + Object.entries(dist).map(([k, v]) => `${k}×${v}`).join(" · ");
+    if (coloPrefer) line += ` ｜ 偏好 ${coloPrefer}`;
+    line += ` ｜ 下次殿试 ${fmtTime(poolSnapshot?.nextRefresh)}`;
+    return line;
   }
 
-  /* ---------- 渲染：池候选 B 榜 ---------- */
+  /* ---------- 渲染：候选榜（叁） ---------- */
   function renderBench() {
     const box = $("benchRows");
     if (!box) return;
@@ -253,7 +274,7 @@
     box.replaceChildren();
     if (!candidates.length) {
       const empty = document.createElement("p");
-      empty.className = "hero-foot";
+      empty.className = "foot";
       empty.textContent = "候选已全部登基或为空。";
       box.append(empty);
       return;
@@ -263,55 +284,115 @@
       const result = results.get(ip);
       const scoreParts = [];
       if (result?.latency) scoreParts.push([`${result.latency}`, "ms"]);
-      if (!scoreParts.length) scoreParts.push(["候选", "3层已过筛"]);
+      if (!scoreParts.length) scoreParts.push(["候选", "初筛已过"]);
       frag.append(buildRow({
         addr: ip,
-        label: SRC_LABEL[byIp[ip]] || "候选",
-        badgeCls: byIp[ip] || "",
+        colo: result?.colo || "",
+        label: SRC_LABEL[byIp[ip]] || byIp[ip] || "候选",
+        connLive: false,
         connN: "—",
         connUnit: "候补",
         scoreParts,
         actions: [
-          { text: "测", cls: "kick probe", title: "测 WS 延迟" + (vlessEnabled() ? " + VLESS 速度" : ""), run: (btn) => probeIP(ip, btn) },
-          { text: "顶", cls: "kick promote", title: "体检通过后顶替在位最差成员", run: (btn) => promoteIP(ip, btn) },
+          { text: "顶", title: "体检通过后顶替在位最差成员", run: (btn) => promoteIP(ip, btn) },
+          { text: "测", title: "测 WS 延迟" + (vlessOn ? " + VLESS 测速" : ""), run: (btn) => probeIP(ip, btn) },
         ],
       }));
     }
     box.append(frag);
   }
 
-  function vlessEnabled() {
-    return false; // 由 /api/config 的 PROXY_VLESS_PROBE 决定；先乐观显示，后端实测为准
-  }
-
-  /* ---------- 渲染：供给心跳 ---------- */
-  function renderBeacons() {
-    const byIp = poolSnapshot?.sourceByIp || {};
-    const tiers = [
-      ["user", "手动"],
-      ["subscription", "订阅"],
-      ["bestcf", "BestCF"],
-      ["official", "官方段"],
-      ["proxy", "社区"],
-    ];
-    const box = $("sourceBeacons");
+  /* ---------- 渲染：供给心跳（贰）——只留活源 ---------- */
+  function renderHealth() {
+    const box = $("beacons");
     if (!box) return;
+    const byIp = poolSnapshot?.sourceByIp || {};
     box.replaceChildren();
-    for (const [key, label] of tiers) {
+    const frag = document.createDocumentFragment();
+    for (const [key, label] of LIVE_TIERS) {
       let n = 0;
       for (const ip of Object.keys(byIp)) if (byIp[ip] === key) n++;
-      const el = document.createElement("span");
-      el.className = `beacon ${n ? "ok" : "warn"}`;
-      const dot = document.createElement("span");
-      dot.className = `pulse ${n ? "ok" : ""}`;
-      const text = document.createElement("span");
-      text.textContent = `${label} `;
-      const b = document.createElement("b");
-      b.textContent = n;
-      text.append(b);
-      el.append(dot, text);
-      box.append(el);
+      const b = document.createElement("span");
+      b.className = "beacon";
+      b.append(Object.assign(document.createElement("span"), { className: `st ${n ? "ok" : "idle"}`, textContent: n ? "●" : "◌" }));
+      b.append(document.createTextNode(label + " "));
+      b.append(Object.assign(document.createElement("b"), { className: "mono", textContent: String(n) }));
+      frag.append(b);
     }
+    const doms = (poolSnapshot?.active?.domains || []).length + (poolSnapshot?.forwardDomains || []).length;
+    const d = document.createElement("span");
+    d.className = "beacon";
+    d.append(Object.assign(document.createElement("span"), { className: `st ${doms ? "ok" : "idle"}`, textContent: doms ? "●" : "◌" }));
+    d.append(document.createTextNode("域名表 "));
+    d.append(Object.assign(document.createElement("b"), { className: "mono", textContent: String(doms) }));
+    frag.append(d);
+    box.append(frag);
+    // 渠道健康小表：按 IP 数降序取前 10（全量在 /api/status.sources）。
+    const hb = $("healthBody");
+    if (!hb) return;
+    hb.replaceChildren();
+    const entries = Object.entries(sourceHealth || {})
+      .map(([k, v]) => ({ key: shortKey(k), ips: Number(v?.ips) || 0, f: Number(v?.fetches) || 0, s: Number(v?.successes) || 0, ago: v?.lastSuccess ? fmtAgo(v.lastSuccess) : (v?.lastFailed ? "败 " + fmtAgo(v.lastFailed) : "–") }))
+      .sort((a, b) => b.ips - a.ips)
+      .slice(0, 10);
+    if (!entries.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 4;
+      td.textContent = "尚未刷新";
+      tr.append(td);
+      hb.append(tr);
+      return;
+    }
+    for (const e of entries) {
+      const tr = document.createElement("tr");
+      tr.append(Object.assign(document.createElement("td"), { textContent: e.key }));
+      tr.append(Object.assign(document.createElement("td"), { className: "mono", textContent: `${e.f}/${e.s}` }));
+      const ipTd = document.createElement("td");
+      ipTd.className = "mono";
+      if (e.ips > 0) ipTd.classList.add("hl");
+      ipTd.textContent = String(e.ips);
+      tr.append(ipTd);
+      tr.append(Object.assign(document.createElement("td"), { textContent: e.ago }));
+      hb.append(tr);
+    }
+  }
+  function shortKey(k) {
+    return k
+      .replace("https://bestcf.pages.dev/", "bestcf·")
+      .replace("https://raw.githubusercontent.com/", "gh·")
+      .replace("https://cf.junzhen.qzz.io/", "junzhen·");
+  }
+
+  /* ---------- 渲染：设备名册（伍） ---------- */
+  function renderLan(sources) {
+    const body = $("lanBody");
+    if (!body) return;
+    body.replaceChildren();
+    $("lanHead").textContent = `伍 · 设备名册 · ${sources.length} 台`;
+    if (!sources.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 3;
+      td.textContent = "当前无局域网连接";
+      tr.append(td);
+      body.append(tr);
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    for (const s of sources) {
+      const tr = document.createElement("tr");
+      const states = Object.entries(s.states || {}).map(([k, v]) => `${k} × ${v}`).join(" · ");
+      const cells = [[s.ip || "--", "mono"], [String(s.connections ?? 0), "mono hl"], [states || "--", ""]];
+      for (const [value, cls] of cells) {
+        const td = document.createElement("td");
+        td.textContent = value;
+        if (cls) td.className = cls;
+        tr.append(td);
+      }
+      frag.append(tr);
+    }
+    body.append(frag);
   }
 
   /* ---------- 动作一：立即优选 ---------- */
@@ -324,8 +405,8 @@
         api("/api/cfnat/proxy-candidates", { method: "POST", body: "{}" }));
       if (isCurrentPoll("pool", version)) {
         poolSnapshot = snap;
-        renderPool();
-        renderBeacons();
+        renderThrone();
+        renderBench();
       }
       await Promise.allSettled([pullPool(), pullStatus(), pullUpstreams()]);
       const n = snap.active?.ips?.length || 0;
@@ -336,7 +417,7 @@
     }
   }
 
-  /* ---------- 动作二：手动供 IP ---------- */
+  /* ---------- 动作二：智能供给（单个 IPv4 登基顶替，多行批量入池） ---------- */
   async function supply() {
     const text = $("supplyInput").value.trim();
     if (!text) {
@@ -344,11 +425,16 @@
       toast("先粘贴 IP、域名或订阅内容");
       return;
     }
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(text)) {
+      const ok = await doPromote(text, null);
+      if (ok) { $("supplyInput").value = ""; updateSupplyHint(); }
+      return;
+    }
     invalidatePoll("pool");
     invalidatePoll("status");
     invalidatePoll("upstreams");
     try {
-      const data = await busy($("supplyBtn"), "supplyLabel", () =>
+      const data = await busy($("supplyBtn"), "supplyBtn", () =>
         api("/api/cfnat/proxy-scan/apply", {
           method: "POST",
           body: JSON.stringify({ ips: text, subscription: text, limit: 500 }),
@@ -357,15 +443,30 @@
       if (data.domains) parts.push(`${data.domains} 个域名`);
       toast(`手动供给已应用：${parts.join(" + ")}（后台可继续复核）`);
       $("supplyInput").value = "";
+      updateSupplyHint();
       await Promise.allSettled([pullPool(), pullUpstreams()]);
     } catch (e) {
       toast(`优选入池失败：${e.message}`);
     }
   }
+  function updateSupplyHint() {
+    const v = $("supplyInput").value.trim();
+    const single = /^\d{1,3}(\.\d{1,3}){3}$/.test(v);
+    $("supplyBtn").textContent = v === "" ? "批量入池" : (single ? "登基顶替" : "批量入池");
+    $("supplyHint").innerHTML = "";
+    $("supplyHint").append(
+      document.createTextNode("粘贴"),
+      Object.assign(document.createElement("b"), { textContent: "单个公网 IPv4" }),
+      document.createTextNode(" → 体检后登基顶替；"),
+      Object.assign(document.createElement("b"), { textContent: "多行/域名/订阅" }),
+      document.createTextNode(" → 批量入池。"),
+    );
+  }
 
-  /* ---------- 动作三：单 IP 体检（测延迟 + 可选测速） ---------- */
+  /* ---------- 动作三：单 IP 体检 ---------- */
   async function probeIP(ip, button) {
     button.disabled = true;
+    const prev = button.textContent;
     button.textContent = "…";
     try {
       const data = await api("/api/cfnat/proxy-probe", {
@@ -377,6 +478,8 @@
         return;
       }
       let msg = `${ip} 延迟 ${data.wsLatencyMs} ms`;
+      if (data.colo) msg += ` [${data.colo}]`;
+      if (Number(data.wsFails) > 0) msg += ` · 3测${data.wsFails}失`;
       if (data.vless) {
         if (data.vless.ok) msg += ` · 测速 ${Number(data.vless.mbps).toFixed(1)} Mbps`;
         else msg += ` · 测速失败：${data.vless.error}`;
@@ -386,17 +489,15 @@
       toast(`体检失败：${e.message}`);
     } finally {
       button.disabled = false;
-      button.textContent = "测";
+      button.textContent = prev;
     }
   }
 
-  /* ---------- 动作四：单 IP 顶替 ---------- */
+  /* ---------- 动作四：顶替 / 指定登基 ---------- */
   async function promoteIP(ip, button) {
     if (!window.confirm(`让 ${ip} 顶替在位最差成员？\n体检通过即换座，立即生效。`)) return;
     await doPromote(ip, button);
   }
-
-  // doPromote 是顶替的实际动作，供 B 榜按钮与「指定登基」输入框共用。
   async function doPromote(ip, button) {
     if (button) button.disabled = true;
     invalidatePoll("pool");
@@ -407,9 +508,9 @@
         method: "POST",
         body: JSON.stringify({ ip }),
       });
-      toast(data.already
-        ? `${ip} 已在位，无需顶替`
-        : `${ip} 已顶替 ${data.replaced} 登基`);
+      let msg = data.already ? `${ip} 已在位，无需顶替` : `${ip} 已顶替 ${data.replaced} 登基`;
+      if (data.colo) msg += ` [${data.colo}]`;
+      toast(msg);
       await Promise.allSettled([pullPool(), pullUpstreams()]);
       return true;
     } catch (e) {
@@ -420,30 +521,7 @@
     }
   }
 
-  /* ---------- 动作四之一：指定任意 IP 登基 ---------- */
-  async function pinSpecifiedIP() {
-    const input = $("pinIp");
-    const button = $("pinBtn");
-    const ip = input.value.trim();
-    if (!ip) {
-      toast("先填一个公网 IPv4");
-      input.focus();
-      return;
-    }
-    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
-      toast("格式不对，要 IPv4 四段，如 104.16.0.1");
-      return;
-    }
-    button.disabled = true;
-    try {
-      const ok = await doPromote(ip, null);
-      if (ok) input.value = "";
-    } finally {
-      button.disabled = false;
-    }
-  }
-
-  /* ---------- 动作五：踢皇 ---------- */
+  /* ---------- 动作五：踢 ---------- */
   async function kickIP(ip, button) {
     if (!window.confirm(`踢掉 ${ip}？\n在途连接会瞬断重连，剩余成员立即接管，后台随后自动补位。`)) return;
     button.disabled = true;
@@ -464,17 +542,16 @@
     }
   }
 
-  /* ---------- 日志页 ---------- */
+  /* ---------- 日志抽屉 ---------- */
   async function pullLogs() {
     const version = beginPoll("logs");
     try {
       const data = await api(`/api/logs?target=${$("logTarget").value}&lines=200`);
-      if (!isCurrentPoll("logs", version) || currentPage !== "logs") return;
+      if (!isCurrentPoll("logs", version) || $("drawerLog").hidden) return;
       logLines = data.lines || [];
       renderLogs();
     } catch (_) { /* 容错 */ }
   }
-
   function renderLogs() {
     const box = $("logBox");
     if (!box) return;
@@ -487,11 +564,10 @@
   /* ---------- 装配 ---------- */
   $("optimizeBtn").addEventListener("click", optimize);
   $("supplyBtn").addEventListener("click", supply);
+  $("supplyInput").addEventListener("input", updateSupplyHint);
   $("benchRefresh").addEventListener("click", pullPool);
-  $("pinBtn").addEventListener("click", pinSpecifiedIP);
-  $("pinIp").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") pinSpecifiedIP();
-  });
+  $("logToggle").addEventListener("click", () => { $("drawerLog").hidden = !$("drawerLog").hidden; if (!$("drawerLog").hidden) pullLogs(); });
+  $("lanToggle").addEventListener("click", () => { $("drawerLan").hidden = !$("drawerLan").hidden; if (!$("drawerLan").hidden) pullLan(); });
   $("logTarget").addEventListener("change", pullLogs);
   $("logQuery").addEventListener("input", renderLogs);
   $("logCopy").addEventListener("click", async () => {
@@ -503,15 +579,25 @@
     }
   });
 
+  /* ---------- 时钟 ---------- */
+  function tick() {
+    const d = new Date();
+    const t = [d.getHours(), d.getMinutes(), d.getSeconds()].map((x) => String(x).padStart(2, "0")).join(":");
+    $("clock").textContent = t;
+    $("footClock").textContent = d.toLocaleDateString();
+  }
+
   async function boot() {
-    $("footClock").textContent = new Date().toLocaleDateString();
-    route();
+    updateSupplyHint();
+    tick();
+    setInterval(tick, 1000);
+    await pullConfig();
     await Promise.allSettled([pullStatus(), pullPool(), pullUpstreams(), pullLan()]);
     setInterval(pullStatus, 3000);
     setInterval(pullUpstreams, 4000);
     setInterval(pullPool, 9000);
     setInterval(pullLan, 12000);
-    setInterval(() => { if (currentPage === "logs") pullLogs(); }, 5000);
+    setInterval(() => { if (!$("drawerLog").hidden) pullLogs(); }, 5000);
   }
   boot();
 })();

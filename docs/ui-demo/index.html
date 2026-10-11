@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>皇位厅 · 优选台 DEMO</title>
+<link rel="icon" href="data:,">
+<style>
+/* 御前黑白灰终端：除数据外无一处色彩。唯一响亮之物 = 在位行里呼吸的等宽连接数。 */
+:root {
+  color-scheme: dark;
+  --bg: #0a0a0b;
+  --surface: #101013;
+  --surface-2: #16171b;
+  --line: rgb(255 255 255 / .08);
+  --line-strong: rgb(255 255 255 / .2);
+  --text: #e9e9ec;
+  --text-2: #a2a3ab;
+  --text-3: #84858e;   /* 元标签/注脚下限：#101013 底上约 5:1，守 4.5 地板 */
+  --bright: #fff;
+  --radius: 4px;
+  --font-mono: "Cascadia Code", "Cascadia Mono", Consolas, "SFMono-Regular", monospace;
+  --font-sans: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
+  --ease: cubic-bezier(.2, 0, 0, 1);
+  --t-fast: 120ms;
+}
+* { box-sizing: border-box; }
+html { background: var(--bg); }
+body {
+  margin: 0; min-height: 100vh; color: var(--text);
+  background: var(--bg);
+  font-family: var(--font-sans); font-size: 13px; line-height: 1.5;
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--bright); outline-offset: 2px;
+}
+::selection { background: var(--bright); color: #000; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* ---------- 顶栏 ---------- */
+.topbar {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: var(--s4);
+  min-height: 56px; padding: var(--s2) var(--s5);
+  border-bottom: 1px solid var(--line);
+  background: rgb(10 10 11 / .94);
+}
+.brand { display: flex; align-items: center; gap: var(--s3); margin-right: auto; min-width: 0; }
+.brand-glyph {
+  display: grid; place-items: center; flex: none;
+  width: 30px; height: 30px; border: 1px solid var(--line-strong); border-radius: var(--radius);
+  font: 700 13px var(--font-mono); color: var(--bright);
+}
+.brand strong { display: block; font-size: 14px; font-weight: 700; }
+.brand small { display: block; color: var(--text-3); font-size: 11px; }
+.top-status { display: flex; align-items: center; gap: var(--s2); font-size: 12px; color: var(--text-2); white-space: nowrap; }
+.st { font-family: var(--font-mono); }
+.st.ok { color: var(--bright); }
+.st.idle { color: var(--text-3); }
+.clock { font-family: var(--font-mono); color: var(--text-3); font-size: 12px; }
+
+/* ---------- 按钮 ---------- */
+.btn {
+  border: 1px solid var(--line-strong); border-radius: var(--radius);
+  background: transparent; color: var(--text);
+  font-family: var(--font-mono); font-size: 12px;
+  padding: 6px 14px; white-space: nowrap;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.btn:hover { background: var(--bright); color: #000; border-color: var(--bright); }
+.btn:disabled { opacity: .45; cursor: wait; }
+.btn.primary { background: var(--bright); color: #000; border-color: var(--bright); font-weight: 700; }
+.btn.primary:hover { background: transparent; color: var(--bright); }
+.btn.mini { padding: 5px 10px; font-size: 12px; min-width: 32px; min-height: 30px; }
+.rowbtn { display: flex; gap: var(--s1); }
+
+/* ---------- 舞台 ---------- */
+.stage { width: min(960px, 100%); margin: 0 auto; padding: var(--s5) var(--s4) var(--s6); display: grid; gap: var(--s4); }
+.card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: var(--s5);
+}
+.overline {
+  margin: 0 0 var(--s2); color: var(--text-3);
+  font-size: 11px; font-weight: 700; letter-spacing: .12em;
+}
+.head-row { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--s3); margin-bottom: var(--s3); }
+.head-row .actions { display: flex; gap: var(--s2); align-items: center; }
+
+/* ---------- 御座：巨号数字摘要 ---------- */
+.tally { display: flex; gap: var(--s6); margin: var(--s2) 0 var(--s3); flex-wrap: wrap; }
+.tally .n {
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+  font-size: clamp(44px, 7vw, 68px); font-weight: 700; line-height: 1; color: var(--bright);
+}
+.tally .u { font-size: 12px; color: var(--text-3); margin-top: var(--s1); }
+.tally > div { display: flex; align-items: baseline; gap: var(--s2); }
+.cololine {
+  display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4);
+  font-size: 12px; color: var(--text-2);
+  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  padding: var(--s2) 0; margin-bottom: var(--s2);
+}
+.cololine b { color: var(--text); font-weight: 700; }
+
+/* ---------- 在位行 ---------- */
+.ip-row {
+  display: grid; grid-template-columns: minmax(170px, 1.5fr) auto auto auto;
+  gap: var(--s2) var(--s4); align-items: center;
+  padding: var(--s2) 0; border-bottom: 1px solid var(--line);
+}
+.ip-row:last-child { border-bottom: 0; }
+.ip-main { display: flex; align-items: center; gap: var(--s2); min-width: 0; flex-wrap: wrap; }
+.ip-addr { font-family: var(--font-mono); font-size: 13px; color: var(--text); }
+.chip {
+  font-family: var(--font-mono); font-size: 11px; color: var(--bright-dim, #cfcfd6);
+  color: #cfcfd6; border: 1px solid var(--line-strong); border-radius: var(--radius);
+  padding: 1px 6px; white-space: nowrap;
+}
+.src { font-size: 11px; color: var(--text-3); white-space: nowrap; }
+.ip-conn { display: flex; align-items: baseline; gap: var(--s1); min-width: 86px; justify-content: flex-end; }
+.ip-conn .n {
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+  font-size: 26px; font-weight: 700; line-height: 1;
+}
+.ip-conn.live .n { color: var(--bright); animation: breathe 3.2s ease-in-out infinite; }
+.ip-conn.quiet .n { color: var(--text-3); font-weight: 400; }
+.ip-conn .u { font-size: 11px; color: var(--text-3); }
+@keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+.ip-score { display: flex; gap: var(--s3); justify-content: flex-end; }
+.score-item { font-family: var(--font-mono); font-size: 12px; color: var(--text-2); white-space: nowrap; }
+.score-item b { color: var(--text); font-weight: 700; }
+.foot { margin: var(--s3) 0 0; font-size: 12px; color: var(--text-3); }
+
+/* ---------- 供给 ---------- */
+.supply-row { display: grid; grid-template-columns: 1fr auto; gap: var(--s2); align-items: stretch; }
+textarea {
+  width: 100%; min-height: 68px; resize: vertical;
+  background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius);
+  font-family: var(--font-mono); font-size: 12px; color: var(--text);
+  padding: var(--s2) var(--s3);
+}
+textarea::placeholder { color: var(--text-3); }
+.hintline { margin: var(--s2) 0 0; font-size: 12px; color: var(--text-3); }
+.hintline b { color: var(--text-2); }
+.beacons { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s5); margin-top: var(--s4); padding-top: var(--s3); border-top: 1px solid var(--line); }
+.beacon { display: flex; align-items: baseline; gap: var(--s2); font-size: 12px; color: var(--text-2); }
+.beacon b { font-family: var(--font-mono); font-size: 15px; color: var(--bright); font-weight: 700; }
+
+/* ---------- 健康小表 / 设备表 ---------- */
+.table-wrap { overflow-x: auto; margin-top: var(--s3); }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--text-3); font-weight: 400; font-size: 11px; letter-spacing: .06em; }
+td.mono, th.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+td.hl { color: var(--bright); font-weight: 700; }
+tr:last-child td { border-bottom: 0; }
+
+/* ---------- 日志终端 ---------- */
+.term {
+  margin: var(--s2) 0 0; padding: var(--s3);
+  background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius);
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.65; color: var(--text-2);
+  max-height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-all;
+}
+.term .k { color: var(--bright); }
+.log-toolbar { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; }
+select, input[type="search"] {
+  background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius);
+  padding: 5px 10px; font-size: 12px;
+}
+.toggle { display: flex; align-items: center; gap: var(--s1); font-size: 12px; color: var(--text-2); }
+.toggle input { accent-color: #fff; }
+
+/* ---------- 抽屉 / 页脚 / toast ---------- */
+.drawerbar { display: flex; gap: var(--s2); }
+[hidden] { display: none !important; }
+.foot { text-align: center; color: var(--text-3); font-size: 11px; padding: var(--s5) 0 var(--s2); }
+.toast {
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(8px);
+  background: var(--surface-2); border: 1px solid var(--line-strong); border-radius: var(--radius);
+  color: var(--text); font-family: var(--font-mono); font-size: 12px;
+  padding: 8px 16px; max-width: min(90vw, 640px);
+  opacity: 0; pointer-events: none; transition: opacity var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+  z-index: 50;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+@media (max-width: 560px) {
+  .topbar { padding: var(--s2) var(--s3); gap: var(--s2) var(--s3); }
+  .brand small { display: none; }   /* 窄屏藏副题，防碎字 */
+  .clock { display: none; }
+  /* 窄屏顶栏两行网格：品牌+主按钮居上，状态+抽屉居下 */
+  .topbar { display: grid; grid-template-columns: 1fr auto; row-gap: var(--s2); }
+  .brand { grid-column: 1; grid-row: 1; }
+  #optimizeBtn { grid-column: 2; grid-row: 1; }
+  .top-status { grid-column: 1; grid-row: 2; }
+  .drawerbar { grid-column: 2; grid-row: 2; justify-self: end; }
+  .stage { padding: var(--s3) var(--s3) var(--s5); }
+  .card { padding: var(--s4); }
+  .ip-row { grid-template-columns: 1fr; gap: var(--s1); padding: var(--s3) 0; }
+  .ip-conn, .ip-score { justify-content: flex-start; }
+  .rowbtn .btn { padding: 8px 16px; }   /* 拇指区：行内动作触击面提到 ~36px */
+  .supply-row { grid-template-columns: 1fr; }
+  .supply-row .btn { justify-self: end; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ip-conn.live .n { animation: none; }
+  .toast { transition: none; }
+}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-glyph" aria-hidden="true">位</span>
+    <div><strong>皇位厅</strong><small>优选台 · 本地控制面 DEMO</small></div>
+  </div>
+  <div class="top-status"><span class="st ok">●</span><span>转发运行中</span></div>
+  <span class="clock mono" id="clock">--:--:--</span>
+  <div class="drawerbar">
+    <button class="btn mini" id="logToggle" type="button">日志</button>
+    <button class="btn mini" id="lanToggle" type="button">设备</button>
+  </div>
+  <button class="btn primary" id="optimizeBtn" type="button"><span id="optimizeLabel">立即优选</span></button>
+</header>
+
+<main class="stage">
+
+  <!-- 壹 · 在位 -->
+  <section class="card" aria-label="在位">
+    <p class="overline">壹 · 在位</p>
+    <div class="tally" aria-live="polite">
+      <div><span class="n mono" id="tallyPool">5</span><span class="u">席在位</span></div>
+      <div><span class="n mono" id="tallyDom">2</span><span class="u">域名随驾</span></div>
+      <div><span class="n mono" id="tallyConn">37</span><span class="u">连接在途</span></div>
+    </div>
+    <div class="cololine mono" id="coloLine"></div>
+    <div id="throneRows"></div>
+    <p class="foot">「测」= 重新体检（WS 延迟 + 可选 VLESS 测速）；踢后后台自动补位；设备粘性下同设备恒走同一上游。</p>
+  </section>
+
+  <!-- 贰 · 供给 -->
+  <section class="card" aria-label="供给">
+    <div class="head-row">
+      <p class="overline">贰 · 供给</p>
+    </div>
+    <div class="supply-row">
+      <textarea id="supplyInput" rows="3" placeholder="104.16.123.96&#10;或粘贴多行 IP / 优选域名 / vless:// 节点链接 / 订阅内容"></textarea>
+      <button class="btn" id="supplyBtn" type="button">批量入池</button>
+    </div>
+    <p class="hintline" id="supplyHint">粘贴<b>单个公网 IPv4</b> → 体检后登基顶替；<b>多行/域名/订阅</b> → 批量入池。</p>
+    <div class="beacons" id="beacons"></div>
+    <div class="table-wrap"><table aria-label="渠道健康">
+      <thead><tr><th>渠道</th><th class="mono">抓/成</th><th class="mono">IP</th><th>最近</th></tr></thead>
+      <tbody id="healthBody"></tbody>
+    </table></div>
+  </section>
+
+  <!-- 叁 · 候选 -->
+  <section class="card" aria-label="候选">
+    <div class="head-row">
+      <p class="overline">叁 · 候选</p>
+      <div class="actions"><span class="foot" style="margin:0">前 24 · 按 WS 延迟</span><button class="btn mini" id="benchRefresh" type="button">刷新</button></div>
+    </div>
+    <div id="benchRows"></div>
+    <p class="foot">「顶」= 体检通过后顶替在位最差成员。也可在供给区直接指定任意公网 IPv4 登基。</p>
+  </section>
+
+  <!-- 肆 · 日志（抽屉） -->
+  <section class="card" id="drawerLog" aria-label="日志" hidden>
+    <p class="overline">肆 · 日志</p>
+    <div class="log-toolbar">
+      <select aria-label="日志进程"><option>CFnat</option><option>CFdata</option></select>
+      <input id="logQuery" type="search" placeholder="筛选" aria-label="筛选日志">
+      <label class="toggle"><input type="checkbox" checked>跟随</label>
+      <button class="btn mini" id="logCopy" type="button">复制</button>
+    </div>
+    <pre class="term" id="logBox" role="log"></pre>
+  </section>
+
+  <!-- 伍 · 设备（抽屉） -->
+  <section class="card" id="drawerLan" aria-label="设备名册" hidden>
+    <p class="overline">伍 · 设备名册</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>局域网设备</th><th class="mono">连接</th><th>TCP 状态</th></tr></thead>
+      <tbody id="lanBody"></tbody>
+    </table></div>
+    <p class="foot">cfnat 是四层哑管道：TLS 加密后读不到 UA/Host，设备识别以局域网 IP 为准。</p>
+  </section>
+
+</main>
+
+<footer class="foot">皇位厅 · 三层漏斗 + 设备粘性 · DEMO 预览（数据纯属虚构） · 机房偏好 HKG,SJC</footer>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+/* mock 数据按真 API 形状伪造（proxy-candidates / upstreams / connections / status.sources）。 */
+const POOL = [
+  { ip: "104.16.123.96",  colo: "HKG", src: "BestCF", mbps: 3.7,  ms: 59,  conn: 12 },
+  { ip: "43.175.131.30",  colo: "HKG", src: "手动",   mbps: 1.8,  ms: 61,  conn: 9 },
+  { ip: "104.27.200.69",  colo: "LAX", src: "BestCF", mbps: 28.6, ms: 146, conn: 7 },
+  { ip: "172.67.60.78",   colo: "SJC", src: "订阅",   mbps: 2.5,  ms: 140, conn: 5 },
+  { ip: "188.114.97.3",   colo: "NRT", src: "订阅",   mbps: 0.6,  ms: 92,  conn: 4 },
+];
+const DOMAINS = ["youxuan.cf.090227.xyz", "cdn.2020111.xyz"];
+const BENCH = [
+  ["104.25.140.153","HKG","BestCF",63],["172.67.62.214","LAX","BestCF",71],
+  ["104.27.192.65","LAX","订阅",74],["104.22.66.8","SEA","订阅",81],
+  ["172.67.54.193","LAX","BestCF",88],["104.27.207.5","LAX","BestCF",93],
+  ["172.67.58.91","SJC","订阅",97],["104.27.197.63","FRA","BestCF",104],
+  ["188.114.96.44","NRT","BestCF",109],["104.17.32.7","HKG","手动",112],
+  ["172.64.32.10","SJC","订阅",118],["104.21.58.210","LAX","BestCF",126],
+  ["131.0.72.90","HKG","BestCF",131],["197.234.240.21","FRA","订阅",139],
+  ["198.41.128.55","LAX","BestCF",147],["162.158.90.12","SJC","订阅",155],
+  ["141.101.76.200","NRT","BestCF",160],["108.162.193.77","LAX","订阅",168],
+  ["190.93.240.113","FRA","BestCF",175],["188.114.115.9","HKG","订阅",183],
+  ["103.21.244.130","SJC","BestCF",191],["103.22.200.45","LAX","BestCF",205],
+  ["103.31.4.61","NRT","订阅",232],["141.101.90.3","FRA","BestCF",260],
+];
+const HEALTH = [
+  ["手动 · env", "3/3", "12", "1天前"],
+  ["bestcf · cmliu/all.txt", "12/12", "240", "2小时前"],
+  ["bestcf · wetest/ipv4.txt", "12/11", "168", "2小时前"],
+  ["bestcf · uouin/all.txt", "12/12", "96", "2小时前"],
+  ["订阅 · owo.o00o.ooo", "6/6", "180", "5小时前"],
+  ["订阅 · cm.soso.edu.kg", "6/4", "96", "5小时前"],
+  ["域名表 · bestcf/domain", "4/4", "12", "2小时前"],
+  ["解析 · cf.090227.xyz", "9/9", "8", "2小时前"],
+];
+const LAN = [
+  ["192.168.1.11", 14, "ESTABLISHED ×12 · TIME_WAIT ×2"],
+  ["192.168.1.20", 9, "ESTABLISHED ×9"],
+  ["192.168.1.7", 8, "ESTABLISHED ×6 · TIME_WAIT ×2"],
+  ["192.168.1.33", 6, "ESTABLISHED ×6"],
+];
+const LOGS = [
+  "[16:52:03] tier3 prescreen: 841 candidates -> 60 shortlist (rtt<=5000ms)",
+  "[16:52:28] WS screening: 58/60 pass, best 59ms",
+  "[16:52:41] VLESS final: 7 pass, top 28.6 Mbps (LAX)",
+  "[16:52:41] proxy candidate cache refreshed: 328 IPv4",
+  "[16:52:41] 已踢掉 172.64.12.90，剩 4 个 IP 在位，后台补位中",
+  "[16:53:02] kick refill: +1 IPs -> pool 5 IPs",
+  "[16:55:20] pool switch blocked: active pool healthy, keep working IPs",
+  "[16:57:15] subscription sweep: 2 maintainers ok, 180 new IPs verified",
+  "[17:01:44] proxy active pool reverified: 5 IPs",
+  "[17:05:00] 测速 0.6 Mbps 低于参考值 3 Mbps（软门槛，仅影响排序）",
+];
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+let toastTimer = 0;
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
+}
+function rowBtn(text, title, run) {
+  const b = el("button", "btn mini", text); b.type = "button"; b.title = title;
+  b.addEventListener("click", () => run(b)); return b;
+}
+/* ---------- 在位行 ---------- */
+function buildThroneRow(m) {
+  const row = el("div", "ip-row");
+  const main = el("div", "ip-main");
+  main.append(el("span", "ip-addr mono", m.ip), el("span", "chip mono", m.colo), el("span", "src", m.src));
+  const conn = el("div", m.conn > 0 ? "ip-conn live" : "ip-conn quiet");
+  const n = el("span", "n", String(m.conn)); n.dataset.conn = "1";
+  conn.append(n, el("span", "u", "连接"));
+  const score = el("div", "ip-score");
+  const s1 = el("span", "score-item"); s1.append(el("b", null, m.mbps.toFixed(1)), document.createTextNode(" Mbps"));
+  const s2 = el("span", "score-item"); s2.append(el("b", null, String(m.ms)), document.createTextNode(" ms"));
+  score.append(s1, s2);
+  const act = el("div", "rowbtn");
+  act.append(rowBtn("测", "重新体检（WS 延迟 + 可选 VLESS 测速）", () => toast(`${m.ip} 延迟 ${m.ms} ms · 测速 ${m.mbps.toFixed(1)} Mbps`)));
+  act.append(rowBtn("踢", "踢出在位并立即生效，后台自动补位", () => toast(`已踢掉 ${m.ip}，后台补位中（演示）`)));
+  row.append(main, conn, score, act);
+  return row;
+}
+function renderThrone() {
+  const box = $("throneRows"); box.replaceChildren();
+  const frag = document.createDocumentFragment();
+  for (const m of POOL) frag.append(buildThroneRow(m));
+  for (const d of DOMAINS) {
+    const row = el("div", "ip-row");
+    const main = el("div", "ip-main");
+    main.append(el("span", "ip-addr mono", d), el("span", "chip mono", "DNS"), el("span", "src", "域名直连"));
+    const conn = el("div", "ip-conn quiet");
+    conn.append(el("span", "n", "—"), el("span", "u", "活解析"));
+    const score = el("div", "ip-score");
+    const s = el("span", "score-item"); s.append(el("b", null, "跟随上游"), document.createTextNode(" DNS 活解析"));
+    score.append(s);
+    const act = el("div", "rowbtn");
+    act.append(rowBtn("踢", "把该域名踢出转发池", () => toast(`已踢掉 ${d}（演示）`)));
+    row.append(main, conn, score, act);
+    frag.append(row);
+  }
+  box.append(frag);
+  const total = POOL.reduce((s, m) => s + m.conn, 0);
+  $("tallyPool").textContent = POOL.length;
+  $("tallyDom").textContent = DOMAINS.length;
+  $("tallyConn").textContent = total;
+  const dist = {};
+  for (const m of POOL) dist[m.colo] = (dist[m.colo] || 0) + 1;
+  $("coloLine").textContent = "机房 " + Object.entries(dist).map(([k, v]) => `${k}×${v}`).join(" · ")
+    + " ｜ 偏好 HKG,SJC ｜ 下次殿试 04:00";
+}
+/* ---------- 候选榜 ---------- */
+function renderBench() {
+  const box = $("benchRows"); box.replaceChildren();
+  const frag = document.createDocumentFragment();
+  for (const [ip, colo, src, ms] of BENCH) {
+    const row = el("div", "ip-row");
+    const main = el("div", "ip-main");
+    main.append(el("span", "ip-addr mono", ip), el("span", "chip mono", colo), el("span", "src", src));
+    const conn = el("div", "ip-conn quiet");
+    conn.append(el("span", "n", "—"), el("span", "u", "候补"));
+    const score = el("div", "ip-score");
+    const s = el("span", "score-item"); s.append(el("b", null, String(ms)), document.createTextNode(" ms"));
+    score.append(s);
+    const act = el("div", "rowbtn");
+    act.append(rowBtn("顶", "体检通过后顶替在位最差成员", () => toast(`${ip} 体检通过，已顶替登基（演示）`)));
+    act.append(rowBtn("测", "测 WS 延迟 + 可选 VLESS 测速", () => toast(`${ip} 延迟 ${ms} ms（演示）`)));
+    row.append(main, conn, score, act);
+    frag.append(row);
+  }
+  box.append(frag);
+}
+/* ---------- 供给区 ---------- */
+function renderHealth() {
+  const beacons = [["手动", 12], ["订阅", 416], ["BestCF", 328], ["域名表", 12]];
+  const box = $("beacons"); box.replaceChildren();
+  for (const [label, n] of beacons) {
+    const b = el("span", "beacon");
+    b.append(el("span", "st ok", "●"), el("span", null, label + " "), el("b", "mono", String(n)));
+    box.append(b);
+  }
+  const hb = $("healthBody"); hb.replaceChildren();
+  for (const [src, ratio, ips, ago] of HEALTH) {
+    const tr = document.createElement("tr");
+    tr.append(el("td", null, src));
+    tr.append(el("td", "mono", ratio), el("td", "mono hl", ips), el("td", null, ago));
+    hb.append(tr);
+  }
+}
+/* ---------- 日志 / 设备 ---------- */
+function renderLogs() {
+  $("logBox").textContent = LOGS.join("\n");
+  const lb = $("lanBody"); lb.replaceChildren();
+  for (const [ip, n, states] of LAN) {
+    const tr = document.createElement("tr");
+    tr.append(el("td", "mono", ip), el("td", "mono hl", String(n)), el("td", null, states));
+    lb.append(tr);
+  }
+}
+/* ---------- 交互 ---------- */
+function toggle(id) { const s = $(id); s.hidden = !s.hidden; }
+$("logToggle").addEventListener("click", () => toggle("drawerLog"));
+$("lanToggle").addEventListener("click", () => toggle("drawerLan"));
+$("optimizeBtn").addEventListener("click", (e) => {
+  const b = e.currentTarget; b.disabled = true; $("optimizeLabel").textContent = "殿试中…";
+  toast("全量终审：初筛 → WS 初考 → VLESS 殿试（演示）");
+  setTimeout(() => { b.disabled = false; $("optimizeLabel").textContent = "立即优选"; toast("优选完成，5 个 IP 在位（演示）"); }, 1100);
+});
+$("benchRefresh").addEventListener("click", () => { renderBench(); toast("候选榜已刷新（演示）"); });
+$("supplyBtn").addEventListener("click", () => {
+  const v = $("supplyInput").value.trim();
+  if (!v) { $("supplyInput").focus(); toast("先粘贴 IP、域名或订阅内容"); return; }
+  toast(/^\d{1,3}(\.\d{1,3}){3}$/.test(v) ? `${v} 体检通过，已登基顶替（演示）` : `批量入池：已收录，考试通过即登基（演示）`);
+  $("supplyInput").value = ""; updateSupplyHint();
+});
+function updateSupplyHint() {
+  const v = $("supplyInput").value.trim();
+  const single = /^\d{1,3}(\.\d{1,3}){3}$/.test(v);
+  $("supplyBtn").textContent = v === "" ? "批量入池" : (single ? "登基顶替" : "批量入池");
+}
+$("supplyInput").addEventListener("input", updateSupplyHint);
+$("logCopy").addEventListener("click", () => toast("日志已复制（演示）"));
+$("logQuery").addEventListener("input", (e) => {
+  const q = e.target.value.trim().toLowerCase();
+  const lines = q ? LOGS.filter((l) => l.toLowerCase().includes(q)) : LOGS;
+  $("logBox").textContent = lines.length ? lines.join("\n") : "暂无日志";
+});
+/* 连接数呼吸：每 2.8s 轻微抖动，渲染动作只改数字 */
+setInterval(() => {
+  for (const m of POOL) m.conn = Math.max(0, m.conn + (Math.random() < 0.5 ? -1 : 1));
+  document.querySelectorAll("#throneRows [data-conn]").forEach((n, i) => {
+    if (POOL[i]) n.textContent = POOL[i].conn;
+  });
+  $("tallyConn").textContent = POOL.reduce((s, m) => s + m.conn, 0);
+}, 2800);
+/* 时钟 */
+function tick() {
+  const d = new Date();
+  $("clock").textContent = [d.getHours(), d.getMinutes(), d.getSeconds()].map((x) => String(x).padStart(2, "0")).join(":");
+}
+tick(); setInterval(tick, 1000);
+renderThrone(); renderBench(); renderHealth(); renderLogs(); updateSupplyHint();
+</script>
+</body>
+</html>
