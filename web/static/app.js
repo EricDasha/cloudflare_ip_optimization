@@ -508,7 +508,9 @@
         method: "POST",
         body: JSON.stringify({ ip }),
       });
-      let msg = data.already ? `${ip} 已在位，无需顶替` : `${ip} 已顶替 ${data.replaced} 登基`;
+      let msg = data.already
+        ? `${ip} 已在位，无需顶替`
+        : data.replaced ? `${ip} 已顶替 ${data.replaced} 登基` : `${ip} 体检通过，空池登基`;
       if (data.colo) msg += ` [${data.colo}]`;
       toast(msg);
       await Promise.allSettled([pullPool(), pullUpstreams()]);

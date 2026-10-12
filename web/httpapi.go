@@ -360,10 +360,9 @@ func (a *app) handleProxyPromote(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "promoted": ip, "already": true})
 		return
 	}
-	if len(current.IPs) == 0 {
-		http.Error(w, "当前池为空，请先立即优选", http.StatusConflict)
-		return
-	}
+	// 空池播种：皇位空悬时单 IP 直接登基（worstPoolMember 空池返回 ""，
+	// replacePoolMember 空池返回 [ip]，下游天然兼容）。UI 契约「粘贴单个
+	// 公网 IPv4 → 体检后登基顶替」对空池同样成立，否则测试栈永远无法起势。
 	// 顶替前体检两道关：WS 握手必须通，且延迟必须低于进池上限。
 	// 旧实现只考握手，于是 1168ms 的慢 IP 也能堂堂正正换进池，
 	// 再被设备粘性锁死——生产事故的根因。
@@ -401,7 +400,11 @@ func (a *app) handleProxyPromote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.markPoolSwitched(time.Now())
-	log.Printf("manual promote: %s replaced %s", ip, victim)
+	if victim == "" {
+		log.Printf("manual promote: %s enthroned into empty pool", ip)
+	} else {
+		log.Printf("manual promote: %s replaced %s", ip, victim)
+	}
 	resp := map[string]any{"ok": true, "promoted": ip, "replaced": victim}
 	if entryColo != "" {
 		resp["colo"] = entryColo
