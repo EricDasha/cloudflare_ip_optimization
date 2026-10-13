@@ -481,14 +481,9 @@
     const v = $("supplyInput").value.trim();
     const single = /^\d{1,3}(\.\d{1,3}){3}$/.test(v);
     $("supplyBtn").textContent = v === "" ? "批量入池" : (single ? "登基顶替" : "批量入池");
-    $("supplyHint").innerHTML = "";
-    $("supplyHint").append(
-      document.createTextNode("粘贴"),
-      Object.assign(document.createElement("b"), { textContent: "单个公网 IPv4" }),
-      document.createTextNode(" → 体检后登基顶替；"),
-      Object.assign(document.createElement("b"), { textContent: "多行/域名/订阅" }),
-      document.createTextNode(" → 批量入池。"),
-    );
+    $("supplyHint").textContent = single
+      ? "就一个 IP：先送去体检，过了才有座位，顶掉在位最差的那位。"
+      : "一堆 IP、优选域名或订阅都行：逐个体检，合格的才登基。";
   }
 
   /* ---------- 动作三：单 IP 体检 ---------- */
