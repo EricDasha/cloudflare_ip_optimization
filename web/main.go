@@ -114,6 +114,7 @@ func main() {
 	mux.HandleFunc("/api/cfnat/connections", a.handleCFnatConnections)
 	mux.HandleFunc("/api/cfnat/upstreams", a.handleCFnatUpstreams)
 	mux.HandleFunc("/api/cfnat/active/kick", a.handleActiveKick)
+	mux.HandleFunc("/api/cfnat/active/endorse", a.handleActiveEndorse)
 	mux.HandleFunc("/api/cfnat/background-optimizer", a.handleBackgroundOptimizer)
 	mux.HandleFunc("/api/cfnat/proxy-scan/apply", a.handleProxyScanApply)
 	mux.HandleFunc("/api/cfnat/preferred", a.handlePreferredDomains)

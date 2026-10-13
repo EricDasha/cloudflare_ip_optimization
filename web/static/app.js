@@ -417,6 +417,34 @@
     }
   }
 
+  /* ---------- 动作二甲：扶持登基（免体检直入位） ---------- */
+  async function endorse() {
+    const text = $("endorseInput").value.trim();
+    if (!text) {
+      $("endorseInput").focus();
+      toast("先粘贴公网 IP 或优选域名");
+      return;
+    }
+    invalidatePoll("pool");
+    invalidatePoll("status");
+    invalidatePoll("upstreams");
+    try {
+      const data = await busy($("endorseBtn"), "endorseBtn", () =>
+        api("/api/cfnat/active/endorse", { method: "POST", body: JSON.stringify({ members: text }) }));
+      const parts = [];
+      if (data.ips?.length) parts.push(`${data.ips.length} 个 IP`);
+      if (data.domains?.length) parts.push(`${data.domains.length} 个域名`);
+      let msg = parts.length ? `扶持登基：${parts.join(" + ")}` : "扶持登基：全部已在位";
+      msg += `（现 ${data.ips_total} IP + ${data.domains_total} 域名在位）`;
+      if (data.skipped) msg += ` · 跳过已在位 ${data.skipped}`;
+      toast(msg);
+      if (!data.unchanged) $("endorseInput").value = "";
+      await Promise.allSettled([pullPool(), pullUpstreams()]);
+    } catch (e) {
+      toast(`扶持登基失败：${e.message}`);
+    }
+  }
+
   /* ---------- 动作二：智能供给（单个 IPv4 登基顶替，多行批量入池） ---------- */
   async function supply() {
     const text = $("supplyInput").value.trim();
@@ -566,6 +594,7 @@
   /* ---------- 装配 ---------- */
   $("optimizeBtn").addEventListener("click", optimize);
   $("supplyBtn").addEventListener("click", supply);
+  $("endorseBtn").addEventListener("click", endorse);
   $("supplyInput").addEventListener("input", updateSupplyHint);
   $("benchRefresh").addEventListener("click", pullPool);
   $("logToggle").addEventListener("click", () => { $("drawerLog").hidden = !$("drawerLog").hidden; if (!$("drawerLog").hidden) pullLogs(); });
