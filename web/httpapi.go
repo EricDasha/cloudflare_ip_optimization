@@ -511,7 +511,7 @@ func sortedKeys(set map[string]struct{}) []string {
 }
 
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"cfnat": a.cfnat.status(), "cfdata": a.cfdata.status(), "proxyAuto": a.proxyActivePoolSnapshot(), "backgroundOptimizer": a.backgroundOptimizerStatus(), "qualityScheduler": a.qualitySnapshot(), "sources": a.sourceHealthSnapshot()})
+	writeJSON(w, map[string]any{"cfnat": a.cfnat.status(), "cfdata": a.cfdata.status(), "proxyAuto": a.proxyActivePoolSnapshot(), "backgroundOptimizer": a.backgroundOptimizerStatus(), "qualityScheduler": a.qualitySnapshot(), "activeProbe": a.activeProbeStatus(), "sources": a.sourceHealthSnapshot()})
 }
 
 func (a *app) qualitySnapshot() map[string]any {
