@@ -55,6 +55,9 @@ type app struct {
 	preferredLastProbe time.Time
 	preferredLastError string
 	preferredStatus    map[string]preferredDomainStatus
+	domainLatencyMu    sync.Mutex
+	domainLatency      map[string]domainLatency
+	domainLatencyLast  time.Time
 	sourceHealthMu     sync.Mutex
 	sourceHealth       map[string]*sourceHealthStat
 	throneProbeMu      sync.Mutex
@@ -83,6 +86,7 @@ func main() {
 		subSources:       make(map[string]string),
 		sourceHealth:     make(map[string]*sourceHealthStat),
 		throneProbe:      make(map[string]*throneProbeStat),
+		domainLatency:    make(map[string]domainLatency),
 	}
 	a.loadProxyCandidateCache()
 	a.loadProxyActivePool()
@@ -106,6 +110,7 @@ func main() {
 	go a.runBackgroundOptimizerLoop()
 	go a.runSubscriptionSweepLoop()
 	go a.runThroneProbeLoop()
+	go a.runDomainLatencyProbeLoop()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", a.handleHealth)

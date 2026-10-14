@@ -18,10 +18,11 @@ func (a *app) handleProxyCandidates(w http.ResponseWriter, r *http.Request) {
 	writeSnapshot := func() {
 		writeJSON(w, struct {
 			proxyCandidateSnapshot
-			Active       proxyActivePool `json:"active"`
-			Subscription map[string]any  `json:"subscription"`
-			PoolGuard    map[string]any  `json:"poolGuard"`
-		}{proxyCandidateSnapshot: a.proxyCandidateSnapshot(), Active: a.proxyActivePoolSnapshot(), Subscription: a.subscriptionStatus(), PoolGuard: a.poolGuardStatus()})
+			Active        proxyActivePool          `json:"active"`
+			Subscription  map[string]any           `json:"subscription"`
+			PoolGuard     map[string]any           `json:"poolGuard"`
+			DomainLatency map[string]domainLatency `json:"domainLatency,omitempty"`
+		}{proxyCandidateSnapshot: a.proxyCandidateSnapshot(), Active: a.proxyActivePoolSnapshot(), Subscription: a.subscriptionStatus(), PoolGuard: a.poolGuardStatus(), DomainLatency: a.domainLatencySnapshot()})
 	}
 	switch r.Method {
 	case http.MethodGet:
@@ -511,7 +512,7 @@ func sortedKeys(set map[string]struct{}) []string {
 }
 
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"cfnat": a.cfnat.status(), "cfdata": a.cfdata.status(), "proxyAuto": a.proxyActivePoolSnapshot(), "backgroundOptimizer": a.backgroundOptimizerStatus(), "qualityScheduler": a.qualitySnapshot(), "activeProbe": a.activeProbeStatus(), "sources": a.sourceHealthSnapshot()})
+	writeJSON(w, map[string]any{"cfnat": a.cfnat.status(), "cfdata": a.cfdata.status(), "proxyAuto": a.proxyActivePoolSnapshot(), "backgroundOptimizer": a.backgroundOptimizerStatus(), "qualityScheduler": a.qualitySnapshot(), "activeProbe": a.activeProbeStatus(), "sources": a.sourceHealthSnapshot(), "forward": a.forwardTargetStats(2000)})
 }
 
 func (a *app) qualitySnapshot() map[string]any {

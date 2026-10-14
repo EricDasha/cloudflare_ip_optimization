@@ -219,6 +219,7 @@ type cfnatConfig struct {
 	Num      int    `json:"num"`
 	Port     int    `json:"port"`
 	Random   bool   `json:"random"`
+	Sticky   bool   `json:"sticky"`
 	TLS      bool   `json:"tls"`
 	Task     int    `json:"task"`
 	Fallback string `json:"fallback"`
@@ -248,6 +249,7 @@ func defaultCFnatConfig() cfnatConfig {
 		Num:      envInt("CFNAT_NUM", 1),
 		Port:     envInt("CFNAT_PORT", 443),
 		Random:   envBool("CFNAT_RANDOM", true),
+		Sticky:   envBool("CFNAT_STICKY", true),
 		Task:     envInt("CFNAT_TASK", 100),
 		TLS:      envBool("CFNAT_TLS", true),
 		Fallback: env("CFNAT_FALLBACK", ""),
@@ -295,6 +297,9 @@ func normalizeCFnat(c cfnatConfig) cfnatConfig {
 	return c
 }
 
+// args 生成 cfnat 命令行参数。布尔旗标一律用 "-flag=值" 单参形式：
+// Go 的 flag 包对 bool 旗标不消费后随参数，"-flag true" 会把 true 当位置参数并
+// 就此截断后续解析（历史遗留：-task/-tls 曾长期因此未被读入）。
 func (c cfnatConfig) args() []string {
 	return []string{
 		"-addr", c.Addr,
@@ -308,10 +313,11 @@ func (c cfnatConfig) args() []string {
 		"-ipnum", strconv.Itoa(c.IPNum),
 		"-ips", c.IPs,
 		"-num", strconv.Itoa(c.Num),
+		"-sticky=" + strconv.FormatBool(c.Sticky),
 		"-port", strconv.Itoa(c.Port),
-		"-random", strconv.FormatBool(c.Random),
+		"-random=" + strconv.FormatBool(c.Random),
 		"-task", strconv.Itoa(c.Task),
-		"-tls", strconv.FormatBool(c.TLS),
+		"-tls=" + strconv.FormatBool(c.TLS),
 	}
 }
 
