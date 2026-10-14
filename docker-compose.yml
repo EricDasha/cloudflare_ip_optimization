@@ -29,6 +29,7 @@ services:
       CFNAT_NUM: "1"
       CFNAT_PORT: "443"
       CFNAT_RANDOM: "true"
+      CFNAT_STICKY: "${CFNAT_STICKY:-true}"   # true=同设备恒走同一上游；false=按连接轮转铺开全部成员
       CFNAT_TASK: "100"
       CFNAT_TLS: "true"
       CFNAT_CODE: "200"
@@ -78,6 +79,11 @@ services:
       # 机房软偏好（可选）：候选充裕时只取偏好机房、匮乏时其余补位（只重排不拒收）。
       # 移动/广电常 HKG，电信/联通常 SJC/LAX——以实测为准；留空禁用。
       PROXY_POOL_COLO_PREFER: "${PROXY_POOL_COLO_PREFER:-}"
+
+      # 优选域名 TCP:443 延迟探测（只读体检，只量不改、绝不动池）。
+      PROXY_DOMAIN_PROBE_ENABLED: "${PROXY_DOMAIN_PROBE_ENABLED:-true}"
+      PROXY_DOMAIN_PROBE_INTERVAL_SECONDS: "300"
+      PROXY_DOMAIN_PROBE_TIMEOUT_MS: "3000"
 
       # WS 101 通过后，使用 /data 中的本地 VLESS outbound 模板做真实数据面终审。
       PROXY_VLESS_PROBE: "true"
