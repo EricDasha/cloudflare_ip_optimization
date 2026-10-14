@@ -54,6 +54,9 @@
 
   let poolSnapshot = null;   // proxy-candidates 快照（含 active）
   let upstreams = {};        // ip -> {connections, states, inPool}
+  let domainLat = {};        // 优选域名 -> {ms, ok, at}
+  let forward = null;        // /api/status.forward 在途转发实况
+  let stickyOn = true;       // /api/config.cfnat.sticky 设备粘性
   let sourceHealth = {};     // /api/status.sources 健康账
   let vlessOn = false;       // /api/config.vlessProbe
   let coloPrefer = "";       // /api/config.poolColoPrefer
@@ -79,6 +82,7 @@
       const cfg = await api("/api/config");
       vlessOn = !!cfg.vlessProbe;
       coloPrefer = String(cfg.poolColoPrefer || "");
+      stickyOn = !(cfg.cfnat && cfg.cfnat.sticky === false);
     } catch (_) { /* 心跳容错 */ }
   }
   async function pullStatus() {
@@ -94,6 +98,8 @@
         sourceHealth = st.sources;
         renderHealth();
       }
+      forward = st.forward || null;
+      renderForward();
     } catch (_) { /* 心跳容错 */ }
   }
   async function pullPool() {
@@ -102,6 +108,7 @@
       const snap = await api("/api/cfnat/proxy-candidates");
       if (!isCurrentPoll("pool", version)) return;
       poolSnapshot = snap;
+      domainLat = snap.domainLatency || {};
       renderThrone();
       renderBench();
       renderHealth();
@@ -168,6 +175,21 @@
     return row;
   }
 
+  /* ---------- 渲染：在途转发目标（cfnat 日志实况） ---------- */
+  function renderForward() {
+    const el = $("forwardLine");
+    if (!el) return;
+    if (!forward || !forward.host) {
+      el.textContent = "在途转发目标 –（等待首条转发日志）";
+      return;
+    }
+    let txt = `在途转发目标 ${forward.host}`;
+    if (forward.dialMs) txt += ` · 拨号 ${forward.dialMs}ms`;
+    const dist = (forward.counts || []).map((c) => `${c.host}×${c.count}`).join(" · ");
+    if (dist) txt += ` ｜ 近${forward.total} 次：${dist}`;
+    el.textContent = txt;
+  }
+
   /* ---------- 渲染：在位（壹） ---------- */
   function renderThrone() {
     const active = poolSnapshot?.active || {};
@@ -182,6 +204,12 @@
     $("tallyDom").textContent = domains.length;
     $("tallyConn").textContent = upstreamTotal;
     $("coloLine").textContent = coloLineText(ips, results);
+    const foot = $("throneFoot");
+    if (foot) {
+      foot.textContent = stickyOn
+        ? "「测」= 重新体检（WS 延迟 + 可选 VLESS 测速）；踢后后台自动补位；设备粘性开：同设备恒定走同一上游。"
+        : "「测」= 重新体检（WS 延迟 + 可选 VLESS 测速）；踢后后台自动补位；设备粘性关：按连接轮转铺开全部成员。";
+    }
     const box = $("throneRows");
     if (!box) return;
     box.replaceChildren();
@@ -232,8 +260,16 @@
       score.className = "ip-score";
       const s = document.createElement("span");
       s.className = "score-item";
-      s.append(Object.assign(document.createElement("b"), { textContent: "跟随上游" }));
-      s.append(document.createTextNode(" DNS 活解析"));
+      const lat = domainLat[domain];
+      if (lat && lat.ok) {
+        s.append(Object.assign(document.createElement("b"), { textContent: String(lat.ms) }));
+        s.append(document.createTextNode(" ms"));
+      } else if (lat && !lat.ok) {
+        s.append(Object.assign(document.createElement("b"), { textContent: "不可达" }));
+      } else {
+        s.append(Object.assign(document.createElement("b"), { textContent: "—" }));
+        s.append(document.createTextNode(" 探测中"));
+      }
       score.append(s);
       const act = document.createElement("div");
       act.className = "rowbtn";
