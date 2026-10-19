@@ -275,7 +275,7 @@
         scoreParts,
         actions: [
           { text: "测", title: "测 WS 延迟" + (vlessOn ? " + VLESS 速度" : ""), run: (btn) => probeIP(ip, btn) },
-          { text: pinned ? "降" : "顶", title: pinned ? "取消置顶" : "置顶：排到 -fixed 最前，优先转发", run: () => pinMember(ip, !pinned) },
+          { text: pinned ? "降" : "顶", title: pinned ? "取消置顶" : "置顶：排到 -fixed 最前；再开锁位即只转置顶成员", run: () => pinMember(ip, !pinned) },
           { text: "踢", title: "把这个 IP 踢出在位并立即生效", run: (btn) => kickIP(ip, btn) },
         ],
       }));
@@ -299,7 +299,7 @@
         check: { group: "domain", off: disabled.has(domain) },
         scoreParts,
         actions: [
-          { text: pinned ? "降" : "顶", title: pinned ? "取消置顶" : "置顶：排到 -fixed 最前，优先转发", run: () => pinMember(domain, !pinned) },
+          { text: pinned ? "降" : "顶", title: pinned ? "取消置顶" : "置顶：排到 -fixed 最前；再开锁位即只转置顶成员", run: () => pinMember(domain, !pinned) },
           { text: "踢", title: "把该域名踢出转发池", run: (btn) => kickIP(domain, btn) },
         ],
       }));
