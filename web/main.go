@@ -206,7 +206,11 @@ func (a *app) runCFdataBackgroundScan() {
 	}
 }
 
-// triggerCFdataScan 起一次 cfdata 扫描；已在跑则跳过。不等它结束。
+// triggerCFdataScan 起一次 cfdata 扫描；已在跑则跳过。
+//
+// 扫描结束后主动重算一次候选：否则新测出的延迟与丢包要等下一轮 6 小时的
+// 候选刷新才生效，本机实测的优势就白等一个周期。重算走正常的
+// refreshProxyCandidates + autoApplyProxyPool，换池仍受健康闸与冷却约束。
 func (a *app) triggerCFdataScan() {
 	if a.cfdata.status().Running {
 		return
@@ -218,6 +222,35 @@ func (a *app) triggerCFdataScan() {
 		return
 	}
 	log.Printf("cfdata background scan started: update=%v args=%v", cfg.ForceUpdate, cfg.args())
+	go a.refreshCandidatesAfterCFdata()
+}
+
+// refreshCandidatesAfterCFdata 轮询等待 cfdata 退出，然后重算候选。
+// 最多等 10 分钟（单轮实测约 2.5 分钟），超时只记日志、不阻塞任何链路。
+func (a *app) refreshCandidatesAfterCFdata() {
+	deadline := time.Now().Add(10 * time.Minute)
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for time.Now().Before(deadline) {
+		<-ticker.C
+		if a.cfdata.status().Running {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ok, err := a.refreshProxyCandidates(ctx)
+		if err != nil {
+			cancel()
+			log.Printf("post-cfdata candidate refresh skipped: %v", err)
+			return
+		}
+		if ok {
+			a.autoApplyProxyPool(ctx)
+		}
+		cancel()
+		log.Printf("post-cfdata candidate refresh done: ok=%v", ok)
+		return
+	}
+	log.Printf("post-cfdata candidate refresh: cfdata still running after 10m, skipped")
 }
 
 // cfdataIPListStale 报告待扫描清单是否需要从上游重建。
