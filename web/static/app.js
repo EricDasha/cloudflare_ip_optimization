@@ -172,9 +172,9 @@
     conn.append(n, Object.assign(document.createElement("span"), { className: "u", textContent: connUnit }));
     const score = document.createElement("div");
     score.className = "ip-score";
-    for (const [big, unit] of scoreParts) {
+    for (const [big, unit, tone] of scoreParts) {
       const item = document.createElement("span");
-      item.className = "score-item";
+      item.className = "score-item" + (tone ? " " + tone : "");
       item.append(Object.assign(document.createElement("b"), { textContent: big }));
       if (unit) item.append(document.createTextNode(" " + unit));
       score.append(item);
@@ -281,13 +281,31 @@
       }));
     }
     // 优选域名行：升格为 -fixed 直连成员，拨号时按当前 DNS 活解析。
+    // 成绩栏显示的是「该域名此刻当入口跑我这条隧道有多快、稳不稳」：
+    // 速度 / TCP 握手 / 成功率 / 抖动（P95÷P50）。
     if (domains.length) frag.append(groupHead("优选域名", "domain", domains.length));
     for (const domain of order(domains)) {
       const lat = domainLat[domain];
       const scoreParts = [];
-      if (lat && lat.ok) scoreParts.push([String(lat.ms), "ms"]);
-      else if (lat && !lat.ok) scoreParts.push(["不可达", ""]);
-      else scoreParts.push(["—", "探测中"]);
+      if (!lat) {
+        scoreParts.push(["—", "探测中"]);
+      } else if (lat.state === "dead") {
+        scoreParts.push(["已死", lat.consecutiveFailures ? `连败${lat.consecutiveFailures}` : "", "bad"]);
+      } else if (!lat.ok) {
+        scoreParts.push(["不可达", lat.ms ? `${lat.ms}ms` : "", "bad"]);
+      } else {
+        if (lat.mbps > 0) scoreParts.push([lat.mbps.toFixed(1), "Mbps"]);
+        if (lat.ms > 0) scoreParts.push([String(lat.ms), "ms"]);
+        if (lat.successRate > 0) {
+          const pct = Math.round(lat.successRate * 100);
+          scoreParts.push([pct + "%", "成", pct < 80 ? "warn" : ""]);
+        }
+        if (lat.jitterRatio > 1.3) {
+          scoreParts.push(["×" + lat.jitterRatio.toFixed(1), "抖", lat.jitterRatio > 1.8 ? "bad" : "warn"]);
+        }
+        if (lat.stage === "tcp-only") scoreParts.push(["仅TCP", "", "warn"]);
+        if (!scoreParts.length) scoreParts.push(["—", "待测"]);
+      }
       const pinned = prioSet.has(domain);
       frag.append(buildRow({
         addr: domain,
@@ -338,10 +356,12 @@
     clearTimeout(selTimer);
     selTimer = setTimeout(() => commitSelection(), 350);
   }
-  // 「活跃」= 最近一次探测可达：域名看 TCP:443 探测，IP 看质量调度器记录。
+  // 「活跃」= 最近一次探测可达：
+  //   域名看稳定性账（连续失败达阈值判死；样本不足时不误杀）；
+  //   IP 看质量调度器记录。
   function isActiveMember(addr) {
     const lat = domainLat[addr];
-    if (lat) return !!lat.ok;
+    if (lat) return lat.state !== "dead";
     const q = qualityByIp[addr];
     if (q) return Number(q.averageLatencyMs) > 0 || Number(q.successRate) > 0;
     return !!(poolSnapshot?.active?.results || []).find((r) => r.ip === addr);

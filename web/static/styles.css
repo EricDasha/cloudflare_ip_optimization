@@ -142,6 +142,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .ip-score { display: flex; gap: var(--s3); justify-content: flex-end; }
 .score-item { font-family: var(--font-mono); font-size: 12px; color: var(--text-2); white-space: nowrap; }
 .score-item b { color: var(--text); font-weight: 700; }
+/* 域名稳定性判词：本项目除数据外无色彩，用「暗 + 删除线」标死、
+   用高亮标不稳，避免引入红黄破坏黑白灰。 */
+.score-item.bad { color: var(--text-3); text-decoration: line-through; }
+.score-item.bad b { color: var(--text-3); }
+.score-item.warn { color: var(--text); }
+.score-item.warn b { color: var(--bright); font-weight: 800; }
 .foot { margin: var(--s3) 0 0; font-size: 12px; color: var(--text-3); }
 
 /* ---------- 供给 ---------- */

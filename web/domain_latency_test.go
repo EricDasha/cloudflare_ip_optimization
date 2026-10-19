@@ -6,16 +6,18 @@ import (
 )
 
 func TestDomainProbeIntervalClamp(t *testing.T) {
+	// 域名单轮要做 512 KiB 真实下载，间隔下限抬到 5 分钟、默认 30 分钟：
+	// 稳定性靠多轮历史，不靠高频，免得把家宽流量烧在体检上。
 	cases := []struct {
 		env  string
 		want time.Duration
 	}{
-		{"300", 300 * time.Second},
-		{"120", 120 * time.Second},
 		{"1800", 1800 * time.Second},
-		{"60", 300 * time.Second},   // 低于下限 → 回落默认
-		{"9999", 300 * time.Second}, // 高于上限 → 回落默认
-		{"abc", 300 * time.Second},  // 非法 → 回落默认
+		{"300", 300 * time.Second},
+		{"7200", 7200 * time.Second},
+		{"120", 1800 * time.Second},  // 低于下限 → 回落默认
+		{"9999", 1800 * time.Second}, // 高于上限 → 回落默认
+		{"abc", 1800 * time.Second},  // 非法 → 回落默认
 	}
 	for _, tc := range cases {
 		t.Setenv("PROXY_DOMAIN_PROBE_INTERVAL_SECONDS", tc.env)

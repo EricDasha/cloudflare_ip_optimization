@@ -58,6 +58,8 @@ type app struct {
 	domainLatencyMu    sync.Mutex
 	domainLatency      map[string]domainLatency
 	domainLatencyLast  time.Time
+	domainQualityMu    sync.Mutex
+	domainQuality      map[string]*domainQuality
 	sourceHealthMu     sync.Mutex
 	sourceHealth       map[string]*sourceHealthStat
 	throneProbeMu      sync.Mutex
@@ -87,12 +89,14 @@ func main() {
 		sourceHealth:     make(map[string]*sourceHealthStat),
 		throneProbe:      make(map[string]*throneProbeStat),
 		domainLatency:    make(map[string]domainLatency),
+		domainQuality:    make(map[string]*domainQuality),
 	}
 	a.loadProxyCandidateCache()
 	a.loadProxyActivePool()
 	a.loadOptimizerSettings()
 	a.loadPreferredSettings()
 	a.loadSubscriptionPool()
+	a.loadDomainQuality()
 	a.seedPoolGuardFromActive()
 	a.quality = newQualitySchedulerRuntime(a.dataDir)
 	if pool := a.proxyActivePoolSnapshot(); len(pool.IPs) > 0 {
