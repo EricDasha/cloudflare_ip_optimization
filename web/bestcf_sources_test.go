@@ -82,8 +82,8 @@ func TestBestcfSourceRegisteredAndEnabled(t *testing.T) {
 	if !ok {
 		t.Fatal("bestcf source not registered")
 	}
-	if len(source.URLs) < 20 {
-		t.Fatalf("bestcf full-merge expected >=20 URLs, got %d", len(source.URLs))
+	if len(source.URLs) < 12 {
+		t.Fatalf("bestcf full-merge expected >=12 URLs, got %d", len(source.URLs))
 	}
 	enabled := false
 	for _, id := range defaultProxyCandidateSourceIDs {
@@ -106,7 +106,7 @@ func TestBestcfSourceRegisteredAndEnabled(t *testing.T) {
 // --- 官方段已砍：源序与配额 ---
 
 func TestOfficialLayerRemovedFromSourceOrder(t *testing.T) {
-	want := []string{"user", "subscription", "bestcf"}
+	want := []string{"user", "cfdata", "subscription", "bestcf"}
 	if len(proxyCandidateSourceOrder) != len(want) {
 		t.Fatalf("source order = %v, want %v", proxyCandidateSourceOrder, want)
 	}

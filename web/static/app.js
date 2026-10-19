@@ -50,7 +50,7 @@
     user: "手动", subscription: "订阅", bestcf: "BestCF",
     preferred: "优选解析", cfdata: "CFdata", official: "官方段", proxy: "社区",
   };
-  const LIVE_TIERS = [["user", "手动"], ["subscription", "订阅"], ["bestcf", "BestCF"]];
+  const LIVE_TIERS = [["user", "手动"], ["cfdata", "CFdata"], ["subscription", "订阅"], ["bestcf", "BestCF"]];
 
   let poolSnapshot = null;   // proxy-candidates 快照（含 active）
   let upstreams = {};        // ip -> {connections, states, inPool}

@@ -17,17 +17,22 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-// Candidate collection and result sorting must use the same order. The first
-// source that supplies an IP owns its source label, so this order also defines
-// which source wins when the same address appears in multiple feeds.
 // proxyCandidateSourceOrder 候选供给层（考试优先序）：
-// user > subscription > bestcf(全量优选)。
+// user > cfdata > subscription > bestcf(社区优选)。
+//
+// 排序依据不是「谁给得多」，而是「谁与这条线路相关」：
+//   - user：人工拍板，最高优先。
+//   - cfdata：在本机（NAS）实测延迟与丢包，是唯一以我们自己网络为基准的源。
+//   - subscription：未校验 CF 段的机场订阅，原料最杂，故靠后。
+//   - bestcf：别人在自己的线路上扫出来的社区表，已按 CF 段闸清洗。
+//
 // official 官方段已砍（用户指令）；preferred 优选域名不解析供 IP——域名直接
-// 升格为 -fixed 转发成员（拨号时活解析）；cfdata(baipiao 上游)已砍。
-var proxyCandidateSourceOrder = []string{"user", "subscription", "bestcf"}
+// 升格为 -fixed 转发成员（拨号时活解析）。
+var proxyCandidateSourceOrder = []string{"user", "cfdata", "subscription", "bestcf"}
 
 var errProxyCandidatesBusy = errors.New("候选源刷新正在运行")
 
@@ -140,46 +145,39 @@ var proxyCandidateSources = map[string]proxyCandidateSource{
 	},
 	// bestcf 导航（https://bestcf.pages.dev/#yxym）全量优选 IP 列表：
 	// `IP:端口#备注` 格式，extractPublicIPv4 按非数字点切分后端口与备注
-	// 自然落网外，无需新解析器。页面标注"更新异常"的源不收；源生死由
-	// 维护者决定，全部走 HTTPS 白名单校验，单个失败只记 sourceErrors。
+	// 自然落网外，无需新解析器。
+	//
+	// 本名单于 2026-10-20 在 NAS 上逐源实测（curl + CF 段比对），只保留
+	// 「CF 段命中率 ≥80% 且产出 ≥4 个」的源。被剔除的两类，记在这里以免
+	// 后人再捡回来：
+	//   1) ProxyIP 冒充优选：lzj(0/193)、cmliu(0/32)、luoli(0/31)、
+	//      xinyitang3(0/18) —— 全是第三方 VPS（阿里云/M247/OVH/DO），
+	//      不是 Cloudflare 边缘，进了入口池只会白烧探针。
+	//   2) 域名表或低产：vps789/top100.txt(101 行全是域名)、
+	//      domain/all.txt(域名表，另走 fetchBestcfForwardDomains)、
+	//      zhixuanwang(2 个)、JieChaoCC(2 个)、tiancheng(7/58)。
+	//   3) NAS 侧不可达：ymyuuu/IPDB、LancelotRar、joname1 —— 本地能开，
+	//      但 NAS 到 GitHub raw 超时，保留只会每轮空耗 25 秒。
 	"bestcf": {
 		Name: "BestCF 全量优选 IP",
 		URLs: []string{
-			// bestcf.pages.dev 自托管镜像
-			"https://bestcf.pages.dev/cmliu/all.txt",
-			"https://bestcf.pages.dev/cmliu2/all.txt",
-			"https://bestcf.pages.dev/wetest/ipv4.txt",
-			"https://bestcf.pages.dev/uouin/all.txt",
-			"https://bestcf.pages.dev/luoli/all.txt",
-			"https://bestcf.pages.dev/lzj/all.txt",
-			"https://bestcf.pages.dev/xinyitang3/ipv4.txt",
-			"https://bestcf.pages.dev/cfyes/ipv4.txt",
-			"https://bestcf.pages.dev/vvhan/ipv4.txt",
-			"https://bestcf.pages.dev/tiancheng/all.txt",
-			"https://bestcf.pages.dev/gslege/Cfxyz.txt",
-			"https://bestcf.pages.dev/zhixuanwang/ipv4-onlyip.txt",
-			"https://bestcf.pages.dev/s5gy/all.txt",
-			"https://bestcf.pages.dev/nirevil/ipv4.txt",
-			"https://bestcf.pages.dev/ircf/ipv4.txt",
-			"https://bestcf.pages.dev/vps789/top100.txt",
-			// GitHub 原始列表（页面 #yxym 收录的活跃维护者）
-			"https://raw.githubusercontent.com/cmliu/WorkerVless2sub/main/addressesapi.txt",
-			"https://raw.githubusercontent.com/ymyuuu/IPDB/main/BestCF/bestcfv4.txt",
-			"https://raw.githubusercontent.com/yuanxiawan/cfipv4db/main/cfip.txt",
-			"https://raw.githubusercontent.com/LancelotRar/best-cf-ips/main/best-cf-ip-collected.txt",
-			"https://raw.githubusercontent.com/joname1/BestCFip/main/ipv4.txt",
-			"https://raw.githubusercontent.com/ahang39/router/main/all.txt",
-			"https://raw.githubusercontent.com/einsitang/my-fast-cf-ip/master/fastips.txt",
-			"https://raw.githubusercontent.com/hubbylei/bestcf/main/bestcf.txt",
-			"https://raw.githubusercontent.com/gshtwy/CF-DNS-Clone/main/wetest-cloudflare-v4.txt",
-			"https://raw.githubusercontent.com/Senflare/Senflare-IP/main/IPlist-Pro.txt",
-			"https://raw.githubusercontent.com/JieChaoCC/cf-ip-auto/main/data/ipapi.txt",
-			// MJZ / SS / LZ（运营商分网维护）
-			"https://cf.junzhen.qzz.io/best_ips.txt",
-			"https://cf.junzhen.qzz.io/best_ips_bj.txt",
-			"https://raw.githubusercontent.com/svip-s/cloudflare_ip/main/best_ips.txt",
-			"https://raw.githubusercontent.com/love-ztm/cfip/main/best_ips.txt",
-			"https://raw.githubusercontent.com/love-ztm/cfip/main/ubest_ips.txt",
+			// bestcf.pages.dev 自托管镜像（NAS 侧稳定可达）
+			"https://bestcf.pages.dev/s5gy/all.txt",         // 116/217
+			"https://bestcf.pages.dev/uouin/all.txt",        // 42/42
+			"https://bestcf.pages.dev/nirevil/ipv4.txt",     // 35/37
+			"https://bestcf.pages.dev/vvhan/ipv4.txt",       // 32/32
+			"https://bestcf.pages.dev/wetest/ipv4.txt",      // 17/17
+			"https://bestcf.pages.dev/cfyes/ipv4.txt",       // 17/17
+			"https://bestcf.pages.dev/ircf/ipv4.txt",        // 15/15
+			"https://bestcf.pages.dev/cmliu2/all.txt",       // 12/15
+			"https://bestcf.pages.dev/gslege/Cfxyz.txt",     // 4/4
+			// GitHub 原始列表（NAS 实测可达的维护者）
+			"https://raw.githubusercontent.com/Senflare/Senflare-IP/main/IPlist-Pro.txt",       // 29/29
+			"https://raw.githubusercontent.com/einsitang/my-fast-cf-ip/master/fastips.txt",     // 20/20
+			"https://raw.githubusercontent.com/yuanxiawan/cfipv4db/main/cfip.txt",              // 15/16
+			"https://raw.githubusercontent.com/gshtwy/CF-DNS-Clone/main/wetest-cloudflare-v4.txt", // 14/14
+			"https://raw.githubusercontent.com/hubbylei/bestcf/main/bestcf.txt",                // 10/10
+			"https://raw.githubusercontent.com/ahang39/router/main/all.txt",                    // 7/7
 		},
 	},
 }
@@ -198,9 +196,9 @@ func applyCandidateSourcePriority(results []proxyScanResult, sourceByIP map[stri
 		return
 	}
 	// 来源优先级决定"什么时候拿它来测试"，不决定最终性能排名。
-	// 现行供给层：user > subscription > bestcf(社区优选表全量合并)。
+	// 现行供给层：user > cfdata(本机实测) > subscription > bestcf(社区优选表)。
 	// preferred(优选域名)不解析供 IP——域名直接升格为 -fixed 转发成员；
-	// official(官方段)与 cfdata(baipiao 上游)已按用户指令砍除。
+	// official(官方段)已按用户指令砍除。
 	rank := func(ip string) int {
 		for rank, source := range proxyCandidateSourceOrder {
 			if sourceByIP[ip] == source {
@@ -236,6 +234,7 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 	resolved := make([]string, 0, candidatePoolTotalCap)
 	sourceByIP := make(map[string]string)
 	sourceErrors := []string{}
+	nonCloudflare := 0
 	// appendGroup 按层配额灌入：quota 是本层最多进入候选池的数量，
 	// 总池上限 candidatePoolTotalCap 兜底。优先级仍由「先灌者先得」实现
 	// （同 IP 先到先得，见 sourceByIP 认领），配额保证单层吃不光全池。
@@ -250,6 +249,12 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 			}
 			ip := net.ParseIP(strings.TrimSpace(raw))
 			if !isPublicIPv4(ip) {
+				continue
+			}
+			// CF 段闸：入口 IP 必须是 Cloudflare 边缘。source 里混进来的
+			// 第三方 VPS（ProxyIP）到此为止，不进候选、不占探针。
+			if !isCloudflareIPv4(ip) {
+				nonCloudflare++
 				continue
 			}
 			key := ip.To4().String()
@@ -267,9 +272,24 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 	})
 	a.recordSourceHealth("user:env", len(userCandidates), nil)
 	appendGroup("user", userCandidates, userCandidatesCap)
-	// subscription 层：≤600，且必须为 bestcf 保底额度让位——
+	// cfdata 层：唯一以本机网络为基准的供给。读 result.csv（本轮实测成绩，
+	// 含丢包率），零丢包优先、低延迟次之、低抖动再次之。排第二是因为它的
+	// 延迟和丢包是这台 NAS 亲手测的，而 bestcf/subscription 是别人测的。
+	cfdataQuota := cfdataCandidatesCap
+	if remaining := candidatePoolTotalCap - len(resolved); remaining < cfdataQuota {
+		cfdataQuota = remaining
+	}
+	if cfdataQuota > 0 {
+		cfdataIPs, cfdataErr := a.cfdataCandidateIPs(cfdataQuota)
+		a.recordSourceHealth("cfdata:"+cfdataResultFile, len(cfdataIPs), cfdataErr)
+		if cfdataErr != nil {
+			sourceErrors = append(sourceErrors, "cfdata: "+cfdataErr.Error())
+		}
+		appendGroup("cfdata", cfdataIPs, cfdataQuota)
+	}
+	// subscription 层：≤300，且必须为 bestcf 预留额度让位——
 	// 生产教训（sub 独占 1000/1000，其余层=0）不允许重演。
-	reserved := bestcfCandidatesFloor
+	reserved := bestcfCandidatesReserve
 	subQuota := subscriptionCandidatesCap
 	if remaining := candidatePoolTotalCap - len(resolved) - reserved; remaining < subQuota {
 		subQuota = remaining
@@ -282,8 +302,7 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 	appendGroup("subscription", subPool, subQuota)
 	// 优选域名不再解析供 IP：域名直接升格为 -fixed 转发成员（applyPoolLocked），
 	// 拨号时按当前 DNS 活解析、天然跟随上游刷新——无需快照、无需考试。
-	// 官方段已砍（用户指令）：bestcf 全量列表 + 订阅已是充分供给。
-	// bestcf 层：地板配额已由 sub 的让位计算保证，余量全归 bestcf 兜底。
+	// bestcf 层：余量全归它兜底（前面几层若给不满，配额顺延至此）。
 	bestcfQuota := candidatePoolTotalCap - len(resolved)
 	if bestcfQuota > 0 {
 		bestcf, bestcfErrors, err := a.resolveProxySources(ctx, defaultProxyCandidateSourceIDs, bestcfQuota)
@@ -292,6 +311,9 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 			sourceErrors = append(sourceErrors, err.Error())
 		}
 		appendGroup("bestcf", bestcf, bestcfQuota)
+	}
+	if nonCloudflare > 0 {
+		sourceErrors = append(sourceErrors, fmt.Sprintf("CF 段闸剔除 %d 个非边缘 IP（ProxyIP 冒充优选）", nonCloudflare))
 	}
 	// bestcf 优选域名表：域名作为一等公民进池，绝不解析成 IP。
 	// 拉取失败只记 error，不影响 IP 候选。
@@ -582,6 +604,14 @@ func extractForwardDomainList(text string) []string {
 	return domains
 }
 
+// resolveProxySources 抓取指定候选源并合流，最多返回 remaining 个 Cloudflare IP。
+//
+// 两个刻意的设计：
+//  1. 所有目标并发抓取。旧实现按 URL 顺序串行，前几个源（尤其 lzj 那种单源
+//     193 个的）会先把配额吃满，后面的源永远轮不到——健康账里 34 个 URL
+//     只有 11 个有记录，就是这个原因。并发之后每个源都有机会被看见。
+//  2. 合流用 round-robin。小源耗尽后自然退出，大源继续贡献，既保证多样性，
+//     又不会因为某个源排在前面就垄断配额。
 func (a *app) resolveProxySources(parent context.Context, sourceIDs []string, remaining int) ([]string, []string, error) {
 	if remaining <= 0 || len(sourceIDs) == 0 {
 		return []string{}, []string{}, nil
@@ -589,9 +619,14 @@ func (a *app) resolveProxySources(parent context.Context, sourceIDs []string, re
 	if len(sourceIDs) > len(proxyCandidateSources) {
 		return nil, nil, errors.New("候选源数量无效")
 	}
+
+	type fetchTarget struct {
+		healthKey string // 健康账归集键
+		domain    string // 非空则走 DNS 解析
+		url       string // 非空则走 HTTPS 抓取
+	}
+	targets := make([]fetchTarget, 0, 32)
 	seenSources := make(map[string]struct{})
-	ips := make([]string, 0, remaining)
-	errorsFound := make([]string, 0)
 	for _, id := range sourceIDs {
 		source, ok := proxyCandidateSources[id]
 		if !ok {
@@ -602,38 +637,83 @@ func (a *app) resolveProxySources(parent context.Context, sourceIDs []string, re
 		}
 		seenSources[id] = struct{}{}
 		for _, domain := range source.Domains {
-			ctx, cancel := context.WithTimeout(parent, 5*time.Second)
-			addresses, err := net.DefaultResolver.LookupIPAddr(ctx, domain)
-			cancel()
-			if err != nil {
-				errorsFound = append(errorsFound, fmt.Sprintf("%s: %v", source.Name, err))
-				a.recordSourceHealth("dns:"+domain, 0, err)
-				continue
-			}
-			v4 := make([]string, 0, len(addresses))
-			for _, address := range addresses {
-				if ip := address.IP.To4(); ip != nil {
-					v4 = append(v4, ip.String())
+			targets = append(targets, fetchTarget{healthKey: "dns:" + domain, domain: domain})
+		}
+		for _, sourceURL := range source.URLs {
+			targets = append(targets, fetchTarget{healthKey: sourceURL, url: sourceURL})
+		}
+	}
+
+	results := make([][]string, len(targets))
+	errs := make([]error, len(targets))
+	var wg sync.WaitGroup
+	for i := range targets {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if targets[i].domain != "" {
+				ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+				addresses, err := net.DefaultResolver.LookupIPAddr(ctx, targets[i].domain)
+				cancel()
+				if err != nil {
+					errs[i] = err
+					return
 				}
+				v4 := make([]string, 0, len(addresses))
+				for _, address := range addresses {
+					if ip := address.IP.To4(); ip != nil {
+						v4 = append(v4, ip.String())
+					}
+				}
+				results[i] = v4
+				return
 			}
-			a.recordSourceHealth("dns:"+domain, len(v4), nil)
-			ips = append(ips, v4...)
+			found, err := fetchProxyCandidateURL(parent, targets[i].url)
+			results[i] = found
+			errs[i] = err
+		}()
+	}
+	wg.Wait()
+
+	// 逐目标记账：渠道审计与优选台心跳都以健康账辨死源。
+	errorsFound := make([]string, 0)
+	for i, target := range targets {
+		a.recordSourceHealth(target.healthKey, len(results[i]), errs[i])
+		if errs[i] != nil {
+			errorsFound = append(errorsFound, fmt.Sprintf("%s: %v", target.healthKey, errs[i]))
+		}
+	}
+
+	// round-robin 合流，只收 Cloudflare 边缘段内的地址。
+	ips := make([]string, 0, remaining)
+	seenIP := make(map[string]struct{}, remaining)
+	cursor := make([]int, len(results))
+	for len(ips) < remaining {
+		progressed := false
+		for i := range results {
+			for cursor[i] < len(results[i]) {
+				raw := results[i][cursor[i]]
+				cursor[i]++
+				ip := net.ParseIP(strings.TrimSpace(raw))
+				if !isCloudflareIPv4(ip) {
+					continue
+				}
+				key := ip.To4().String()
+				if _, ok := seenIP[key]; ok {
+					continue
+				}
+				seenIP[key] = struct{}{}
+				ips = append(ips, key)
+				progressed = true
+				break
+			}
 			if len(ips) >= remaining {
 				return ips, errorsFound, nil
 			}
 		}
-		for _, sourceURL := range source.URLs {
-			if len(ips) >= remaining {
-				return ips, errorsFound, nil
-			}
-			found, err := fetchProxyCandidateURL(parent, sourceURL)
-			// 逐 URL 记健康账：渠道审计与优选台心跳以此辨死源。
-			a.recordSourceHealth(sourceURL, len(found), err)
-			if err != nil {
-				errorsFound = append(errorsFound, fmt.Sprintf("%s: %v", source.Name, err))
-				continue
-			}
-			ips = append(ips, found...)
+		if !progressed {
+			break
 		}
 	}
 	return ips, errorsFound, nil

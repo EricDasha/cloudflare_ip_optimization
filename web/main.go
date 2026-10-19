@@ -111,6 +111,7 @@ func main() {
 	go a.runSubscriptionSweepLoop()
 	go a.runThroneProbeLoop()
 	go a.runDomainLatencyProbeLoop()
+	go a.runCFdataBackgroundScan()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", a.handleHealth)
@@ -174,11 +175,59 @@ func (a *app) runBackgroundOptimizerLoop() {
 	}
 }
 
-// runCFdataBackgroundScan 已废弃：CFdata 彻底改为用户主动触发，
-// 不再有任何后台自启动（无后台循环、无定时扫描）。
-// 保留空壳仅防旧调用残留；实际扫描走 /api/cfdata/run 手动触发。
+// cfdataScanInterval 是 cfdata 后台重扫的间隔。
+//
+// cfdata 是唯一以本机网络为基准的供给层——它在这台 NAS 上实测延迟与丢包，
+// 比任何第三方优选表都更贴近这条线路的真实质量。扫描全程约 45 秒
+// （-scan 100 -test 50，2000 余个候选），代价极低。
+const cfdataScanInterval = 6 * time.Hour
+
+// cfdataIPListFile 是 cfdata 的「待扫描清单」（由上游段列表生成）。
+const cfdataIPListFile = "ip.csv"
+
+// runCFdataBackgroundScan 定时重扫 cfdata。
+//
+// 扫描为 fire-and-forget：起进程即返回，结果写 result.csv，下一轮候选刷新
+// 自然读取——扫描与候选两条链路彻底解耦，绝不阻塞调度。
 func (a *app) runCFdataBackgroundScan() {
-	log.Printf("runCFdataBackgroundScan is disabled: CFdata runs only on manual trigger (/api/cfdata/run)")
+	if !envBool("CFDATA_AUTO_SCAN", true) {
+		log.Printf("cfdata background scan disabled (CFDATA_AUTO_SCAN=false)")
+		return
+	}
+	// 启动后错峰等 3 分钟：避开 cfnat 自启与首轮候选刷新的带宽竞争。
+	timer := time.NewTimer(3 * time.Minute)
+	defer timer.Stop()
+	<-timer.C
+	a.triggerCFdataScan()
+	ticker := time.NewTicker(cfdataScanInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		a.triggerCFdataScan()
+	}
+}
+
+// triggerCFdataScan 起一次 cfdata 扫描；已在跑则跳过。不等它结束。
+func (a *app) triggerCFdataScan() {
+	if a.cfdata.status().Running {
+		return
+	}
+	cfg := defaultCFdataConfig()
+	cfg.ForceUpdate = a.cfdataIPListStale()
+	if err := a.cfdata.start(a.dataDir, cfg.args(), ""); err != nil {
+		log.Printf("cfdata background scan failed to start: %v", err)
+		return
+	}
+	log.Printf("cfdata background scan started: update=%v args=%v", cfg.ForceUpdate, cfg.args())
+}
+
+// cfdataIPListStale 报告待扫描清单是否需要从上游重建。
+// 清单超过 24 小时才重建，避免每一轮都去依赖 baipiao 上游。
+func (a *app) cfdataIPListStale() bool {
+	info, err := os.Stat(filepath.Join(a.dataDir, cfdataIPListFile))
+	if err != nil {
+		return true
+	}
+	return time.Since(info.ModTime()) > 24*time.Hour
 }
 
 // ============================================================================
@@ -355,8 +404,8 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 }
 
 func (a *app) refreshAndApplyProxyPool(ctx context.Context) {
-	// CFdata 已解耦为独立后台扫描器，不再在此触发。
-	// Optimizer 只读取 cfdata cache（ip.csv），不启动扫描。
+	// CFdata 由独立后台扫描器（runCFdataBackgroundScan）驱动——本循环只读取
+	// 它产出的 result.csv，不启动扫描。两条链路解耦，互不阻塞。
 	ok, err := a.refreshProxyCandidates(ctx)
 	if err != nil {
 		log.Printf("proxy candidate refresh skipped: %v", err)

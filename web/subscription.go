@@ -112,7 +112,12 @@ func (a *app) saveSubscriptionPoolLocked() error {
 	return os.Rename(tmp, path)
 }
 
-// subscriptionPoolIPs 返回订阅池 IP 快照（按入库顺序），供候选汇合以 subscription 层合入。
+// subscriptionPoolIPs 返回订阅池 IP 快照（按入库顺序，已过 Cloudflare 段闸），
+// 供候选汇合以 subscription 层合入。
+//
+// 闸门理由：订阅原文里会被 extractPublicIPv4 抓出所有公网 IPv4，其中大量是
+// 机场自有 VPS（不是 Cloudflare 边缘）。不过在源头过滤，这些地址就会挤占
+// 配额、再被下游 VLESS 终审一个个淘汰，白烧探针。
 func (a *app) subscriptionPoolIPs(remaining int) []string {
 	a.subMu.RLock()
 	defer a.subMu.RUnlock()
@@ -120,8 +125,12 @@ func (a *app) subscriptionPoolIPs(remaining int) []string {
 		return nil
 	}
 	out := make([]string, 0, min(remaining, len(a.subIPs)))
-	for _, ip := range a.subIPs {
-		out = append(out, ip)
+	for _, raw := range a.subIPs {
+		ip := net.ParseIP(raw)
+		if !isCloudflareIPv4(ip) {
+			continue
+		}
+		out = append(out, ip.To4().String())
 		if len(out) >= remaining {
 			break
 		}

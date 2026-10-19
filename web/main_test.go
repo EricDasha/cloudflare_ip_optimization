@@ -87,9 +87,8 @@ func TestSameIPSetIgnoresOrder(t *testing.T) {
 }
 
 func TestCandidateSourcePriorityUsesDeclaredOrder(t *testing.T) {
-	// 供给层只剩 user > subscription > official > proxy：
-	// preferred(域名直连 fixed) 与 cfdata(baipiao 上游) 已拆除，
-	// 未知来源落 rank 末尾。
+	// 供给层：user > cfdata > subscription > bestcf。
+	// preferred(域名直连 fixed) 与 official(官方段) 已砍，未知来源落 rank 末尾。
 	results := []proxyScanResult{
 		{IP: "203.0.113.6", Latency: 1},
 		{IP: "203.0.113.1", Latency: 6},
@@ -110,8 +109,8 @@ func TestCandidateSourcePriorityUsesDeclaredOrder(t *testing.T) {
 	for i, result := range results {
 		got[i] = result.IP
 	}
-	// user(1) → subscription(2) → bestcf(5) → 未知/已砍来源按 rank 末尾、层内延迟序
-	want := []string{"203.0.113.1", "203.0.113.2", "203.0.113.5", "203.0.113.6", "203.0.113.3", "203.0.113.4"}
+	// user(0) → cfdata(1) → subscription(2) → bestcf(3) → 未知/已砍来源按 rank 末尾、层内延迟序
+	want := []string{"203.0.113.1", "203.0.113.4", "203.0.113.2", "203.0.113.5", "203.0.113.6", "203.0.113.3"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("candidate source order = %v, want %v", got, want)
 	}

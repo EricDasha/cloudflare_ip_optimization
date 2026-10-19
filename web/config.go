@@ -22,12 +22,17 @@ const (
 	preferredSettingsFile         = "proxy-preferred.json"
 	// 候选池分层配额：优先级决定谁先进（同 IP 先到先得），配额保证单层不能
 	// 吃光整个池（生产曾见 subscription 独占 1000/1000，official=0、proxy=0）。
-	// 官方段已砍（用户指令）：bestcf 全量列表 + 订阅已是充分供给。
-	// 总上限 candidatePoolTotalCap 由各层配额之和自然约束（100+600+300=1000）。
+	//
+	// 现行供给序（user > cfdata > subscription > bestcf），依「与这条线路的
+	// 相关性」排定：cfdata 在本机实测延迟与丢包，是唯一以我们自己的网络为
+	// 基准的源；subscription 未校验 CF 段，最杂；bestcf 是别人扫的，但已按
+	// CF 段闸清洗。配额之和恰为 candidatePoolTotalCap（100+250+300=650，
+	// bestcf 吃剩余 350）。
 	candidatePoolTotalCap     = 1000
 	userCandidatesCap         = 100
-	subscriptionCandidatesCap = 600
-	bestcfCandidatesFloor     = 300
+	cfdataCandidatesCap       = 250
+	subscriptionCandidatesCap = 300
+	bestcfCandidatesReserve   = 350
 )
 
 type proxyAutoConfig struct {
