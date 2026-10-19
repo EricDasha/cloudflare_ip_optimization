@@ -99,6 +99,23 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .cololine b { color: var(--text); font-weight: 700; }
 
 /* ---------- 在位行 ---------- */
+.throne-ctl {
+  display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap;
+  margin: var(--s2) 0 var(--s1);
+}
+.throne-ctl .foot { margin: 0; }
+.group-head {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s3);
+  margin: var(--s3) 0 var(--s1); padding-bottom: 4px; border-bottom: 1px solid var(--line-strong);
+}
+.group-title {
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--text-3);
+}
+.mempick { display: flex; align-items: center; }
+.mempick input { accent-color: #fff; width: 15px; height: 15px; cursor: pointer; }
+.ip-row.off { opacity: .42; }
+.ip-row.off .ip-addr { text-decoration: line-through; }
 .ip-row {
   display: grid; grid-template-columns: minmax(170px, 1.5fr) auto auto auto;
   gap: var(--s2) var(--s4); align-items: center;

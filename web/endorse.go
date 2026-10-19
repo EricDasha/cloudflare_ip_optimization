@@ -128,8 +128,24 @@ func (a *app) handleActiveEndorse(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("生效池上限 %d 席（现 %d 席），请先踢出旧成员再扶持", maxPoolMembers, len(current.IPs)+len(current.Domains)), http.StatusBadRequest)
 		return
 	}
-	if len(addedIPs) == 0 && len(addedDomains) == 0 {
-		// 幂等：全部已在位，不重启转发。
+	// 扶持即置顶：已在位但尚未置顶的成员，同样要提到 -fixed 最前。
+	wanted := append(append([]string(nil), parsed.IPs...), parsed.Domains...)
+	priority := append([]string(nil), current.Priority...)
+	promoted := 0
+	for _, member := range wanted {
+		if !containsString(priority, member) {
+			priority = append(priority, member)
+			promoted++
+		}
+	}
+	disabled := make([]string, 0, len(current.Disabled))
+	for _, member := range current.Disabled {
+		if !containsString(wanted, member) {
+			disabled = append(disabled, member)
+		}
+	}
+	if len(addedIPs) == 0 && len(addedDomains) == 0 && promoted == 0 && len(disabled) == len(current.Disabled) {
+		// 幂等：全部已在位且已置顶，不重启转发。
 		writeJSON(w, map[string]any{
 			"ok": true, "ips": []string{}, "domains": []string{}, "skipped": skipped,
 			"ips_total": len(current.IPs), "domains_total": len(current.Domains), "unchanged": true,
@@ -141,6 +157,8 @@ func (a *app) handleActiveEndorse(w http.ResponseWriter, r *http.Request) {
 	pool.UpdatedAt = now
 	pool.IPs = append(append([]string(nil), current.IPs...), addedIPs...)
 	pool.Domains = append(append([]string(nil), current.Domains...), addedDomains...)
+	pool.Priority = priority
+	pool.Disabled = disabled
 	// 扶持成员没有体检成绩，成绩单不造假：无记录即「在位，体检随时点」。
 	if err := a.applyPoolLocked(pool, current); err != nil {
 		http.Error(w, "扶持登基换池失败: "+err.Error(), http.StatusInternalServerError)

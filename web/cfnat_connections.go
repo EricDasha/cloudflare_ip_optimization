@@ -45,7 +45,7 @@ func (a *app) handleCFnatUpstreams(w http.ResponseWriter, r *http.Request) {
 	// PROXY_AUTO_PORT is the candidate probe destination. CFnat's actual
 	// upstream port is controlled by CFNAT_PORT and may intentionally differ.
 	port := defaultCFnatConfig().Port
-	snapshot := readCFnatUpstreams(port)
+	snapshot := readCFnatUpstreams(port, a.cfnat.status().PID)
 	inPool := make(map[string]bool)
 	for _, ip := range a.proxyActivePoolSnapshot().IPs {
 		inPool[ip] = true
@@ -58,13 +58,11 @@ func (a *app) handleCFnatUpstreams(w http.ResponseWriter, r *http.Request) {
 
 // readCFnatUpstreams 统计出站转发的上游分布。显式走 /proc/self/net（不依赖
 // /proc/net symlink），ErrNotExist 不再静默——容器内 procfs 异常必须暴露。
-func readCFnatUpstreams(upstreamPort int) upstreamSnapshot {
+func readCFnatUpstreams(upstreamPort, pid int) upstreamSnapshot {
 	snapshot := upstreamSnapshot{UpdatedAt: time.Now(), Port: upstreamPort, Upstreams: []upstreamConnection{}}
 	byIP := make(map[string]*upstreamConnection)
-	for _, source := range []struct {
-		path string
-		ipv6 bool
-	}{{"/proc/self/net/tcp", false}, {"/proc/self/net/tcp6", true}} {
+	_, sources := procNetSources(pid)
+	for _, source := range sources {
 		f, err := os.Open(source.path)
 		if err != nil {
 			if snapshot.Error == "" {
@@ -128,6 +126,11 @@ type cfnatConnectionsSnapshot struct {
 	Total     int               `json:"total"`
 	Sources   []cfnatConnection `json:"sources"`
 	Error     string            `json:"error,omitempty"`
+	// 诊断三件：扫了多少行、本地端口命中多少行、读的是哪个 netns。
+	// 「有设备在连却认不出」时，靠它区分「没数据」与「被过滤掉」。
+	Scanned  int    `json:"scanned"`
+	PortHits int    `json:"portHits"`
+	ProcPath string `json:"procPath,omitempty"`
 }
 
 func (a *app) handleCFnatConnections(w http.ResponseWriter, r *http.Request) {
@@ -135,7 +138,7 @@ func (a *app) handleCFnatConnections(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET or POST required", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, readCFnatConnections(cfnatListenPort(defaultCFnatConfig().Addr)))
+	writeJSON(w, readCFnatConnections(cfnatListenPort(defaultCFnatConfig().Addr), a.cfnat.status().PID))
 }
 
 func cfnatListenPort(addr string) int {
@@ -150,13 +153,29 @@ func cfnatListenPort(addr string) int {
 	return port
 }
 
-func readCFnatConnections(port int) cfnatConnectionsSnapshot {
-	snapshot := cfnatConnectionsSnapshot{UpdatedAt: time.Now(), Port: port, Sources: []cfnatConnection{}}
-	byIP := make(map[string]*cfnatConnection)
-	for _, source := range []struct {
+// procNetSources 取 cfnat 自己 netns 的 TCP 表路径，拿不到 PID 才退回 self。
+// 直读 /proc/<pid>/net 而非 /proc/self/net：即使两者 netns 不同也读到正确的那张表。
+func procNetSources(pid int) (string, []struct {
+	path string
+	ipv6 bool
+}) {
+	base := "/proc/self/net/"
+	if pid > 0 {
+		base = "/proc/" + strconv.Itoa(pid) + "/net/"
+	}
+	return base, []struct {
 		path string
 		ipv6 bool
-	}{{"/proc/self/net/tcp", false}, {"/proc/self/net/tcp6", true}} {
+	}{{base + "tcp", false}, {base + "tcp6", true}}
+}
+
+func readCFnatConnections(port, pid int) cfnatConnectionsSnapshot {
+	snapshot := cfnatConnectionsSnapshot{UpdatedAt: time.Now(), Port: port, Sources: []cfnatConnection{}}
+	base, sources := procNetSources(pid)
+	snapshot.ProcPath = base
+	byIP := make(map[string]*cfnatConnection)
+	stats := procTCPStats{}
+	for _, source := range sources {
 		f, err := os.Open(source.path)
 		if err != nil {
 			if snapshot.Error == "" {
@@ -164,14 +183,15 @@ func readCFnatConnections(port int) cfnatConnectionsSnapshot {
 			}
 			continue
 		}
-		err = parseProcTCP(f, source.ipv6, port, byIP, &snapshot.Total)
+		err = parseProcTCP(f, source.ipv6, port, byIP, &stats)
 		_ = f.Close()
-		if err != nil {
-			if snapshot.Error == "" {
-				snapshot.Error = err.Error()
-			}
+		if err != nil && snapshot.Error == "" {
+			snapshot.Error = err.Error()
 		}
 	}
+	snapshot.Scanned = stats.Scanned
+	snapshot.PortHits = stats.PortHits
+	snapshot.Total = stats.Total
 	for _, item := range byIP {
 		snapshot.Sources = append(snapshot.Sources, *item)
 	}
@@ -184,7 +204,15 @@ func readCFnatConnections(port int) cfnatConnectionsSnapshot {
 	return snapshot
 }
 
-func parseProcTCP(reader io.Reader, ipv6 bool, port int, byIP map[string]*cfnatConnection, total *int) error {
+// procTCPStats 是一次解析的计数：Scanned 为有效行数，PortHits 为本地端口
+// 命中监听端口的行数，Total 为最终计入设备数的连接数。
+type procTCPStats struct {
+	Scanned  int
+	PortHits int
+	Total    int
+}
+
+func parseProcTCP(reader io.Reader, ipv6 bool, port int, byIP map[string]*cfnatConnection, stats *procTCPStats) error {
 	scanner := bufio.NewScanner(reader)
 	if !scanner.Scan() {
 		return scanner.Err()
@@ -194,13 +222,16 @@ func parseProcTCP(reader io.Reader, ipv6 bool, port int, byIP map[string]*cfnatC
 		if len(fields) < 4 {
 			continue
 		}
+		stats.Scanned++
 		_, localPort, ok := parseProcEndpoint(fields[1], ipv6)
 		if !ok || localPort != port || strings.EqualFold(fields[3], "0A") {
 			continue
 		}
+		stats.PortHits++
 		remoteIP, _, ok := parseProcEndpoint(fields[2], ipv6)
 		parsed := net.ParseIP(remoteIP)
-		if !ok || parsed == nil || !parsed.IsPrivate() {
+		// 只排掉回环与未指定地址：设备经端口映射从外网进来，一样要认得出。
+		if !ok || parsed == nil || parsed.IsLoopback() || parsed.IsUnspecified() {
 			continue
 		}
 		state := procTCPState(fields[3])
@@ -211,7 +242,7 @@ func parseProcTCP(reader io.Reader, ipv6 bool, port int, byIP map[string]*cfnatC
 		}
 		item.Connections++
 		item.States[state]++
-		*total++
+		stats.Total++
 	}
 	return scanner.Err()
 }
@@ -233,6 +264,13 @@ func parseProcEndpoint(raw string, ipv6 bool) (string, int, bool) {
 		return net.IPv4(bytes[3], bytes[2], bytes[1], bytes[0]).String(), int(port64), true
 	}
 	if ipv6 && len(bytes) == 16 {
+		// /proc/net/tcp6 把 IPv6 地址写成四个 32 位字，每字内部小端排列。
+		// 不逐字反转就会解出 `0b12:12c0::ffff` 这类假地址——私网判定与展示全错，
+		// 双栈监听下的入站设备会整批消失（历史 bug：设备名册恒为空）。
+		for i := 0; i < 16; i += 4 {
+			bytes[i], bytes[i+3] = bytes[i+3], bytes[i]
+			bytes[i+1], bytes[i+2] = bytes[i+2], bytes[i+1]
+		}
 		return net.IP(bytes).String(), int(port64), true
 	}
 	return "", 0, false

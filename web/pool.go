@@ -21,6 +21,15 @@ type proxyActivePool struct {
 	Domains   []string          `json:"domains,omitempty"`
 	Results   []proxyScanResult `json:"results,omitempty"`
 	Error     string            `json:"error,omitempty"`
+
+	// Disabled 是用户显式关闭的成员（IP 或域名）：仍在位、仍可体检，但不进
+	// cfnat -fixed，绝不参与转发。为空即「全开」。
+	Disabled []string `json:"disabled,omitempty"`
+	// Priority 是「顶到最上」的成员：扶持登基自动入列，也可由用户手动置顶。
+	// 它们排在 -fixed 最前，锁位开启时是唯一被转发的集合。
+	Priority []string `json:"priority,omitempty"`
+	// Lock 为真时 cfnat 只对 Priority 成员转发——用户亲手决定谁承载流量。
+	Lock bool `json:"lock,omitempty"`
 }
 
 func (a *app) loadProxyActivePool() {
@@ -99,19 +108,73 @@ func (a *app) applyProxyPool(pool, current proxyActivePool) error {
 	return a.applyPoolLocked(pool, current)
 }
 
+// planFixedMembers 决定 cfnat -fixed 的成员与顺序：
+//  1. 置顶（扶持登基）成员在最前——「顶到最上进行转发」；
+//  2. 其余未关闭成员随后；
+//  3. Lock 开启时只保留置顶成员，杜绝劣质成员分走流量。
+//
+// 返回空集合即报错：绝不用空 -fixed 重启 cfnat。
+func planFixedMembers(pool proxyActivePool) ([]string, []string, error) {
+	disabled := make(map[string]bool, len(pool.Disabled))
+	for _, m := range pool.Disabled {
+		disabled[m] = true
+	}
+	all := make([]string, 0, len(pool.IPs)+len(pool.Domains))
+	all = append(all, pool.IPs...)
+	all = append(all, pool.Domains...)
+	exists := make(map[string]bool, len(all))
+	for _, m := range all {
+		exists[m] = true
+	}
+
+	priority := make([]string, 0, len(pool.Priority))
+	seen := make(map[string]bool, len(all))
+	for _, m := range pool.Priority {
+		if !exists[m] || disabled[m] || seen[m] {
+			continue
+		}
+		seen[m] = true
+		priority = append(priority, m)
+	}
+	fixed := append([]string(nil), priority...)
+	if !pool.Lock {
+		for _, m := range all {
+			if disabled[m] || seen[m] {
+				continue
+			}
+			seen[m] = true
+			fixed = append(fixed, m)
+		}
+	}
+	if len(fixed) == 0 {
+		if pool.Lock {
+			return nil, nil, fmt.Errorf("锁位已开启，但没有任何可转发的扶持登基成员")
+		}
+		return nil, nil, fmt.Errorf("没有可转发的成员：生效池成员已全部关闭")
+	}
+	return fixed, priority, nil
+}
+
 // applyPoolLocked 在已持有 cfnatCtlMu 时执行换池（踢人/手动采用等已持锁路径复用）。
 func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 	// 池成员 = 登基 IP + 优选域名（cfnat -fixed 原生收域名，拨号时活解析）。
-	// Fallback 只留用户显式配置的 CFNAT_FALLBACK 兜底目标。
-	fixedMembers := append([]string(nil), pool.IPs...)
-	fixedMembers = append(fixedMembers, pool.Domains...)
+	// Disabled 成员不进 -fixed；Priority 成员排最前；Lock 时只留 Priority。
+	fixedMembers, priorityMembers, err := planFixedMembers(pool)
+	if err != nil {
+		return err
+	}
 	cfnatCfg := defaultCFnatConfig()
 	cfnatCfg.Fixed = strings.Join(fixedMembers, ",")
+	cfnatCfg.Priority = strings.Join(priorityMembers, ",")
 	cfnatCfg.Fallback = strings.TrimSpace(env("CFNAT_FALLBACK", ""))
-	rollbackFixed := append([]string(nil), current.IPs...)
-	rollbackFixed = append(rollbackFixed, current.Domains...)
+	rollbackFixed, rollbackPriority, rollbackErr := planFixedMembers(current)
+	if rollbackErr != nil {
+		rollbackFixed = append(append([]string(nil), current.IPs...), current.Domains...)
+		rollbackPriority = nil
+	}
 	rollbackCfg := defaultCFnatConfig()
 	rollbackCfg.Fixed = strings.Join(rollbackFixed, ",")
+	rollbackCfg.Priority = strings.Join(rollbackPriority, ",")
 	rollbackCfg.Fallback = strings.TrimSpace(env("CFNAT_FALLBACK", ""))
 	if err := a.cfnat.stop(); err != nil {
 		return fmt.Errorf("停止 cfnat: %w", err)
