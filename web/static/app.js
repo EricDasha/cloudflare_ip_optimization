@@ -292,7 +292,14 @@
       } else if (lat.state === "dead") {
         scoreParts.push(["已死", lat.consecutiveFailures ? `连败${lat.consecutiveFailures}` : "", "bad"]);
       } else if (!lat.ok) {
-        scoreParts.push(["不可达", lat.ms ? `${lat.ms}ms` : "", "bad"]);
+        // 区分「握手不通」与「连得上、只是测速没跑完」：后者不是可达性问题，
+        // 报成「不可达」会冤枉好域名，也让人误判该不该换掉它。
+        if (lat.ms > 0) {
+          scoreParts.push([String(lat.ms), "ms"]);
+          scoreParts.push(["测速超时", "", "warn"]);
+        } else {
+          scoreParts.push(["不可达", "", "bad"]);
+        }
       } else {
         if (lat.mbps > 0) scoreParts.push([lat.mbps.toFixed(1), "Mbps"]);
         if (lat.ms > 0) scoreParts.push([String(lat.ms), "ms"]);

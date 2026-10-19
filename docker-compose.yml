@@ -80,10 +80,23 @@ services:
       # 移动/广电常 HKG，电信/联通常 SJC/LAX——以实测为准；留空禁用。
       PROXY_POOL_COLO_PREFER: "${PROXY_POOL_COLO_PREFER:-}"
 
-      # 优选域名 TCP:443 延迟探测（只读体检，只量不改、绝不动池）。
+      # 优选域名体检：TCP:443 快检 + 短时真实下载，产出「速度 / 成功率 / 抖动」
+      # 三本账，只读不动池。
+      #
+      # 间隔默认 30 分钟（代码下限 5 分钟）：单轮 12 域名 × 256 KiB ≈ 3 MiB，
+      # 半小时一轮约 144 MiB/天。稳定性靠多轮历史，不靠高频——把家宽烧在体检上
+      # 并不划算。此处若设成 300（5 分钟），流量立刻涨到约 860 MiB/天。
       PROXY_DOMAIN_PROBE_ENABLED: "${PROXY_DOMAIN_PROBE_ENABLED:-true}"
-      PROXY_DOMAIN_PROBE_INTERVAL_SECONDS: "300"
+      PROXY_DOMAIN_PROBE_INTERVAL_SECONDS: "1800"
       PROXY_DOMAIN_PROBE_TIMEOUT_MS: "3000"
+      # 下载端点必须是「非 Cloudflare 目标」：2026-10-20 实测这条
+      # Worker+ProxyIP 链路对 gstatic/generate_204（非 CF）0.54s 即通，对
+      # speed.cloudflare.com / cp.cloudflare.com（CF 目标）20~60s 零字节。
+      # 端点若落在 CF 上，每轮全都超时，账本会静默变成一堆 0。
+      PROXY_DOMAIN_SPEED_URL: "${PROXY_DOMAIN_SPEED_URL:-https://proof.ovh.net/files/10Mb.dat}"
+      # 只读到这么多字节即止（文件本身 10 MB，靠 io.LimitReader 截断）。
+      PROXY_DOMAIN_SPEED_BYTES: "262144"
+      PROXY_DOMAIN_SPEED_TIMEOUT_SECONDS: "20"
 
       # WS 101 通过后，使用 /data 中的本地 VLESS outbound 模板做真实数据面终审。
       PROXY_VLESS_PROBE: "true"
@@ -93,6 +106,10 @@ services:
       PROXY_VLESS_TIMEOUT: "15"
       PROXY_VLESS_MAX_CANDIDATES: "20"
       # 测速为软门槛：只影响排序与展示，不再否决已通过 204 的候选。
+      # 注意：PROXY_VLESS_SPEED_URL 未设时默认落在 speed.cloudflare.com，
+      # 与上面域名测速踩的是同一个坑（链路到不了 CF 目标）。故 IP 侧吞吐
+      # 排序目前恒为空、形同虚设。改法是把它也指向非 CF 定长文件——这会
+      # 改变优选排序、进而影响换池，属独立决策，需明示后再动。
       PROXY_VLESS_SPEED_BYTES: "2097152"
       PROXY_VLESS_SPEED_TIMEOUT: "20"
       PROXY_VLESS_MIN_DOWNLOAD_MBPS: "3"

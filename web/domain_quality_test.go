@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -164,5 +167,110 @@ func TestRecordDomainProbePrunesRemovedDomains(t *testing.T) {
 	})
 	if _, ok := a.domainQuality["b.example.com"]; ok {
 		t.Fatal("removed domain still holds a quality record")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 测速端点：默认必须落在非 Cloudflare 目标上
+//
+// 2026-10-20 实测：这条 Worker+ProxyIP 链路对 CF 目标（speed.cloudflare.com、
+// cp.cloudflare.com）零字节，对非 CF 目标（gstatic、proof.ovh.net）正常。
+// 端点一旦回退成 CF，整套测速会静默归零，故用测试钉死。
+// ---------------------------------------------------------------------------
+
+func TestDomainSpeedProbeURL(t *testing.T) {
+	t.Run("默认端点非 CF 且可被替换", func(t *testing.T) {
+		t.Setenv("PROXY_DOMAIN_SPEED_URL", "")
+		got := domainSpeedProbeURL(256 * 1024)
+		if got != domainSpeedDefaultURL {
+			t.Fatalf("got %q, want default %q", got, domainSpeedDefaultURL)
+		}
+		if strings.Contains(got, "cloudflare.com") {
+			t.Fatalf("默认测速端点 %q 指向 Cloudflare，该链路对 CF 目标零字节", got)
+		}
+	})
+
+	t.Run("{bytes} 占位符展开", func(t *testing.T) {
+		t.Setenv("PROXY_DOMAIN_SPEED_URL", "https://example.net/__down?bytes={bytes}")
+		if got, want := domainSpeedProbeURL(131072), "https://example.net/__down?bytes=131072"; got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("定长端点原样透传", func(t *testing.T) {
+		t.Setenv("PROXY_DOMAIN_SPEED_URL", "https://example.net/10Mb.dat")
+		if got, want := domainSpeedProbeURL(262144), "https://example.net/10Mb.dat"; got != want {
+			t.Fatalf("got %q, want %q（定长端点不该被改写）", got, want)
+		}
+	})
+
+	t.Run("空白值回落默认", func(t *testing.T) {
+		t.Setenv("PROXY_DOMAIN_SPEED_URL", "   ")
+		if got := domainSpeedProbeURL(1); got != domainSpeedDefaultURL {
+			t.Fatalf("got %q, want default %q", got, domainSpeedDefaultURL)
+		}
+	})
+}
+
+// writeProbeTemplate 落一份校验通过的 VLESS 模板，供配置类测试复用。
+func writeProbeTemplate(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "vless-probe-outbound.json")
+	const tmpl = `{"type":"vless","server":"127.0.0.1","server_port":443,"uuid":"94892c52-199b-46fb-8552-41b91c00f9ee",` +
+		`"tls":{"enabled":true,"server_name":"probe.example.com"},` +
+		`"transport":{"type":"ws","path":"/probe","headers":{"Host":"probe.example.com"}}}`
+	if err := os.WriteFile(path, []byte(tmpl), 0600); err != nil {
+		t.Fatalf("写临时模板失败: %v", err)
+	}
+	return path
+}
+
+func TestDomainSpeedProbeConfigDefaults(t *testing.T) {
+	t.Setenv("PROXY_VLESS_TEMPLATE", writeProbeTemplate(t))
+	t.Setenv("PROXY_DOMAIN_SPEED_URL", "")
+	t.Setenv("PROXY_DOMAIN_SPEED_BYTES", "")
+	t.Setenv("PROXY_DOMAIN_SPEED_TIMEOUT_SECONDS", "")
+
+	a := newProbeTestApp(t)
+	cfg, template, err := a.domainSpeedProbeConfig()
+	if err != nil {
+		t.Fatalf("domainSpeedProbeConfig: %v", err)
+	}
+	if template == nil {
+		t.Fatal("template = nil, want parsed outbound")
+	}
+	if cfg.TestURL != domainSpeedDefaultURL {
+		t.Fatalf("TestURL = %q, want %q", cfg.TestURL, domainSpeedDefaultURL)
+	}
+	if cfg.ReadLimit != int64(domainSpeedDefaultBytes) {
+		t.Fatalf("ReadLimit = %d, want %d", cfg.ReadLimit, domainSpeedDefaultBytes)
+	}
+	// 只读到上限即止：整文件 10 MB，不该把家宽烧在体检上。
+	if cfg.ReadLimit > 512*1024 {
+		t.Fatalf("ReadLimit = %d，超过 512 KiB 上限，单轮流量失控", cfg.ReadLimit)
+	}
+	if cfg.MinBytes != int64(domainQualityMinBytes) {
+		t.Fatalf("MinBytes = %d, want %d", cfg.MinBytes, domainQualityMinBytes)
+	}
+	if cfg.Timeout != time.Duration(domainSpeedDefaultTimeoutSeconds)*time.Second {
+		t.Fatalf("Timeout = %v, want %ds", cfg.Timeout, domainSpeedDefaultTimeoutSeconds)
+	}
+	if cfg.ExpectedStatus != 200 {
+		t.Fatalf("ExpectedStatus = %d, want 200", cfg.ExpectedStatus)
+	}
+}
+
+func TestDomainSpeedProbeConfigClamp(t *testing.T) {
+	t.Setenv("PROXY_VLESS_TEMPLATE", writeProbeTemplate(t))
+	t.Setenv("PROXY_DOMAIN_SPEED_BYTES", "1")             // 低于下限
+	t.Setenv("PROXY_DOMAIN_SPEED_TIMEOUT_SECONDS", "999") // 高于上限
+
+	a := newProbeTestApp(t)
+	cfg, _, err := a.domainSpeedProbeConfig()
+	if err != nil {
+		t.Fatalf("domainSpeedProbeConfig: %v", err)
+	}
+	if cfg.ReadLimit != int64(domainSpeedDefaultBytes) || cfg.Timeout != time.Duration(domainSpeedDefaultTimeoutSeconds)*time.Second {
+		t.Fatalf("越界值未回落默认: ReadLimit=%d Timeout=%v", cfg.ReadLimit, cfg.Timeout)
 	}
 }

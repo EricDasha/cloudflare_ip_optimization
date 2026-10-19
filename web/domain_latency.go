@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -45,10 +47,26 @@ const (
 	// 公平的带宽份额——并发太高会互相抢吞吐，测出来的数字失去可比性。
 	domainProbeConcurrency = 3
 
-	domainSpeedDefaultBytes          = 512 * 1024
+	// domainSpeedDefaultURL 是域名测速的下载端点。
+	//
+	// 必须是 **非 Cloudflare 目标**。2026-10-20 在 NAS 上实测：这条
+	// Worker+ProxyIP 链路对 gstatic/generate_204（非 CF）0.54 秒即可完成，
+	// 而 speed.cloudflare.com 与 cp.cloudflare.com（CF 目标）即便只取 64 KB，
+	// 也是 20–60 秒零字节。默认端点原为 speed.cloudflare.com，于是每一轮
+	// 每一条都超时，账本里全是 0 —— 测速功能形同虚设。
+	// 换成 proof.ovh.net 后同一条隧道 1 MB 用 2.88 秒（约 2.9 Mbps）。
+	//
+	// 代价：测到的是「入口 + Worker + ProxyIP + 目标」的端到端质量，而非纯入口
+	// 质量。但这正是用户真实感受到的那条路，故仍是更诚实的指标。
+	// 若上游以后修好 CF 目标，可用 PROXY_DOMAIN_SPEED_URL 换回。
+	domainSpeedDefaultURL = "https://proof.ovh.net/files/10Mb.dat"
+
+	// 只读到 domainSpeedDefaultBytes 即止：文件本身是 10 MB，靠 io.LimitReader
+	// 截断，实际流量仍只有这么多。
+	domainSpeedDefaultBytes          = 256 * 1024
 	domainSpeedMinBytes              = 64 * 1024
 	domainSpeedMaxBytes              = 8 * 1024 * 1024
-	domainSpeedDefaultTimeoutSeconds = 10
+	domainSpeedDefaultTimeoutSeconds = 20
 	domainSpeedMinTimeoutSeconds     = 3
 	domainSpeedMaxTimeoutSeconds     = 60
 
@@ -221,10 +239,23 @@ func (q *domainQuality) lastTCPMs() int64 {
 // 探测
 // ---------------------------------------------------------------------------
 
+// domainSpeedProbeURL 决定域名测速的下载地址。支持 {bytes} 占位符：
+// 若所选端点能按字节数供数，占位符会被替换；否则原样使用，靠 ReadLimit 截断。
+func domainSpeedProbeURL(size int) string {
+	candidate := strings.TrimSpace(env("PROXY_DOMAIN_SPEED_URL", domainSpeedDefaultURL))
+	if candidate == "" {
+		candidate = domainSpeedDefaultURL
+	}
+	if !strings.Contains(candidate, "{bytes}") {
+		return candidate
+	}
+	return strings.ReplaceAll(candidate, "{bytes}", strconv.Itoa(size))
+}
+
 // domainSpeedProbeConfig 组装域名测速用的 VLESS 配置。
 //
-// 与 IP 探针的差别只在「测什么」：这里拉的是 speed.cloudflare.com 的定长下载，
-// 请求字节数由 PROXY_DOMAIN_SPEED_BYTES 控制（默认 512 KiB）。返回模板错误时
+// 与 IP 探针的差别只在「测什么」：这里拉的是非 CF 定长文件的头部若干字节，
+// 字节数由 PROXY_DOMAIN_SPEED_BYTES 控制（默认 256 KiB）。返回模板错误时
 // 调用方降级为纯 TCP 体检——宁可只报可达性，也不冤枉好域名。
 func (a *app) domainSpeedProbeConfig() (vlessProbeConfig, map[string]any, error) {
 	base := defaultVLESSProbeConfig()
@@ -240,7 +271,7 @@ func (a *app) domainSpeedProbeConfig() (vlessProbeConfig, map[string]any, error)
 		Enabled:        true,
 		Binary:         base.Binary,
 		TemplatePath:   base.TemplatePath,
-		TestURL:        vlessSpeedTestURL(bytes),
+		TestURL:        domainSpeedProbeURL(bytes),
 		ExpectedStatus: http.StatusOK,
 		Timeout:        time.Duration(timeoutSeconds) * time.Second,
 		MaxCandidates:  1,
