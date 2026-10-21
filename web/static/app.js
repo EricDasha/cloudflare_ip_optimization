@@ -58,6 +58,8 @@
   let forward = null;        // /api/status.forward 在途转发实况
   let stickyOn = true;       // /api/config.cfnat.sticky 设备粘性
   let sourceHealth = {};     // /api/status.sources 健康账
+  let poolSegments = {};     // /api/status.poolSegments：当前池的 CF 段分布
+  let domainFallback = [];   // /api/status.domainFallback：非空＝域名闸正在降级兜底
   let qualityByIp = {};      // /api/status.qualityScheduler.records：最近一次探测成绩
   let vlessOn = false;       // /api/config.vlessProbe
   let coloPrefer = "";       // /api/config.poolColoPrefer
@@ -101,6 +103,9 @@
       }
       forward = st.forward || null;
       renderForward();
+      poolSegments = st.poolSegments || {};
+      domainFallback = Array.isArray(st.domainFallback) ? st.domainFallback : [];
+      renderPoolHealth();
       const recs = st.qualityScheduler?.records;
       qualityByIp = {};
       if (Array.isArray(recs)) {
@@ -211,6 +216,43 @@
   }
 
   /* ---------- 渲染：在位（壹） ---------- */
+  // 段分布与降级标记：2026-10-22 事故里池子只有一个段，该段一挂全灭，
+  // 而域名闸在降级兜底时没有任何界面提示——两者都必须一眼可见。
+  function renderPoolHealth() {
+    const segs = Object.entries(poolSegments || {});
+    const total = segs.reduce((s, [, n]) => s + (Number(n) || 0), 0);
+    const box = $("segLine");
+    if (box) {
+      if (!segs.length) {
+        box.innerHTML = '<span class="foot">段分布 –</span>';
+      } else {
+        const sorted = segs.sort((a, b) => b[1] - a[1]);
+        const segCount = sorted.length;
+        const weak = segCount < 2;
+        const bars = sorted.map(([seg, n]) => {
+          const pct = total ? Math.round((n / total) * 100) : 0;
+          return `<span class="seg-chip" title="${seg} · ${n} 个 · ${pct}%">` +
+            `<b class="mono">${seg.split("/")[0].replace(/\.0$/, "")}</b>` +
+            `<i style="width:${Math.max(pct, 4)}%"></i><em class="mono">${n}</em></span>`;
+        }).join("");
+        box.innerHTML =
+          `<span class="foot">段分布 · ${segCount} 段${weak ? ' <b class="warn">（单段，抗风险弱）</b>' : ""}</span>` +
+          `<span class="seg-chips">${bars}</span>`;
+      }
+    }
+    const flag = $("degradedFlag");
+    if (flag) {
+      if (domainFallback.length) {
+        flag.hidden = false;
+        flag.innerHTML = `<b>降级运行</b>：${domainFallback.length} 个转发域名体检未达标，` +
+          `为避免空池已兜底放行（${domainFallback.join("、")}）`;
+      } else {
+        flag.hidden = true;
+        flag.textContent = "";
+      }
+    }
+  }
+
   function renderThrone() {
     const active = poolSnapshot?.active || {};
     const ips = active.ips || [];

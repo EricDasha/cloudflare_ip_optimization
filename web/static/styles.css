@@ -232,3 +232,31 @@ select, input[type="search"] {
 /* ---------- 旧件：忙态与行内空态 ---------- */
 .btn.busy { opacity: .55; cursor: wait; }
 .inline-status { color: var(--text-3); font-size: 12px; }
+
+/* ── 段分布与降级标记 ─────────────────────────────────────────────
+   2026-10-22 事故：池子只有一个 CF 段，该段一挂全灭；域名闸降级兜底时
+   界面毫无提示。两者都必须一眼看见，故此处是全站唯一的色彩破例。 */
+.segline { display: flex; flex-direction: column; gap: var(--s2); margin-top: var(--s2); }
+.seg-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg-chip {
+  position: relative; display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 8px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface-2); font-size: 11px; color: var(--text-2);
+  overflow: hidden;
+}
+.seg-chip i {
+  position: absolute; left: 0; top: 0; bottom: 0; z-index: 0;
+  background: rgb(255 255 255 / .07);
+}
+.seg-chip b, .seg-chip em { position: relative; z-index: 1; font-style: normal; }
+.seg-chip b { color: var(--text); font-weight: 500; }
+.seg-chip em { color: var(--text-3); }
+.warn { color: #d9a441; font-weight: 500; }
+
+.degraded {
+  margin-top: var(--s2); padding: var(--s2) var(--s3);
+  border: 1px solid #6b4a12; border-left: 3px solid #d9a441;
+  border-radius: var(--radius); background: rgb(217 164 65 / .08);
+  color: #e8c07a; font-size: 12px; line-height: 1.6;
+}
+.degraded b { color: #f0cd8d; }
