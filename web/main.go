@@ -498,19 +498,66 @@ func (a *app) poolDomainMembers() []string {
 		seen[domain] = struct{}{}
 		domains = append(domains, domain)
 	}
+	// 显式配置视为运营者本人担保，不参与质量闸。
 	for _, domain := range envForwardDomains("PROXY_DOMAIN_FORWARD") {
 		add(domain)
 	}
 	snapshot := a.proxyCandidateSnapshot()
+	// 自动来源一律过质量闸：体检判 dead/unstable 的域名不再进 -fixed。
+	// 生产事故的形态就是 12 个 successRate≈0.2 的域名留在轮转池里，
+	// 每 4 次拨号有 3 次撞死目标，而 -num=1 时一次失败即断连。
 	for _, domain := range snapshot.ForwardDomains {
-		add(domain)
-	}
-	if envBool("PROXY_AUTO_DOMAINS", false) {
-		for _, domain := range snapshot.PreferredDomains {
+		if a.domainUsableForForwarding(domain) {
 			add(domain)
 		}
 	}
+	if envBool("PROXY_AUTO_DOMAINS", false) {
+		for _, domain := range snapshot.PreferredDomains {
+			if a.domainUsableForForwarding(domain) {
+				add(domain)
+			}
+		}
+	}
 	return domains
+}
+
+// domainUsableForForwarding 判断自动来源的域名是否允许进入转发池。
+// 语义是「没有证据证明它坏」即放行，而不是「必须先证明它好」：
+// 新域名尚无体检记录（testing）时放行，判死或判不稳时拦下。
+//
+// 证据必须既存在又新鲜：关掉体检、或账本久未更新（进程停机数天）时，
+// 拦人用的就是一纸旧账，宁可放行让它重新被考一次。
+func (a *app) domainUsableForForwarding(domain string) bool {
+	if !envBool("PROXY_DOMAIN_QUALITY_GATE", true) {
+		return true
+	}
+	if !domainProbeEnabled() {
+		return true
+	}
+	a.domainQualityMu.Lock()
+	rec := a.domainQuality[domain]
+	var state string
+	var failures int
+	var probedAt time.Time
+	if rec != nil {
+		state = rec.State
+		failures = rec.ConsecutiveFailures
+		probedAt = rec.LastProbeAt
+	}
+	a.domainQualityMu.Unlock()
+
+	if state == "" {
+		return true
+	}
+	if probedAt.IsZero() || time.Since(probedAt) > 3*domainProbeInterval() {
+		return true
+	}
+	switch state {
+	case domainStateDead, domainStateUnstable:
+		log.Printf("domain gate: %s 体检状态 %s（连败 %d），不进转发池", domain, state, failures)
+		return false
+	}
+	return true
 }
 
 func runHealthcheck() {

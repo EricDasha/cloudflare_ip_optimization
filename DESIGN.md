@@ -21,7 +21,7 @@ The optimizer maintains three pools with different test costs and lifecycles:
 - **Test**: Low-cost TCP/TLS latency screening
 - **Size**: Large (hundreds to thousands)
 - **Purpose**: Fast discovery of potentially usable IPs
-- Preferred domains are not resolved into candidates: they are promoted directly to cfnat `-fixed` members (dial-time live DNS, `applyPoolLocked`) and keep `-fallback` duty when explicitly configured. No snapshot, no domain-level probing, no candidate-pool membership.
+- Preferred domains are not resolved into candidates: they are promoted directly to cfnat `-fixed` members (dial-time live DNS, `applyPoolLocked`) and keep `-fallback` duty when explicitly configured. No IP snapshot, no candidate-pool membership. They *are* probed for quality (VLESS data-plane through the domain), but that ledger only gates admission (see Domain Quality Gate) — it never rewrites the domain into IPs.
 
 ### 2. Standby Pool (替补池)
 - **Source**: Candidate IPs that pass TCP screening
@@ -175,7 +175,7 @@ Candidate generation and business acceptance are separate stages:
 
 Every supply channel keeps a health ledger (`/api/status` → `sources`): fetches, successes, cumulative IP count, last success/failure per bestcf URL, per subscription maintainer, and per logical layer (user env, subscription pool, forward-domains table). Dead channels are visible at a glance.
 
-The CFnat data plane never launches these probes. It assigns one upstream target to each new TCP connection using strict round-robin, keeps that session pinned, and only attempts the next target after a TCP dial failure. The fixed pool holds public IPv4 only; preferred domains live exclusively in `-fallback` and are tried only when every fixed IP fails to dial. Domain targets resolve their current DNS (and therefore the operator's current preferred IP) at dial time, under the same session-pinning semantics.
+The CFnat data plane never launches these probes. It assigns one upstream target to each new TCP connection using strict round-robin, keeps that session pinned, and only attempts the next target after a TCP dial failure (up to `-num`, default 3 — sequential, never concurrent). The fixed pool holds public IPv4 plus live-dial preferred domains; domains are gated by their own quality ledger. Domain targets resolve their current DNS (and therefore the operator's current preferred IP) at dial time, under the same session-pinning semantics.
 
 ## Active Isolation
 
@@ -248,6 +248,23 @@ The speed probe samples reads in 250ms slices and smooths them with hand-rolled 
 - `PROXY_PREFERRED_MAX_DOMAINS`: cap on enabled preferred domains (default: 20). The hard code constant is `maxForwardDomains = 12`.
 - `PROXY_PREFERRED_RESOLVE`, `PROXY_PREFERRED_IPS_PER_DOMAIN`, `PROXY_PREFERRED_RESOLVED_CANDIDATES`: deprecated, no longer read (C-zone resolve-supply was removed; domains dial as `-fixed` members with live DNS)
 - `PROXY_PREFERRED_PROBE_MINUTES`, `PROXY_DYNAMIC_DISCOVERY`: deprecated, no longer read
+
+### Domain Quality Gate
+- `PROXY_DOMAIN_QUALITY_GATE`: allow only domains with no evidence of being broken into `-fixed` (default: true).
+- Admission rule, in order:
+  1. Domains listed explicitly in `PROXY_DOMAIN_FORWARD` are the operator's own endorsement — never gated.
+  2. Gate disabled, or `PROXY_DOMAIN_PROBE_ENABLED=false` → admit (no evidence source).
+  3. No record, state empty, state `testing` → admit ("no evidence it is broken" beats "must prove it is good"; new domains get a chance).
+  4. `lastProbeAt` older than 3× the probe interval → admit (a days-old ledger is not current evidence).
+  5. State `dead` or `unstable` → reject.
+- The probe target set is deliberately wider than the pool: `active pool domains ∪ snapshot.ForwardDomains`. A domain gated out must stay on the exam list, otherwise it can never produce a new sample and can never come back.
+- Closing the loop: each probe round ends with `reconcilePoolDomains()`, which recomputes `poolDomainMembers()` and restarts cfnat **only if the domain set actually changed** (IPs untouched, so the pool-switch cooldown and the "active pool is healthy, keep working IPs" guard are deliberately bypassed — those guard IP churn, not domain admission). Without it, pruning at startup would be permanent: healthy IPs block auto-apply, `poolDomainMembers()` is never evaluated again, and recovered domains could never return.
+- Recovery is bounded by `domainRecoveryStreak = 3` consecutive successful probes (~90 min at the default 30-min interval), at which point the pre-recovery sample history is dropped. Rationale: the 2026-10-21 incident was a ~3-hour upstream path outage; with a plain 12-sample window a recovered domain would stay `unstable` for ~4 more hours, i.e. a 3-hour outage would be punished by 4 hours of stale evidence. Both directions are tested (`TestRecalculateClearsHistoryAfterRecoveryStreak`, `TestRecalculateKeepsHistoryBelowRecoveryStreak`).
+
+### CFnat Fallback Depth (`-num`)
+- `CFNAT_NUM`: sequential fallback depth after a dial failure, clamped to `[1, maxCFnatNum=8]`, default `defaultCFnatNum=3`.
+- Not a concurrency knob. `handleConnectionWithDial` walks targets in round-robin order one at a time and returns as soon as one dial succeeds, so a client connection still maps to exactly one upstream session. `cfnat_test.go` pins both invariants (`UsesOneUpstreamPerSession`, `FallsBackOnlyAfterDialFailure`).
+- Depth 1 was the previous default and is the direct cause of the "site completely unreachable" symptom: with a poisoned pool, one 2-second dial timeout dropped the client connection outright. Depth 3 is the smallest value that survives a single dead target.
 
 ### VLESS Data-Plane Probe
 - `PROXY_VLESS_PROBE`: enable the real sing-box data-plane check (default: false)

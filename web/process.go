@@ -246,7 +246,7 @@ func defaultCFnatConfig() cfnatConfig {
 		Priority: env("CFNAT_PRIORITY_IPS", ""),
 		IPNum:    envInt("CFNAT_IPNUM", 20),
 		IPs:      env("CFNAT_IPS", "4"),
-		Num:      envInt("CFNAT_NUM", 1),
+		Num:      envInt("CFNAT_NUM", defaultCFnatNum),
 		Port:     envInt("CFNAT_PORT", 443),
 		Random:   envBool("CFNAT_RANDOM", true),
 		Sticky:   envBool("CFNAT_STICKY", true),
@@ -286,6 +286,11 @@ func normalizeCFnat(c cfnatConfig) cfnatConfig {
 		c.IPs = d.IPs
 	}
 	if c.Num == 0 {
+		c.Num = d.Num
+	}
+	// 回退深度必须在 [1, maxCFnatNum] 内：越界一律回落默认值，
+	// 避免把单连接出站尝试数放大到不可控。
+	if c.Num < 1 || c.Num > maxCFnatNum {
 		c.Num = d.Num
 	}
 	if c.Port == 0 {

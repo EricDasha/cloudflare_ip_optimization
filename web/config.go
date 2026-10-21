@@ -19,6 +19,11 @@ const (
 	maxPreferredDomains           = 64
 	maxForwardDomains             = 12
 	maxVLESSSpeedProbes           = 6
+	// cfnat 单连接回退深度上限。cfnat 只在上一个目标拨号失败时才顺延，
+	// 所以该值不放大并发，只是在整池抖动时把「一次超时=连接断开」变成
+	// 「最多试 defaultCFnatNum 个目标」。
+	defaultCFnatNum = 3
+	maxCFnatNum     = 8
 	preferredSettingsFile         = "proxy-preferred.json"
 	// 候选池分层配额：优先级决定谁先进（同 IP 先到先得），配额保证单层不能
 	// 吃光整个池（生产曾见 subscription 独占 1000/1000，official=0、proxy=0）。

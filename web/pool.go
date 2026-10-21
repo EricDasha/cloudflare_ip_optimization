@@ -155,8 +155,28 @@ func planFixedMembers(pool proxyActivePool) ([]string, []string, error) {
 	return fixed, priority, nil
 }
 
+// admittedPoolDomains 把落盘生效池里的域名过一遍质量闸。
+// 返回新切片，不修改入参；被拦下的域名仍留在体检名单上（见 domainProbeTargets），
+// 所以它们的成绩一旦好转就会在下一轮换池时自动回池。
+func (a *app) admittedPoolDomains(domains []string) []string {
+	if len(domains) == 0 {
+		return domains
+	}
+	admitted := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		if a.domainUsableForForwarding(domain) {
+			admitted = append(admitted, domain)
+		}
+	}
+	return admitted
+}
+
 // applyPoolLocked 在已持有 cfnatCtlMu 时执行换池（踢人/手动采用等已持锁路径复用）。
 func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
+	// 落盘的生效池可能带着体检已判坏的域名（闸门上线前写入的历史遗留）。
+	// 启动、手动采用、立即优选都走这里，若不过闸，重启就是把坏域名重新塞回
+	// -fixed 的通道——闸门只在建池时生效、在重启时失效，等于没有。
+	pool.Domains = a.admittedPoolDomains(pool.Domains)
 	// 池成员 = 登基 IP + 优选域名（cfnat -fixed 原生收域名，拨号时活解析）。
 	// Disabled 成员不进 -fixed；Priority 成员排最前；Lock 时只留 Priority。
 	fixedMembers, priorityMembers, err := planFixedMembers(pool)

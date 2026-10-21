@@ -84,6 +84,14 @@ const (
 	domainSuccessFloor = 0.6
 	// domainDeadFailures 连续失败达几次判死。
 	domainDeadFailures = 3
+	// domainRecoveryStreak 连续成功达几次即认定「已经恢复」，并丢弃之前的旧账。
+	//
+	// 2026-10-21 生产事故：上游链路中断约 3 小时，账本把这 12 个域名全打成
+	// unstable(0.25)。链路恢复后按 12 样本窗口回算，需要连续 8 轮成功
+	// （≈4 小时）才能越过 0.6 下限——一场 3 小时的故障要用 4 小时的旧账继续
+	// 惩罚已经健康的域名，这是错的。连续 3 轮成功（≈90 分钟）已是充分的
+	// 现时证据，故达到即清空历史，从当下重新记账。
+	domainRecoveryStreak = 3
 )
 
 func domainProbeEnabled() bool { return envBool("PROXY_DOMAIN_PROBE_ENABLED", true) }
@@ -128,6 +136,7 @@ type domainQuality struct {
 	P95Mbps             float64             `json:"p95Mbps"`
 	JitterRatio         float64             `json:"jitterRatio"`
 	ConsecutiveFailures int                 `json:"consecutiveFailures"`
+	ConsecutiveSuccesses int                `json:"consecutiveSuccesses,omitempty"`
 	LastProbeAt         time.Time           `json:"lastProbeAt,omitempty"`
 	LastOKAt            time.Time           `json:"lastOkAt,omitempty"`
 	State               string              `json:"state"`
@@ -285,10 +294,38 @@ func (a *app) domainSpeedProbeConfig() (vlessProbeConfig, map[string]any, error)
 	return cfg, template, nil
 }
 
+// domainProbeTargets 决定每轮体检覆盖哪些域名。
+//
+// 不能只取生效池：质量闸把判死的域名挡在池外后，池里就再也没有它，
+// 于是它永远得不到新样本、永远无法翻身。故取「池内 + 全部自动候选」的并集，
+// 让被拦下的域名仍在考试名单上，成绩好转即可自动回池。
+func (a *app) domainProbeTargets() []string {
+	seen := map[string]struct{}{}
+	domains := make([]string, 0, maxForwardDomains*2)
+	add := func(domain string) {
+		if !validCandidateHostname(domain) {
+			return
+		}
+		if _, ok := seen[domain]; ok {
+			return
+		}
+		seen[domain] = struct{}{}
+		domains = append(domains, domain)
+	}
+	for _, domain := range a.proxyActivePoolSnapshot().Domains {
+		add(domain)
+	}
+	snapshot := a.proxyCandidateSnapshot()
+	for _, domain := range snapshot.ForwardDomains {
+		add(domain)
+	}
+	return domains
+}
+
 // probeActiveDomainLatencies 给生效池里的每个优选域名做一轮体检：
 // TCP:443 快检 → VLESS 短时下载 → 写稳定性账。
 func (a *app) probeActiveDomainLatencies(ctx context.Context) {
-	domains := a.proxyActivePoolSnapshot().Domains
+	domains := a.domainProbeTargets()
 	if len(domains) == 0 {
 		return
 	}
@@ -399,9 +436,11 @@ func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) {
 		rec.LastProbeAt = now
 		if sample.OK {
 			rec.ConsecutiveFailures = 0
+			rec.ConsecutiveSuccesses++
 			rec.LastOKAt = now
 		} else if probeHealthy {
 			rec.ConsecutiveFailures++
+			rec.ConsecutiveSuccesses = 0
 		}
 		rec.recalculate()
 	}
@@ -425,6 +464,11 @@ func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) {
 // 抖动用 P95/P50（相对倍数），比绝对差值更能横向比较不同速率的域名：
 // 10 Mbps 的线在 15 Mbps 波动，与 100 Mbps 的线在 150 Mbps 波动，体感同样是「不稳」。
 func (q *domainQuality) recalculate() {
+	// 连续成功已足够多 → 之前的失败属于已过去的事件，先清空再按现时证据重算。
+	// 不清空的话，一场 3 小时的上游中断会让域名在恢复后仍被判不稳约 4 小时。
+	if q.ConsecutiveSuccesses >= domainRecoveryStreak && len(q.Samples) > domainRecoveryStreak {
+		q.Samples = q.Samples[len(q.Samples)-domainRecoveryStreak:]
+	}
 	if len(q.Samples) == 0 {
 		q.State = domainStateTesting
 		return
@@ -488,10 +532,38 @@ func (a *app) runDomainLatencyProbeLoop() {
 			defer cancel()
 			a.probeActiveDomainLatencies(ctx)
 		}()
+		// 体检结论必须能改变生效池，否则闸门只剪不补。
+		a.reconcilePoolDomains()
 		timer := time.NewTimer(domainProbeInterval())
 		<-timer.C
 		timer.Stop()
 	}
+}
+
+// reconcilePoolDomains 让生效池的域名集合跟上体检结论。
+//
+// 只在集合真的变化时才重启 cfnat，且 IP 一个不动，因此刻意绕过换池冷却与
+// 「现池健康就别顶」两道闸——它们防的是 IP 抖动，与域名准入无关。
+//
+// 没有这条回路，启动时被闸门剪掉的坏域名会永久缺席：现池 IP 健康 → 自动换池
+// 被拦 → poolDomainMembers() 再也不被求值 → 体检恢复的域名永远回不来。
+// 域名集合在生产线上一律由 poolDomainMembers() 派生（PROXY_DOMAIN_FORWARD +
+// bestcf 优选域名表 + 已启用优选域名），此处重算与建池口径一致。
+func (a *app) reconcilePoolDomains() {
+	current := a.proxyActivePoolSnapshot()
+	want := a.poolDomainMembers()
+	if sameStringSet(current.Domains, want) {
+		return
+	}
+	pool := current
+	pool.Domains = want
+	pool.UpdatedAt = time.Now()
+	if err := a.applyProxyPool(pool, current); err != nil {
+		log.Printf("domain pool reconcile failed: %v", err)
+		return
+	}
+	log.Printf("domain pool reconciled: %d -> %d domains (%s)",
+		len(current.Domains), len(want), strings.Join(want, ","))
 }
 
 // domainLatencySnapshot 返回域名延迟快照的深拷贝。

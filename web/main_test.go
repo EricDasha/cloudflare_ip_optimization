@@ -34,10 +34,43 @@ func TestIsPublicIPv4(t *testing.T) {
 	}
 }
 
-func TestDefaultCFnatUsesSingleTargetPerConnection(t *testing.T) {
+// cfnat 的真实约束是「一次前端逻辑连接只产生一个真实上游会话」，
+// 由 cfnat_test.go 的 UsesOneUpstreamPerSession / FallsBackOnlyAfterDialFailure 守住。
+// 这里的 -num 只是拨号失败后的顺序回退深度：调大它不增加并发，
+// 只把「一次 2s 超时就断连」变成「最多顺延试几个目标」。
+// 历史教训：曾把它钉成 1，池里混入高失效率成员后，每 4 次轮转有 3 次撞死，
+// 单次超时就直接丢连接，用户侧表现为整页卡死。
+func TestDefaultCFnatFallbackDepthIsBounded(t *testing.T) {
 	t.Setenv("CFNAT_NUM", "")
-	if got := defaultCFnatConfig().Num; got != 1 {
-		t.Fatalf("default CFnat target count = %d, want 1", got)
+	cfg := defaultCFnatConfig()
+	if cfg.Num != defaultCFnatNum {
+		t.Fatalf("default fallback depth = %d, want %d", cfg.Num, defaultCFnatNum)
+	}
+	if defaultCFnatNum < 2 {
+		t.Fatalf("default fallback depth = %d, want >= 2 so a single dead target cannot drop the connection", defaultCFnatNum)
+	}
+	if defaultCFnatNum > maxCFnatNum {
+		t.Fatalf("default fallback depth %d exceeds bound %d", defaultCFnatNum, maxCFnatNum)
+	}
+}
+
+func TestNormalizeCFnatClampsFallbackDepth(t *testing.T) {
+	t.Setenv("CFNAT_NUM", "")
+	cases := []struct {
+		in   int
+		want int
+	}{
+		{0, defaultCFnatNum},
+		{1, 1}, // 显式指定仍尊重运营者选择
+		{2, 2},
+		{maxCFnatNum, maxCFnatNum},
+		{maxCFnatNum + 1, defaultCFnatNum},
+		{-5, defaultCFnatNum},
+	}
+	for _, c := range cases {
+		if got := normalizeCFnat(cfnatConfig{Num: c.in}).Num; got != c.want {
+			t.Fatalf("normalizeCFnat(Num=%d).Num = %d, want %d", c.in, got, c.want)
+		}
 	}
 }
 

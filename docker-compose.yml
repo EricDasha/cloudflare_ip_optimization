@@ -26,7 +26,7 @@ services:
       CFNAT_PRIORITY_IPS: ""
       CFNAT_IPNUM: "20"
       CFNAT_IPS: "4"                 # 4 或 6
-      CFNAT_NUM: "1"
+      CFNAT_NUM: "${CFNAT_NUM:-3}"   # 拨号失败后的顺序回退深度（不是并发数）
       CFNAT_PORT: "443"
       CFNAT_RANDOM: "true"
       CFNAT_STICKY: "${CFNAT_STICKY:-true}"   # true=同设备恒走同一上游；false=按连接轮转铺开全部成员
