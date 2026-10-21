@@ -16,8 +16,15 @@ const (
 	proxyOptimizerSettingsFile    = "proxy-optimizer.json"
 	subscriptionPoolFile          = "subscription-pool.json"
 	maxPreferredDomains           = 64
-	maxForwardDomains             = 12
-	maxVLESSSpeedProbes           = 6
+	// maxForwardDomains 转发域名上限。
+	//
+	// 2026-10-22 修正：原值 12 是照着「A 阶段 3 IP + 12 域名」的经验拍的，
+	// 但 domain/all.txt 实际有 77 个域名，其中 29 个解析到当前网络下可通的
+	// CF 段（104.16/13、104.24/14、103.31/22、108.162.192/18），实测抽 10 个
+	// 有 8 个 TLS 握手成功。卡在 12 等于把大半可用域名挡在门外。
+	// 放宽到 30：既覆盖足够多的可通域名，又不至于让 cfnat 的 -fixed 参数过长。
+	maxForwardDomains   = 30
+	maxVLESSSpeedProbes = 6
 	// minFallbackForwardDomains 质量闸的兜底下限。
 	//
 	// 2026-10-22 二次事故：上游链路故障 3 小时把 16 个优选域名全打成 unstable
