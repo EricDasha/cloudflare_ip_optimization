@@ -84,11 +84,10 @@ func TestExtractPublicIPv4FromTextAndBase64(t *testing.T) {
 }
 
 func TestThirdPartyProxySourcesAreHTTPSAllowlisted(t *testing.T) {
-	for _, id := range []string{"090227"} {
-		source, ok := proxyCandidateSources[id]
-		if !ok {
-			t.Fatalf("missing source %q", id)
-		}
+	// 090227 已于 2026-10-22 并入 bestcf 层，其 URL 由
+	// TestBestcfSourceRegisteredAndEnabled 的白名单统一覆盖。
+	// 这里改为遍历全部候选源，保证没有任何一处走明文 HTTP。
+	for id, source := range proxyCandidateSources {
 		for _, rawURL := range source.URLs {
 			if !strings.HasPrefix(rawURL, "https://") {
 				t.Fatalf("source %q contains non-HTTPS URL %q", id, rawURL)
@@ -104,9 +103,19 @@ func TestThirdPartyProxySourcesAreHTTPSAllowlisted(t *testing.T) {
 			t.Fatalf("community candidate source %q must be disabled", disabled)
 		}
 	}
-	source := proxyCandidateSources["090227"]
-	if len(source.Domains) < 10 || len(source.URLs) != 4 {
-		t.Fatalf("090227 source was not expanded: %#v", source)
+	// 090227 于 2026-10-22 并入 bestcf 层：4 个 API 进 URLs，17 个域名进静态域名表。
+	bestcf := proxyCandidateSources["bestcf"]
+	mergedURLs := 0
+	for _, rawURL := range bestcf.URLs {
+		if strings.HasPrefix(rawURL, "https://cf.090227.xyz/") {
+			mergedURLs++
+		}
+	}
+	if mergedURLs != 4 {
+		t.Fatalf("090227 URLs not merged into bestcf: got %d, want 4", mergedURLs)
+	}
+	if len(bestcfExtraForwardDomains) < 10 {
+		t.Fatalf("090227 forward domains not merged: got %d, want >=10", len(bestcfExtraForwardDomains))
 	}
 }
 

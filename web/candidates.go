@@ -127,57 +127,54 @@ var proxyCandidateSources = map[string]proxyCandidateSource{
 	// 		"ProxyIP.LV.CMLiussss.net", "ProxyIP.US.CMLiussss.net", "ProxyIP.CA.CMLiussss.net",
 	// 	},
 	// },
-	"090227": {
-		Name: "090227 优选域名与 API",
-		Domains: []string{
-			"cf.090227.xyz", "youxuan.cf.090227.xyz", "123.cf.090227.xyz",
-			"www.visa.cn", "mfa.gov.ua", "www.shopify.com", "store.ubi.com",
-			"staticdelivery.nexusmods.com", "tencentapp.cn", "cloudflare-dl.byoip.top",
-			"cf.877774.xyz", "saas.sin.fan", "bestcf.030101.xyz", "cloudflare.182682.xyz",
-			"ipdb.api.030101.xyz", "wetest.vip", "ip.164746.xyz",
-		},
-		URLs: []string{
-			"https://cf.090227.xyz/",
-			"https://cf.090227.xyz/ct?ips=6",
-			"https://cf.090227.xyz/cu",
-			"https://cf.090227.xyz/cmcc?ips=8",
-		},
-	},
+	// 090227 已于 2026-10-22 并入 bestcf 层：API 并入 URLs，优选域名并入
+	// bestcfExtraForwardDomains（域名作为一等公民直接进 -fixed，不解析成 IP）。
 	// bestcf 导航（https://bestcf.pages.dev/#yxym）全量优选 IP 列表：
 	// `IP:端口#备注` 格式，extractPublicIPv4 按非数字点切分后端口与备注
 	// 自然落网外，无需新解析器。
 	//
-	// 本名单于 2026-10-20 在 NAS 上逐源实测（curl + CF 段比对），只保留
-	// 「CF 段命中率 ≥80% 且产出 ≥4 个」的源。被剔除的两类，记在这里以免
-	// 后人再捡回来：
-	//   1) ProxyIP 冒充优选：lzj(0/193)、cmliu(0/32)、luoli(0/31)、
-	//      xinyitang3(0/18) —— 全是第三方 VPS（阿里云/M247/OVH/DO），
-	//      不是 Cloudflare 边缘，进了入口池只会白烧探针。
-	//   2) 域名表或低产：vps789/top100.txt(101 行全是域名)、
-	//      domain/all.txt(域名表，另走 fetchBestcfForwardDomains)、
-	//      zhixuanwang(2 个)、JieChaoCC(2 个)、tiancheng(7/58)。
-	//   3) NAS 侧不可达：ymyuuu/IPDB、LancelotRar、joname1 —— 本地能开，
-	//      但 NAS 到 GitHub raw 超时，保留只会每轮空耗 25 秒。
+	// 本名单 2026-10-20 首测、2026-10-22 复测（NAS，26 源并发、单源 6s），
+	// 判据「CF 段命中率 ≥80% 且产出 ≥4 个」。复测结论：
+	//   · GitHub raw 6 个全部可达，命中率 94%~100%，是质量最高的一批。
+	//     10-20 记的「NAS 侧不可达」已过时——那是 30s 总预算把整批并发请求
+	//     一起判 deadline 所致，见 refreshProxyCandidates 处的超时说明。
+	//   · entryip/50.txt 新增（47/50）。
+	//   · s5gy 命中率仅 53%（116/217），但 CF 段绝对产出最大，过滤后保留。
+	//   · wetest 仅 2 个（100%），低产但零污染，保留。
+	// 永久剔除（复测命中率 0%~26%，全是第三方 VPS 冒充 CF 边缘，进池只烧探针）：
+	//   lzj(0/193)、luoli(0/31)、xinyitang3(0/35)、kristi(0/30)、yutian(0/50)、
+	//   tiancheng(7/58)、tiancheng2(7/61)、tiancheng3(2/62)、moistr(7/27)。
+	//   domain/all.txt 是域名表，另走 fetchBestcfForwardDomains，不作 IP 源。
 	"bestcf": {
 		Name: "BestCF 全量优选 IP",
 		URLs: []string{
 			// bestcf.pages.dev 自托管镜像（NAS 侧稳定可达）
-			"https://bestcf.pages.dev/s5gy/all.txt",         // 116/217
-			"https://bestcf.pages.dev/uouin/all.txt",        // 42/42
-			"https://bestcf.pages.dev/nirevil/ipv4.txt",     // 35/37
-			"https://bestcf.pages.dev/vvhan/ipv4.txt",       // 32/32
-			"https://bestcf.pages.dev/wetest/ipv4.txt",      // 17/17
-			"https://bestcf.pages.dev/cfyes/ipv4.txt",       // 17/17
-			"https://bestcf.pages.dev/ircf/ipv4.txt",        // 15/15
-			"https://bestcf.pages.dev/cmliu2/all.txt",       // 12/15
-			"https://bestcf.pages.dev/gslege/Cfxyz.txt",     // 4/4
-			// GitHub 原始列表（NAS 实测可达的维护者）
-			"https://raw.githubusercontent.com/Senflare/Senflare-IP/main/IPlist-Pro.txt",       // 29/29
-			"https://raw.githubusercontent.com/einsitang/my-fast-cf-ip/master/fastips.txt",     // 20/20
-			"https://raw.githubusercontent.com/yuanxiawan/cfipv4db/main/cfip.txt",              // 15/16
+			"https://bestcf.pages.dev/s5gy/all.txt",     // 116/217
+			"https://bestcf.pages.dev/uouin/all.txt",    // 42/42
+			"https://bestcf.pages.dev/nirevil/ipv4.txt", // 35/37
+			"https://bestcf.pages.dev/vvhan/ipv4.txt",   // 32/32
+			"https://bestcf.pages.dev/wetest/ipv4.txt",  // 17/17
+			"https://bestcf.pages.dev/cfyes/ipv4.txt",   // 17/17
+			"https://bestcf.pages.dev/ircf/ipv4.txt",    // 15/15
+			"https://bestcf.pages.dev/cmliu2/all.txt",   // 12/15
+			"https://bestcf.pages.dev/gslege/Cfxyz.txt", // 4/4
+			"https://bestcf.pages.dev/entryip/50.txt",   // 47/50
+			// 090227 优选 API（原独立源，2026-10-22 并入本层）
+			"https://cf.090227.xyz/",
+			"https://cf.090227.xyz/ct?ips=6",
+			"https://cf.090227.xyz/cu",
+			"https://cf.090227.xyz/cmcc?ips=8",
+			// GitHub 原始列表。
+			// 2026-10-22 复测（NAS，单源 6s、26 源并发）：命中率 94%~100%，
+			// 是全部渠道里质量最高的一批，不可删。此前日志里的 6 条
+			// `context deadline` 是 30s 总预算把并发批次一起判死所致，
+			// 已把 refreshProxyCandidates 的总超时放宽到 90s。
+			"https://raw.githubusercontent.com/Senflare/Senflare-IP/main/IPlist-Pro.txt",          // 29/29
+			"https://raw.githubusercontent.com/einsitang/my-fast-cf-ip/master/fastips.txt",        // 20/20
+			"https://raw.githubusercontent.com/yuanxiawan/cfipv4db/main/cfip.txt",                 // 15/16
 			"https://raw.githubusercontent.com/gshtwy/CF-DNS-Clone/main/wetest-cloudflare-v4.txt", // 14/14
-			"https://raw.githubusercontent.com/hubbylei/bestcf/main/bestcf.txt",                // 10/10
-			"https://raw.githubusercontent.com/ahang39/router/main/all.txt",                    // 7/7
+			"https://raw.githubusercontent.com/hubbylei/bestcf/main/bestcf.txt",                   // 10/10
+			"https://raw.githubusercontent.com/ahang39/router/main/all.txt",                       // 7/7
 		},
 	},
 }
@@ -190,6 +187,22 @@ var defaultProxyCandidateSourceIDs = []string{
 // bestcfForwardDomainURL 是 bestcf 优选域名全量列表（`域名:端口#备注` 格式）。
 // 域名作为一等公民进池（cfnat -fixed 拨号时活解析），绝不预解析成 IP。
 const bestcfForwardDomainURL = "https://bestcf.pages.dev/domain/all.txt"
+
+// bestcfForwardDomainTopURL 是 VPS789 的 7×24 监测 TOP10 优选域名，质量高于
+// 全量表的随意排序，故作为第一顺位填充，剩下的名额才由全量表补位。
+const bestcfForwardDomainTopURL = "https://bestcf.pages.dev/vps789/top10.txt"
+
+// bestcfExtraForwardDomains 是 090227 的优选域名（原独立候选源，2026-10-22 并入）。
+// 这些域名在 2026-10-22 事故里实测可达（store.ubi.com 302 / www.shopify.com 200），
+// 且 store.ubi.com / www.shopify.com 曾作为可用目标救过场，故排在 TOP10 之后、
+// 全量表之前：比全量表可信，比 TOP10 略逊。
+var bestcfExtraForwardDomains = []string{
+	"cf.090227.xyz", "youxuan.cf.090227.xyz", "123.cf.090227.xyz",
+	"www.visa.cn", "mfa.gov.ua", "www.shopify.com", "store.ubi.com",
+	"staticdelivery.nexusmods.com", "tencentapp.cn", "cloudflare-dl.byoip.top",
+	"cf.877774.xyz", "saas.sin.fan", "bestcf.030101.xyz", "cloudflare.182682.xyz",
+	"ipdb.api.030101.xyz", "wetest.vip", "ip.164746.xyz",
+}
 
 func applyCandidateSourcePriority(results []proxyScanResult, sourceByIP map[string]string) {
 	if len(sourceByIP) == 0 {
@@ -229,7 +242,11 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 		return false, errProxyCandidatesBusy
 	}
 	defer a.refreshMu.Unlock()
-	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	// 2026-10-22：30s 总预算会让整批并发拉取一起被判 deadline。
+	// NAS 到 GitHub raw 的 DNS/连接偶发 10s+，一旦触发，命中率最高的那批源
+	// 会同时报 context deadline——看起来像"源全挂了"，实则预算太紧。
+	// 复测：单源 6s 超时、26 源并发，全部成功；故总预算放宽到 90s。
+	ctx, cancel := context.WithTimeout(parent, 90*time.Second)
 	defer cancel()
 	resolved := make([]string, 0, candidatePoolTotalCap)
 	sourceByIP := make(map[string]string)
@@ -553,14 +570,38 @@ func extractPreferredDomains(html string) []string {
 // 也兼容裸域名。只留主机名，端口与备注全部剥去；绝不解析 DNS。
 // 拉取成败与域名数入健康账（渠道审计可辨此表死活）。
 func (a *app) fetchBestcfForwardDomains(ctx context.Context) []string {
-	body, err := fetchHTTPSBody(ctx, bestcfForwardDomainURL)
-	if err != nil {
-		a.recordSourceHealth(bestcfForwardDomainURL, 0, err)
-		return nil
+	// 三源按质量降序填充：TOP10 → 090227 静态 → 全量表补位。
+	// 名额只有 maxForwardDomains 个且先到先得，所以拉取顺序即优先级。
+	collected := make([]string, 0, maxForwardDomains*2)
+	pull := func(rawURL string) {
+		body, err := fetchHTTPSBody(ctx, rawURL)
+		if err != nil {
+			a.recordSourceHealth(rawURL, 0, err)
+			return
+		}
+		list := extractForwardDomainList(string(body))
+		a.recordSourceHealth(rawURL, len(list), nil)
+		collected = append(collected, list...)
 	}
-	domains := extractForwardDomainList(string(body))
-	a.recordSourceHealth(bestcfForwardDomainURL, len(domains), nil)
-	return domains
+	pull(bestcfForwardDomainTopURL)
+	collected = append(collected, bestcfExtraForwardDomains...)
+	pull(bestcfForwardDomainURL)
+
+	// 跨源统一去重并保序截断：extractForwardDomainList 只保证单源内去重，
+	// 合并后同一个域名会重复占名额。
+	seen := make(map[string]struct{}, len(collected))
+	out := make([]string, 0, maxForwardDomains)
+	for _, domain := range collected {
+		if _, ok := seen[domain]; ok {
+			continue
+		}
+		seen[domain] = struct{}{}
+		out = append(out, domain)
+		if len(out) >= maxForwardDomains {
+			break
+		}
+	}
+	return out
 }
 
 // extractForwardDomainList 从 `域名:端口#备注` / `IP:端口#备注` 混合文本中
