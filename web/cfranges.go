@@ -58,3 +58,35 @@ func isCloudflareIPv4(ip net.IP) bool {
 	}
 	return false
 }
+
+// segmentOf 返回 IP 所属的 Cloudflare 官方段标识（如 "104.16.0.0/13"），
+// 非 CF 段返回空串。用于建池时的段多样性配额。
+//
+// 为什么需要它：2026-10-22 事故里转发池只有 1 个 IP、1 个段，该段一挂就全灭。
+// 段多样性是抗单点故障的第一道防线，比"挑延迟最低的 3 个同段 IP"更重要。
+func segmentOf(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	v4 := ip.To4()
+	if v4 == nil {
+		return ""
+	}
+	for _, network := range cloudflareIPv4Nets {
+		if network.Contains(v4) {
+			return network.String()
+		}
+	}
+	return ""
+}
+
+// poolSegmentStats 统计一组 IP 的段分布，返回 段标识 -> 个数。
+func poolSegmentStats(ips []string) map[string]int {
+	out := make(map[string]int, 4)
+	for _, raw := range ips {
+		if seg := segmentOf(net.ParseIP(raw)); seg != "" {
+			out[seg]++
+		}
+	}
+	return out
+}

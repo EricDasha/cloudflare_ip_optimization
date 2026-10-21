@@ -512,15 +512,19 @@ func sortedKeys(set map[string]struct{}) []string {
 }
 
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
+	pool := a.proxyActivePoolSnapshot()
 	writeJSON(w, map[string]any{
 		"cfnat":               a.cfnat.status(),
 		"cfdata":              a.cfdata.status(),
-		"proxyAuto":           a.proxyActivePoolSnapshot(),
+		"proxyAuto":           pool,
 		"backgroundOptimizer": a.backgroundOptimizerStatus(),
 		"qualityScheduler":    a.qualitySnapshot(),
 		"activeProbe":         a.activeProbeStatus(),
 		"sources":             a.sourceHealthSnapshot(),
 		"forward":             a.forwardTargetStats(2000),
+		// poolSegments 是当前池的 CF 段分布。段数 < 2 意味着抗单点能力弱，
+		// 2026-10-22 事故就是池里只有一个段，该段一挂全灭。
+		"poolSegments": poolSegmentStats(pool.IPs),
 		// domainFallback 非空表示当前转发域名处于降级状态：
 		// 质量闸本要拦下，为了不空池才放行。巡检据此判断「是不是靠兜底在撑」。
 		"domainFallback": a.domainFallbackSnapshot(),

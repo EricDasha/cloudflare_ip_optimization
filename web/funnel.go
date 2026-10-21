@@ -176,6 +176,62 @@ func orderPassedByColoPreference(passed []string, results []proxyScanResult, pre
 	return append(head, tail...)
 }
 
+// spreadBySegment 在保持输入顺序（延迟/机房偏好已排好）的前提下限制单段占用，
+// 提升段多样性。软配额：候选不足时按原顺序补回，宁可同段也不留空位。
+//
+// 2026-10-22 事故：池里只有 1 个 IP、1 个段，该段一挂全灭。段多样性是抗单点
+// 故障的第一道防线，优先级高于"挑延迟最低的 3 个同段 IP"。
+func spreadBySegment(ips []string, poolSize int) []string {
+	if poolSize <= 0 {
+		return ips
+	}
+	if len(ips) <= 1 {
+		if len(ips) > poolSize {
+			return ips[:poolSize]
+		}
+		return ips
+	}
+	// 按段分组，组内保持原顺序（延迟序），组顺序按各段首次出现位置。
+	order := make([]string, 0, 4)
+	groups := make(map[string][]string, 4)
+	pos := make(map[string]int, len(ips))
+	for i, ip := range ips {
+		if _, ok := pos[ip]; !ok {
+			pos[ip] = i
+		}
+		seg := segmentOf(net.ParseIP(ip))
+		if seg == "" {
+			seg = "\x00non-cf" // 非 CF 地址单独成组，不与其他段混算
+		}
+		if _, ok := groups[seg]; !ok {
+			order = append(order, seg)
+		}
+		groups[seg] = append(groups[seg], ip)
+	}
+	// 轮转取：每轮每组各取一个。顺序贪心会让排在前面的段吃满名额，
+	// 后面的段永远进不来——那就退化成「没有段多样性」。
+	out := make([]string, 0, poolSize)
+	for round := 0; len(out) < poolSize; round++ {
+		progressed := false
+		for _, seg := range order {
+			if len(out) >= poolSize {
+				break
+			}
+			if round < len(groups[seg]) {
+				out = append(out, groups[seg][round])
+				progressed = true
+			}
+		}
+		if !progressed {
+			break
+		}
+	}
+	// 取完再按原序列位置排回：池成员的顺序就是 cfnat 的尝试顺序，
+	// 延迟低的仍要排在前面。
+	sort.SliceStable(out, func(i, j int) bool { return pos[out[i]] < pos[out[j]] })
+	return out
+}
+
 // degradedFromWSResults 从 WS 扫描结果里挑出「WS 101 已通过、但没进 VLESS
 // 终审通过名单」的候选，用于池子将要空掉时的降级兜底。
 //
@@ -293,9 +349,7 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 		passed = rankVLESSPassesBySpeed(parent, passed, results, cfg.Port, cfg.VLESS, vlessTemplate)
 		// 机房软偏好：Mbps 序排定后分区重排，截断时充裕取偏好、匮乏放行。
 		passed = orderPassedByColoPreference(passed, results, poolColoPreferenceSet())
-		if len(passed) > cfg.PoolSize {
-			passed = passed[:cfg.PoolSize]
-		}
+		passed = spreadBySegment(passed, cfg.PoolSize)
 	} else {
 		for _, result := range results {
 			if result.Error == "" {
@@ -303,9 +357,7 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 			}
 		}
 		passed = orderPassedByColoPreference(passed, results, poolColoPreferenceSet())
-		if len(passed) > cfg.PoolSize {
-			passed = passed[:cfg.PoolSize]
-		}
+		passed = spreadBySegment(passed, cfg.PoolSize)
 	}
 	if len(passed) < cfg.MinPool {
 		message := fmt.Sprintf("%s 终审仅 %d 个通过，低于最小池 %d", finalStage, len(passed), cfg.MinPool)
