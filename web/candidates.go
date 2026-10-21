@@ -127,8 +127,9 @@ var proxyCandidateSources = map[string]proxyCandidateSource{
 	// 		"ProxyIP.LV.CMLiussss.net", "ProxyIP.US.CMLiussss.net", "ProxyIP.CA.CMLiussss.net",
 	// 	},
 	// },
-	// 090227 已于 2026-10-22 并入 bestcf 层：API 并入 URLs，优选域名并入
-	// bestcfExtraForwardDomains（域名作为一等公民直接进 -fixed，不解析成 IP）。
+	// 090227 已于 2026-10-22 并入 bestcf 层。同日实测发现该域已被 Cloudflare
+	// 封禁（error 1034 跨账户 CNAME），4 个 API 与 cf./youxuan./123. 三条域名
+	// 全部作废并移除，只保留两个实测可用的真实站点域名（见 bestcfExtraForwardDomains）。
 	// bestcf 导航（https://bestcf.pages.dev/#yxym）全量优选 IP 列表：
 	// `IP:端口#备注` 格式，extractPublicIPv4 按非数字点切分后端口与备注
 	// 自然落网外，无需新解析器。
@@ -159,11 +160,8 @@ var proxyCandidateSources = map[string]proxyCandidateSource{
 			"https://bestcf.pages.dev/cmliu2/all.txt",   // 12/15
 			"https://bestcf.pages.dev/gslege/Cfxyz.txt", // 4/4
 			"https://bestcf.pages.dev/entryip/50.txt",   // 47/50
-			// 090227 优选 API（原独立源，2026-10-22 并入本层）
-			"https://cf.090227.xyz/",
-			"https://cf.090227.xyz/ct?ips=6",
-			"https://cf.090227.xyz/cu",
-			"https://cf.090227.xyz/cmcc?ips=8",
+			// 090227 的 4 个 API 已于 2026-10-22 移除：全部返回 403
+			// `error code: 1034`（Cloudflare 跨账户 CNAME 被封），该域已废。
 			// GitHub 原始列表。
 			// 2026-10-22 复测（NAS，单源 6s、26 源并发）：命中率 94%~100%，
 			// 是全部渠道里质量最高的一批，不可删。此前日志里的 6 条
@@ -192,16 +190,16 @@ const bestcfForwardDomainURL = "https://bestcf.pages.dev/domain/all.txt"
 // 全量表的随意排序，故作为第一顺位填充，剩下的名额才由全量表补位。
 const bestcfForwardDomainTopURL = "https://bestcf.pages.dev/vps789/top10.txt"
 
-// bestcfExtraForwardDomains 是 090227 的优选域名（原独立候选源，2026-10-22 并入）。
-// 这些域名在 2026-10-22 事故里实测可达（store.ubi.com 302 / www.shopify.com 200），
-// 且 store.ubi.com / www.shopify.com 曾作为可用目标救过场，故排在 TOP10 之后、
-// 全量表之前：比全量表可信，比 TOP10 略逊。
+// bestcfExtraForwardDomains 是 090227 优选域名里仍然可用的部分。
+//
+// 2026-10-22 实测：整个 090227.xyz 域已返回 Cloudflare `error code: 1034`
+// （跨账户 CNAME 被封），cf./youxuan./123. 三条全部作废，故不再收录。
+// 只留下事故当晚实测通过的两个真实站点域名——store.ubi.com(302)、
+// www.shopify.com(200)——它们既是可靠的 CF 套壳域名，也救过场。
+// 名额稀缺（maxForwardDomains），未验证过的一律不占位。
 var bestcfExtraForwardDomains = []string{
-	"cf.090227.xyz", "youxuan.cf.090227.xyz", "123.cf.090227.xyz",
-	"www.visa.cn", "mfa.gov.ua", "www.shopify.com", "store.ubi.com",
-	"staticdelivery.nexusmods.com", "tencentapp.cn", "cloudflare-dl.byoip.top",
-	"cf.877774.xyz", "saas.sin.fan", "bestcf.030101.xyz", "cloudflare.182682.xyz",
-	"ipdb.api.030101.xyz", "wetest.vip", "ip.164746.xyz",
+	"www.shopify.com",
+	"store.ubi.com",
 }
 
 func applyCandidateSourcePriority(results []proxyScanResult, sourceByIP map[string]string) {

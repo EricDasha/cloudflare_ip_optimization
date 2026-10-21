@@ -103,19 +103,22 @@ func TestThirdPartyProxySourcesAreHTTPSAllowlisted(t *testing.T) {
 			t.Fatalf("community candidate source %q must be disabled", disabled)
 		}
 	}
-	// 090227 于 2026-10-22 并入 bestcf 层：4 个 API 进 URLs，17 个域名进静态域名表。
+	// 090227 于 2026-10-22 并入 bestcf 层，但同一天实测发现该域已被
+	// Cloudflare 封（error 1034），4 个 API 与 3 条 cf./youxuan./123. 域名
+	// 全部作废，只保留两个实测可用的真实站点域名。
 	bestcf := proxyCandidateSources["bestcf"]
-	mergedURLs := 0
 	for _, rawURL := range bestcf.URLs {
-		if strings.HasPrefix(rawURL, "https://cf.090227.xyz/") {
-			mergedURLs++
+		if strings.Contains(rawURL, "090227.xyz") {
+			t.Fatalf("dead 090227 API must not be a candidate source: %s", rawURL)
 		}
 	}
-	if mergedURLs != 4 {
-		t.Fatalf("090227 URLs not merged into bestcf: got %d, want 4", mergedURLs)
+	if len(bestcfExtraForwardDomains) < 2 {
+		t.Fatalf("expected >=2 verified 090227 forward domains, got %d", len(bestcfExtraForwardDomains))
 	}
-	if len(bestcfExtraForwardDomains) < 10 {
-		t.Fatalf("090227 forward domains not merged: got %d, want >=10", len(bestcfExtraForwardDomains))
+	for _, domain := range bestcfExtraForwardDomains {
+		if strings.Contains(domain, "090227.xyz") {
+			t.Fatalf("dead 090227 domain must not be forwarded: %s", domain)
+		}
 	}
 }
 
