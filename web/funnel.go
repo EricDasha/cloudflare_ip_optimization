@@ -176,6 +176,36 @@ func orderPassedByColoPreference(passed []string, results []proxyScanResult, pre
 	return append(head, tail...)
 }
 
+// degradedFromWSResults 从 WS 扫描结果里挑出「WS 101 已通过、但没进 VLESS
+// 终审通过名单」的候选，用于池子将要空掉时的降级兜底。
+//
+// 语义边界：只补到 want 为止，绝不越界扩池——降级是为了不空池，
+// 不是为了用未验证的候选把池子填满。
+func degradedFromWSResults(results []proxyScanResult, existing []string, want int) []string {
+	if want <= len(existing) {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(existing))
+	for _, ip := range existing {
+		seen[ip] = struct{}{}
+	}
+	out := make([]string, 0, want-len(existing))
+	for _, result := range results {
+		if len(existing)+len(out) >= want {
+			break
+		}
+		if result.Error != "" {
+			continue
+		}
+		if _, ok := seen[result.IP]; ok {
+			continue
+		}
+		seen[result.IP] = struct{}{}
+		out = append(out, result.IP)
+	}
+	return out
+}
+
 func (a *app) autoApplyProxyPool(parent context.Context) {
 	// 手动「立即优选」会经此路径：排队等待正在跑的考试，而不是拒绝。
 	if !lockTimeout(&a.proxyScanMu, 60*time.Second) {
@@ -279,17 +309,29 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 	}
 	if len(passed) < cfg.MinPool {
 		message := fmt.Sprintf("%s 终审仅 %d 个通过，低于最小池 %d", finalStage, len(passed), cfg.MinPool)
-		// 保留旧池之前先证明它活着，否则等于把一具尸体留在岗位上。
-		// 2026-10-22 事故：建池 0 通过，旧池唯一 IP 早已 dial timeout，
-		// 系统照样报「保留旧池」，对外看起来一切正常。
-		alive, total := a.verifyActivePoolAlive()
-		if alive > 0 {
-			a.setProxyPoolError(fmt.Sprintf("%s；旧池 %d/%d 存活，继续沿用", message, alive, total), results)
+		// L3 降级：VLESS 数据面没验过，但 WS 101 已经通过 —— 说明 TCP/TLS/WS
+		// 三层都通，失败点大概率在探测目标而非链路本身。池子空掉比用
+		// 「未完成终审」的候选严重得多，故降级采用并明确标记。
+		if cfg.VLESS.Enabled {
+			if extra := degradedFromWSResults(results, passed, cfg.MinPool); len(extra) > 0 {
+				passed = append(passed, extra...)
+				message = fmt.Sprintf("%s；已降级采用 %d 个 WS 已通过但 VLESS 未验的候选", message, len(extra))
+				log.Printf("proxy pool DEGRADED: %s", message)
+			}
+		}
+		if len(passed) < cfg.MinPool {
+			// 保留旧池之前先证明它活着，否则等于把一具尸体留在岗位上。
+			// 2026-10-22 事故：建池 0 通过，旧池唯一 IP 早已 dial timeout，
+			// 系统照样报「保留旧池」，对外看起来一切正常。
+			alive, total := a.verifyActivePoolAlive()
+			if alive > 0 {
+				a.setProxyPoolError(fmt.Sprintf("%s；旧池 %d/%d 存活，继续沿用", message, alive, total), results)
+				return
+			}
+			a.setProxyPoolError(fmt.Sprintf("%s；旧池 %d 个成员全部不可达，已无法沿用", message, total), results)
+			log.Printf("proxy pool CRITICAL: 建池失败且旧池全灭（0/%d 可达），需要人工介入", total)
 			return
 		}
-		a.setProxyPoolError(fmt.Sprintf("%s；旧池 %d 个成员全部不可达，已无法沿用", message, total), results)
-		log.Printf("proxy pool CRITICAL: 建池失败且旧池全灭（0/%d 可达），需要人工介入", total)
-		return
 	}
 	if latest := a.proxyCandidateSnapshot(); !latest.UpdatedAt.Equal(snapshot.UpdatedAt) {
 		// A source refresh completed while this expensive scan was running.
