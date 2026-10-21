@@ -56,7 +56,21 @@ type sourceHealthStat struct {
 	LastSuccess time.Time `json:"lastSuccess,omitempty"`
 	LastError   string    `json:"lastError,omitempty"`
 	LastFailed  time.Time `json:"lastFailed,omitempty"`
+	// ConsecutiveFailures / BackoffUntil 支撑「死源自动退避」：
+	// 连续失败达阈值后按指数退避跳过该源，避免每轮都为必死的源白等超时
+	// （2026-10-22 实测：6 个源连续 deadline 时，一轮刷新被拖掉 25 秒）。
+	ConsecutiveFailures int       `json:"consecutiveFailures,omitempty"`
+	BackoffUntil        time.Time `json:"backoffUntil,omitempty"`
 }
+
+const (
+	// sourceBackoffThreshold 连续失败多少次开始退避。
+	sourceBackoffThreshold = 3
+	// sourceBackoffBase 首次退避时长，之后每多失败一次翻倍。
+	sourceBackoffBase = 30 * time.Minute
+	// sourceBackoffMax 退避上限，防止源被永久拉黑。
+	sourceBackoffMax = 6 * time.Hour
+)
 
 // recordSourceHealth 记一笔渠道健康账。key 为源标识（URL、维护者域名或
 // 逻辑层名）；ips 为本次抓到的公网 IPv4 数；err 非 nil 即为败笔。
@@ -76,13 +90,39 @@ func (a *app) recordSourceHealth(key string, ips int, err error) {
 	if err != nil {
 		stat.LastError = err.Error()
 		stat.LastFailed = time.Now()
+		stat.ConsecutiveFailures++
+		if stat.ConsecutiveFailures >= sourceBackoffThreshold {
+			shift := stat.ConsecutiveFailures - sourceBackoffThreshold
+			if shift > 8 { // 防移位溢出，上限早已被 sourceBackoffMax 兜住
+				shift = 8
+			}
+			backoff := sourceBackoffBase << shift
+			if backoff > sourceBackoffMax || backoff <= 0 {
+				backoff = sourceBackoffMax
+			}
+			stat.BackoffUntil = time.Now().Add(backoff)
+		}
 		return
 	}
 	stat.Successes++
 	stat.LastSuccess = time.Now()
+	stat.ConsecutiveFailures = 0
+	stat.BackoffUntil = time.Time{}
 	if ips > 0 {
 		stat.LastError = ""
 	}
+}
+
+// sourceInBackoff 报告某源是否仍处于退避期。退避中的源本轮直接跳过，
+// 不再为必死的目标白等超时。
+func (a *app) sourceInBackoff(key string) bool {
+	a.sourceHealthMu.Lock()
+	defer a.sourceHealthMu.Unlock()
+	stat := a.sourceHealth[key]
+	if stat == nil || stat.BackoffUntil.IsZero() {
+		return false
+	}
+	return time.Now().Before(stat.BackoffUntil)
 }
 
 // sourceHealthSnapshot 导出健康账深拷贝（/api/status 之 sources 节）。
@@ -676,10 +716,30 @@ func (a *app) resolveProxySources(parent context.Context, sourceIDs []string, re
 		}
 		seenSources[id] = struct{}{}
 		for _, domain := range source.Domains {
-			targets = append(targets, fetchTarget{healthKey: "dns:" + domain, domain: domain})
+			key := "dns:" + domain
+			if a.sourceInBackoff(key) {
+				continue
+			}
+			targets = append(targets, fetchTarget{healthKey: key, domain: domain})
 		}
 		for _, sourceURL := range source.URLs {
+			if a.sourceInBackoff(sourceURL) {
+				continue
+			}
 			targets = append(targets, fetchTarget{healthKey: sourceURL, url: sourceURL})
+		}
+	}
+	// 全部源都在退避期时放弃退避：宁可白耗一轮，也不能因为集体退避而永远
+	// 不再拉取——那等于把「退避」变成了「永久拉黑」，比不做退避更糟。
+	if len(targets) == 0 {
+		for _, id := range sourceIDs {
+			source := proxyCandidateSources[id]
+			for _, domain := range source.Domains {
+				targets = append(targets, fetchTarget{healthKey: "dns:" + domain, domain: domain})
+			}
+			for _, sourceURL := range source.URLs {
+				targets = append(targets, fetchTarget{healthKey: sourceURL, url: sourceURL})
+			}
 		}
 	}
 
