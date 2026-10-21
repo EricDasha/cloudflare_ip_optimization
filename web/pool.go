@@ -238,6 +238,60 @@ func (a *app) setProxyPoolError(message string, results []proxyScanResult) {
 	log.Printf("proxy auto apply skipped: %s", message)
 }
 
+// probeTCPAlive 探测单个目标能否建立 TCP 连接。抽成变量便于测试注入，
+// 避免单测真的去连外网。
+var probeTCPAlive = func(ctx context.Context, addr string, timeout time.Duration) bool {
+	dialer := net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// verifyActivePoolAlive 探测当前生效池的存活情况，返回 (存活数, 总数)。
+//
+// 用途：建池失败时决定「保留旧池」是否合理。2026-10-22 事故形态是建池 0 通过，
+// 而旧池唯一的 IP 早已 dial timeout，系统照样报「保留旧池」——等于把一具尸体
+// 留在岗位上，对外还显示一切正常。保留之前必须先证明它活着。
+//
+// 用独立的 Background 而非调用方的 ctx：走到这里时上层 ctx 往往已经超时，
+// 拿它去探测会立刻全灭，把「网络慢」误判成「旧池已死」。
+func (a *app) verifyActivePoolAlive() (int, int) {
+	pool := a.proxyActivePoolSnapshot()
+	targets := make([]string, 0, len(pool.IPs)+len(pool.Domains))
+	targets = append(targets, pool.IPs...)
+	targets = append(targets, pool.Domains...)
+	if len(targets) == 0 {
+		return 0, 0
+	}
+	port := defaultProxyAutoConfig().Port
+	if port <= 0 {
+		port = 443
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	alive := 0
+	for _, target := range targets {
+		wg.Add(1)
+		go func(host string) {
+			defer wg.Done()
+			addr := net.JoinHostPort(host, fmt.Sprint(port))
+			if probeTCPAlive(ctx, addr, 5*time.Second) {
+				mu.Lock()
+				alive++
+				mu.Unlock()
+			}
+		}(target)
+	}
+	wg.Wait()
+	return alive, len(targets)
+}
+
 // activeHealthStat 记录生效池 IP 的被动健康：成功/失败计数与最近失败时间。
 type activeHealthStat struct {
 	Success   int

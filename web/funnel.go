@@ -278,7 +278,17 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 		}
 	}
 	if len(passed) < cfg.MinPool {
-		a.setProxyPoolError(fmt.Sprintf("%s 终审仅 %d 个通过，低于最小池 %d；保留旧池", finalStage, len(passed), cfg.MinPool), results)
+		message := fmt.Sprintf("%s 终审仅 %d 个通过，低于最小池 %d", finalStage, len(passed), cfg.MinPool)
+		// 保留旧池之前先证明它活着，否则等于把一具尸体留在岗位上。
+		// 2026-10-22 事故：建池 0 通过，旧池唯一 IP 早已 dial timeout，
+		// 系统照样报「保留旧池」，对外看起来一切正常。
+		alive, total := a.verifyActivePoolAlive()
+		if alive > 0 {
+			a.setProxyPoolError(fmt.Sprintf("%s；旧池 %d/%d 存活，继续沿用", message, alive, total), results)
+			return
+		}
+		a.setProxyPoolError(fmt.Sprintf("%s；旧池 %d 个成员全部不可达，已无法沿用", message, total), results)
+		log.Printf("proxy pool CRITICAL: 建池失败且旧池全灭（0/%d 可达），需要人工介入", total)
 		return
 	}
 	if latest := a.proxyCandidateSnapshot(); !latest.UpdatedAt.Equal(snapshot.UpdatedAt) {
