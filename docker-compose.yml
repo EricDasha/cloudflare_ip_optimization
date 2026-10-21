@@ -21,7 +21,7 @@ services:
       CFNAT_COLO: ""                 # 例如 HKG,SJC,LAX；留空则不过滤
       CFNAT_DELAY: "2000"
       CFNAT_DOMAIN: cloudflaremirrors.com/debian
-      CFNAT_FIXED_IPS: 128.199.255.242,119.205.235.58,60.249.21.30
+      CFNAT_FIXED_IPS: 23.146.248.149,207.57.131.117,104.18.40.152,104.18.42.163
       CFNAT_FALLBACK: "${CFNAT_FALLBACK:-}"      # 兜底目标（IP 或优选域名），仅拨号失败时尝试
       CFNAT_PRIORITY_IPS: ""
       CFNAT_IPNUM: "20"
@@ -35,7 +35,7 @@ services:
       CFNAT_CODE: "200"
 
       # 每 6 小时以实际 Host + WebSocket path 终审候选；至少 3 个通过才替换固定池。
-      PROXY_AUTO_APPLY: "${PROXY_AUTO_APPLY:-true}"
+      PROXY_AUTO_APPLY: "${PROXY_AUTO_APPLY:-false}"
       PROXY_AUTO_HOST: "${PROXY_AUTO_HOST:?set PROXY_AUTO_HOST in .env}"
       PROXY_AUTO_PATH: "${PROXY_AUTO_PATH:?set PROXY_AUTO_PATH in .env}"
       PROXY_AUTO_PORT: "443"
