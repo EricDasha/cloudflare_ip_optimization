@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,27 @@ var (
 	gitCommit = "dev"
 	buildTime = "unknown"
 )
+
+var (
+	// domainFallbackMu / domainFallbackLast 记录最近一次质量闸兜底放行的域名。
+	// 非空即表示当前转发域名处于降级状态：闸门原本要拦，为了不空池才放行。
+	// 供 /api/status 与巡检判断「现在是不是靠降级在撑」。
+	domainFallbackMu   sync.Mutex
+	domainFallbackLast []string
+)
+
+func setDomainFallback(domains []string) {
+	domainFallbackMu.Lock()
+	domainFallbackLast = append([]string(nil), domains...)
+	domainFallbackMu.Unlock()
+}
+
+// domainFallbackSnapshot 返回最近一次 poolDomainMembers 兜底放行的域名副本。
+func (a *app) domainFallbackSnapshot() []string {
+	domainFallbackMu.Lock()
+	defer domainFallbackMu.Unlock()
+	return append([]string(nil), domainFallbackLast...)
+}
 
 type app struct {
 	dataDir            string
@@ -518,7 +540,60 @@ func (a *app) poolDomainMembers() []string {
 			}
 		}
 	}
+	// 兜底：闸门若把自动来源全拦下，转发池会退化成「只剩 IP」甚至空池，
+	// 而 IP 侧一旦同时全灭，1234 就归零（2026-10-22 事故形态）。
+	// 拦人的目的是筛掉坏目标，不是把服务拦死——只有拦到「一个都不剩」时才兜底，
+	// 按体检成功率降序放行，并标记为降级，等账本自然恢复后自动收回。
+	// 注意条件必须是 ==0 而不是 <下限：池里已有 2 个合格域名时不该再拉坏域名凑数。
+	fallback := make([]string, 0, minFallbackForwardDomains)
+	if len(domains) == 0 && len(snapshot.ForwardDomains) > 0 {
+		before := len(domains)
+		for _, domain := range a.topDomainsByQuality(snapshot.ForwardDomains, minFallbackForwardDomains) {
+			if len(domains) >= minFallbackForwardDomains {
+				break
+			}
+			prev := len(domains)
+			add(domain)
+			if len(domains) > prev {
+				fallback = append(fallback, domain)
+			}
+		}
+		if len(fallback) > 0 {
+			log.Printf("domain gate DEGRADED: 可用域名 %d 个低于下限 %d，兜底放行成功率最高者: %v",
+				before, minFallbackForwardDomains, fallback)
+		}
+	}
+	setDomainFallback(fallback)
 	return domains
+}
+
+// topDomainsByQuality 从候选里按体检成功率降序取前 n 个，无记录者按 0 计。
+// 只服务于质量闸兜底：闸门与兜底读同一份账本，避免「一边说它坏、一边拿它救命」
+// 的语义漂移。
+func (a *app) topDomainsByQuality(candidates []string, n int) []string {
+	type scored struct {
+		domain string
+		rate   float64
+	}
+	list := make([]scored, 0, len(candidates))
+	a.domainQualityMu.Lock()
+	for _, domain := range candidates {
+		var rate float64
+		if rec := a.domainQuality[domain]; rec != nil {
+			rate = rec.SuccessRate
+		}
+		list = append(list, scored{domain: domain, rate: rate})
+	}
+	a.domainQualityMu.Unlock()
+	sort.SliceStable(list, func(i, j int) bool { return list[i].rate > list[j].rate })
+	if n > len(list) {
+		n = len(list)
+	}
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, list[i].domain)
+	}
+	return out
 }
 
 // domainUsableForForwarding 判断自动来源的域名是否允许进入转发池。

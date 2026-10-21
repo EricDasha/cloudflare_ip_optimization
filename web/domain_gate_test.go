@@ -28,6 +28,10 @@ func TestPoolDomainMembersBlocksDeadAndUnstable(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("poolDomainMembers() = %v, want %v", got, want)
 	}
+	// 池里还有合格域名，不该触发兜底去把坏域名拉进来凑数。
+	if fb := a.domainFallbackSnapshot(); len(fb) != 0 {
+		t.Fatalf("有合格候选时不得兜底, got %v", fb)
+	}
 }
 
 // testing 状态（样本不足）必须放行：新域名不能因为「还没测够」而永远进不了池。
@@ -103,18 +107,30 @@ func TestDomainProbeTargetsIncludeGatedOutDomains(t *testing.T) {
 }
 
 // 成绩好转后应能自动回池：闸门只读状态，不写任何粘滞标记。
+//
+// 2026-10-22 决策变更：唯一候选被判 unstable 时，闸门拦下去池子就空了，
+// 而空池 = 服务完全不可用（比"用 30% 成功率的域名"严重得多）。
+// 故改为「拦到空就兜底放行 + 标记降级」，账本恢复后兜底自动收回。
 func TestPoolDomainMembersRecoversAfterQualityImproves(t *testing.T) {
 	a := newProbeTestApp(t)
 	a.candidates = proxyCandidateSnapshot{ForwardDomains: []string{"flappy.example.com"}}
 	a.domainQuality["flappy.example.com"] = freshRecord(domainStateUnstable)
 
-	if got := a.poolDomainMembers(); len(got) != 0 {
-		t.Fatalf("unstable domain must be blocked, got %v", got)
+	got := a.poolDomainMembers()
+	if !reflect.DeepEqual(got, []string{"flappy.example.com"}) {
+		t.Fatalf("唯一候选被判坏时应兜底放行, got %v", got)
+	}
+	if fb := a.domainFallbackSnapshot(); !reflect.DeepEqual(fb, []string{"flappy.example.com"}) {
+		t.Fatalf("兜底项必须标记为降级, got %v", fb)
 	}
 
 	a.domainQuality["flappy.example.com"].State = domainStateHealthy
-	if got := a.poolDomainMembers(); !reflect.DeepEqual(got, []string{"flappy.example.com"}) {
+	got = a.poolDomainMembers()
+	if !reflect.DeepEqual(got, []string{"flappy.example.com"}) {
 		t.Fatalf("recovered domain must return to pool, got %v", got)
+	}
+	if fb := a.domainFallbackSnapshot(); len(fb) != 0 {
+		t.Fatalf("账本恢复后不应再有兜底标记, got %v", fb)
 	}
 }
 

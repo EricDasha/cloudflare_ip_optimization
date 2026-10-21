@@ -18,6 +18,14 @@ const (
 	maxPreferredDomains           = 64
 	maxForwardDomains             = 12
 	maxVLESSSpeedProbes           = 6
+	// minFallbackForwardDomains 质量闸的兜底下限。
+	//
+	// 2026-10-22 二次事故：上游链路故障 3 小时把 16 个优选域名全打成 unstable
+	// （successRate 0.17~0.5，低于 domainSuccessFloor=0.6）。闸门上线后按规则
+	// 全部拦下，转发池退化成「只剩 IP」，而 IP 侧又全部 dial timeout，1234 直接归零。
+	// 拦人的目的是筛掉坏目标，不是把服务拦死：可用域名低于该下限时，按体检成功率
+	// 降序放行若干个并标记降级，等账本自然恢复再收回兜底。
+	minFallbackForwardDomains = 3
 	// cfnat 单连接回退深度上限。cfnat 只在上一个目标拨号失败时才顺延，
 	// 所以该值不放大并发，只是在整池抖动时把「一次超时=连接断开」变成
 	// 「最多试 defaultCFnatNum 个目标」。

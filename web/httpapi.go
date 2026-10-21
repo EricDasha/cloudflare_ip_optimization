@@ -512,7 +512,19 @@ func sortedKeys(set map[string]struct{}) []string {
 }
 
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"cfnat": a.cfnat.status(), "cfdata": a.cfdata.status(), "proxyAuto": a.proxyActivePoolSnapshot(), "backgroundOptimizer": a.backgroundOptimizerStatus(), "qualityScheduler": a.qualitySnapshot(), "activeProbe": a.activeProbeStatus(), "sources": a.sourceHealthSnapshot(), "forward": a.forwardTargetStats(2000)})
+	writeJSON(w, map[string]any{
+		"cfnat":               a.cfnat.status(),
+		"cfdata":              a.cfdata.status(),
+		"proxyAuto":           a.proxyActivePoolSnapshot(),
+		"backgroundOptimizer": a.backgroundOptimizerStatus(),
+		"qualityScheduler":    a.qualitySnapshot(),
+		"activeProbe":         a.activeProbeStatus(),
+		"sources":             a.sourceHealthSnapshot(),
+		"forward":             a.forwardTargetStats(2000),
+		// domainFallback 非空表示当前转发域名处于降级状态：
+		// 质量闸本要拦下，为了不空池才放行。巡检据此判断「是不是靠兜底在撑」。
+		"domainFallback": a.domainFallbackSnapshot(),
+	})
 }
 
 func (a *app) qualitySnapshot() map[string]any {
