@@ -21,7 +21,12 @@ services:
       CFNAT_COLO: ""                 # 例如 HKG,SJC,LAX；留空则不过滤
       CFNAT_DELAY: "2000"
       CFNAT_DOMAIN: cloudflaremirrors.com/debian
-      CFNAT_FIXED_IPS: 23.146.248.149,207.57.131.117,104.18.40.152,104.18.42.163
+      CFNAT_FIXED_IPS: "23.146.248.149,207.57.131.117,104.18.40.152,104.18.42.163"
+      # 注意：CFNAT_FIXED_IPS 只是「首次启动、池文件尚不存在」时的种子值。
+      # 一旦 proxy-active.json 存在，Web 会用池文件覆盖它（web/pool.go:187
+      # cfnatCfg.Fixed = strings.Join(fixedMembers, ",")），此处的值不再生效。
+      # 2026-10-23 实测：线上 4 个 IP 全部 TLS 握手成功（含 10-22 曾被 SNI
+      # 阻断的 104.18.40.152 / 104.18.42.163），故保留全部 4 个作冷启动种子。
       CFNAT_FALLBACK: "${CFNAT_FALLBACK:-}"      # 兜底目标（IP 或优选域名），仅拨号失败时尝试
       CFNAT_PRIORITY_IPS: ""
       CFNAT_IPNUM: "20"
@@ -29,31 +34,38 @@ services:
       CFNAT_NUM: "${CFNAT_NUM:-3}"   # 拨号失败后的顺序回退深度（不是并发数）
       CFNAT_PORT: "443"
       CFNAT_RANDOM: "true"
-      CFNAT_STICKY: "${CFNAT_STICKY:-true}"   # true=同设备恒走同一上游；false=按连接轮转铺开全部成员
+      CFNAT_STICKY: "${CFNAT_STICKY:-false}"   # true=同设备恒走同一上游；false=按连接轮转铺开全部成员
+      # 生产实况（2026-10-23）：线上为 false。按连接轮转把负载铺开全部成员，
+      # 避免设备粘性把流量锁死在某个已劣化的上游上。默认改 false 与线上一致。
       CFNAT_TASK: "100"
       CFNAT_TLS: "true"
       CFNAT_CODE: "200"
 
       # 每 6 小时以实际 Host + WebSocket path 终审候选；至少 3 个通过才替换固定池。
-      PROXY_AUTO_APPLY: "${PROXY_AUTO_APPLY:-false}"
+      # 生产实况（2026-10-23）：线上为 true —— 运营商掐断 CF 段期间，池子靠
+      # 自动换池自愈（10-22 13:04 与 10-23 09:28 各重建一次）。默认改 true，
+      # 让「从本仓库部署」与「线上行为」一致；不想自动换池就显式设 false。
+      PROXY_AUTO_APPLY: "${PROXY_AUTO_APPLY:-true}"
       PROXY_AUTO_HOST: "${PROXY_AUTO_HOST:?set PROXY_AUTO_HOST in .env}"
       PROXY_AUTO_PATH: "${PROXY_AUTO_PATH:?set PROXY_AUTO_PATH in .env}"
       PROXY_AUTO_PORT: "443"
       PROXY_AUTO_CONCURRENCY: "20"
       PROXY_AUTO_MAX_LATENCY: "5000"
-      PROXY_AUTO_POOL_SIZE: "5"
+      # 可被 .env 覆盖的生效池大小（默认 5）。2026-10-23 发现 NAS .env 里的
+      # PROXY_AUTO_POOL_SIZE=10 因此处原为硬编码而被静默忽略，故改为可注入。
+      PROXY_AUTO_POOL_SIZE: "${PROXY_AUTO_POOL_SIZE:-5}"
       PROXY_AUTO_MIN_POOL: "3"
       # 优选域名直连：显式指定后并入 CFnat 固定转发池；IP 池结果仍来自 VLESS 终审。
       PROXY_DOMAIN_FORWARD: "${PROXY_DOMAIN_FORWARD:-}"
       # 优选域名兜底转发：置 true 时把已启用的优选域名并入 cfnat -fallback
       # （上限 12 个），仅在固定 IP 池全部拨号失败时才直连域名，不解析不探测。
       PROXY_AUTO_DOMAINS: "true"
-      # 优选域名入池上限（代码常量 maxForwardDomains=12，此处仅可下调）。
+      # 优选域名入池上限（代码常量 maxForwardDomains=30，此处仅可下调）。
       PROXY_PREFERRED_MAX_DOMAINS: "20"
       # 已停用、不再被代码读取（保留会误导运维，此处显式留空记录）：
       #   PROXY_PREFERRED_RESOLVE / PROXY_PREFERRED_IPS_PER_DOMAIN /
       #   PROXY_PREFERRED_RESOLVED_CANDIDATES  —— C 区解析供给已拆，域名活解析直连
-      #   PROXY_CFDATA_CANDIDATES                  —— cfdata 手动化，供给走订阅+bestcf
+      #   PROXY_CFDATA_CANDIDATES                  —— 已废弃；cfdata 走 result.csv 供给层
       #   PROXY_OFFICIAL_CANDIDATES                —— 官方 CIDR 层已砍
       PROXY_USER_CANDIDATES: "${PROXY_USER_CANDIDATES:-}"
       # 低占用后台轮测：每 5 分钟取 12 个候选，并发 4；GUI 可关闭并持久化。
@@ -62,8 +74,10 @@ services:
       PROXY_SCHEDULER_PROBE_INTERVAL_SECONDS: "300"
       PROXY_SCHEDULER_BATCH_SIZE: "12"
       PROXY_SCHEDULER_APPLY: "true"
-      # CFdata 彻底手动化：无后台自启动、无定时扫描、无 sift 联动。
-      # 日常 IP 供给走订阅慢扫：PROXY_SUBSCRIPTION_*。
+      # CFdata 供给层：启动即后台自扫一次，此后每 6 小时一轮（CFDATA_AUTO_SCAN
+      # 默认开启，置 false 退回纯手动 /api/cfdata/run）。结果写 result.csv，
+      # 经 CF 段闸后汇入候选池（第二大供给层）。
+      # 日常 IP 供给另有订阅慢扫：PROXY_SUBSCRIPTION_*。
       # 订阅日常慢入池：维护者域名清单 + 转换器基地址 + token（token 从 .env 注入）。
       PROXY_SUBSCRIPTION_CONVERTER: "https://vlesdy.trojanjd.dpdns.org/sub"
       PROXY_SUBSCRIPTION_MAINTAINERS: "owo.o00o.ooo,cm.soso.edu.kg,zrf.zrf.me,sub.keaeye.icu,sub.mot.cloudns.biz,sub.mia.xx.kg,sub.lzjbaby.com,sub.xdu.qzz.io"

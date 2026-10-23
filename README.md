@@ -95,17 +95,17 @@ GET /api/status → qualityScheduler：
 
 Web 服务启动时会立即刷新一次候选缓存，之后每 6 小时重新解析全部内置源。成功结果以原子替换方式写入 `/data/proxy-candidates.json`；刷新失败时保留上一次成功候选。优选台显示下次候选刷新时间，点「立即优选」可随时触发全量重考。
 
-启用 `PROXY_AUTO_APPLY` 后，后台先用实际 `Host + WebSocket path` 对全部候选并发执行 TLS 与 WebSocket `101 Switching Protocols` 初筛。启用 `PROXY_VLESS_PROBE` 后，再启动短生命周期 sing-box，以候选 `IP:PROXY_AUTO_PORT` 覆盖模板服务器地址，通过真实 VLESS 链路请求 `generate_204`，随后读取固定大小响应并记录 Mbps。候选按 `user > subscription > official > proxy` 分层进入候选池（每层有配额，见下），层内按下载 Mbps 降序、数据面延迟升序排列。只有最终通过数量达到 `PROXY_AUTO_MIN_POOL` 且通过换池防抖三道闸（冷却/健康/同池跳过）才替换 `/data/proxy-active.json` 并重启 CFnat。模板、sing-box 或数据面失败均保留旧池。
+启用 `PROXY_AUTO_APPLY` 后，后台先用实际 `Host + WebSocket path` 对全部候选并发执行 TLS 与 WebSocket `101 Switching Protocols` 初筛。启用 `PROXY_VLESS_PROBE` 后，再启动短生命周期 sing-box，以候选 `IP:PROXY_AUTO_PORT` 覆盖模板服务器地址，通过真实 VLESS 链路请求 `generate_204`，随后读取固定大小响应并记录 Mbps。候选按 `user > cfdata > subscription > bestcf` 分层进入候选池（每层有配额，见下），层内按下载 Mbps 降序、数据面延迟升序排列。只有最终通过数量达到 `PROXY_AUTO_MIN_POOL` 且通过换池防抖三道闸（冷却/健康/同池跳过）才替换 `/data/proxy-active.json` 并重启 CFnat。模板、sing-box 或数据面失败均保留旧池。
 
 直接运行 Web 二进制时 `PROXY_AUTO_APPLY` 默认是 `false`；仓库的 `docker-compose.yml` 为完整部署显式设为 `true`，并同时开启 VLESS probe。复制 `.env.example` 后若需要手动运行或覆盖 Compose 行为，请明确设置该变量。
 
 后台慢速优选调度器默认开启，但只有 `PROXY_AUTO_APPLY=true` 且 GUI 开关启用时才会实际探测并替换 active pool。启动 90 秒后执行首轮，此后每 5 分钟从候选缓存轮转抽取 12 个 IP，以并发 4、单 IP 1500 ms 上限进行初筛；启用 VLESS probe 时仍须通过真实数据面终审。每轮失败保留旧池，且不会与手动扫描或六小时全量维护并发。GUI 开关会写入 `/data/proxy-optimizer.json`，容器重启后保持用户选择。
 
-CFdata 彻底手动化：无后台自启动、无定时扫描；只在用户显式调用 `/api/cfdata/run` 时执行，结果写入 `ip.csv` 供候选汇合读取。旧的 `PROXY_CFDATA_BACKGROUND_*` / `PROXY_CFDATA_SIFT_COUNT` 变量已废弃且不再读取。
+CFdata 供给层：扫描器在启动时后台自扫一次，此后每 6 小时一轮（`CFDATA_AUTO_SCAN`，默认开启），结果写入 `result.csv`，由 `cfdataCandidateIPs()` 读入候选汇合并过 CF 段闸；设为 `false` 即退回纯手动（只在 `/api/cfdata/run` 时跑）。旧的 `PROXY_CFDATA_BACKGROUND_*` / `PROXY_CFDATA_SIFT_COUNT` 变量已废弃且不再读取。
 
-日常 IP 供给走订阅慢扫：服务端按 `PROXY_SUBSCRIPTION_MAINTAINERS`（默认 8 个第三方维护者域名）逐个请求订阅转换器 `PROXY_SUBSCRIPTION_CONVERTER + ?token=…&sub=<维护者>`（token 从 `PROXY_SUBSCRIPTION_TOKEN` 注入，不进仓库），提取明文 IP 与节点域名解析出的 IP，做并发 4、2000 ms 上限的 WS 慢筛后丢入订阅池（`subscription-pool.json`，上限 1000），默认每 `PROXY_SUBSCRIPTION_REFRESH_MINUTES=360` 分钟一轮。候选来源优先级为 `user > subscription > official > proxy`；`PROXY_USER_CANDIDATES` 与手动采用永远最高优先。
+日常 IP 供给走订阅慢扫：服务端按 `PROXY_SUBSCRIPTION_MAINTAINERS`（默认 8 个第三方维护者域名）逐个请求订阅转换器 `PROXY_SUBSCRIPTION_CONVERTER + ?token=…&sub=<维护者>`（token 从 `PROXY_SUBSCRIPTION_TOKEN` 注入，不进仓库），提取明文 IP 与节点域名解析出的 IP，做并发 4、2000 ms 上限的 WS 慢筛后丢入订阅池（`subscription-pool.json`，上限 1000），默认每 `PROXY_SUBSCRIPTION_REFRESH_MINUTES=360` 分钟一轮。候选来源优先级为 `user > cfdata > subscription > bestcf`；`PROXY_USER_CANDIDATES` 与手动采用永远最高优先。
 
-优选域名直连：启用的优选域名升格为 cfnat `-fixed` 转发成员——与登基 IP 并列轮换，拨号时按域名当前 DNS 活解析，天然跟随第三方维护者刷新；不解析成 IP 快照、不做域名级探测、不进候选池。用户显式配置的 `CFNAT_FALLBACK` 仍是主池全部拨号失败时的最后兜底。cfdata（baipiao 上游）不再供候选——订阅 + 优选域名 + 官方段 + 手动已是充分渠道；CFdata 扫描器保留为手动工具，结果不再汇入候选。
+优选域名直连：启用的优选域名升格为 cfnat `-fixed` 转发成员——与登基 IP 并列轮换，拨号时按域名当前 DNS 活解析，天然跟随第三方维护者刷新；不解析成 IP 快照、不做域名级探测、不进候选池。用户显式配置的 `CFNAT_FALLBACK` 仍是主池全部拨号失败时的最后兜底。cfdata 是**第二大供给层**——它以本机网络为基准实测延迟与丢包，比社区表更贴近这条线路的真实状况。
 
 踢人自动补位：在位 IP 被踢后，后台立即从候选缓存考试补考新 IP，保序并入现有成员，把池补回 `PROXY_AUTO_POOL_SIZE` 目标（建议 5~15，默认 5）。手动路径（立即优选 / 手动入池 / 踢人）一律排队等待正在跑的考试（最多 60 秒）而非直接拒绝——「已有扫描」闭门羹不复存在。
 
@@ -126,7 +126,7 @@ CFdata 彻底手动化：无后台自启动、无定时扫描；只在用户显�
 
 Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨在 Active 上位后一个探测周期内即可开判。入池体检为三次握手取最优，失败次数一并记档（`3 测 2 失` 在体检注记可见）——丢手即质量，股神/CFST 多发采样思想的正统继承。
 
-**候选源配额（防单源垄断）**：刷新按优先序灌入但每层封顶——`user ≤100`、`subscription ≤600`（须为保底让位）、`bestcf ≥300`（吸收余量），总池 ≤1000。`subscriptionQuota = min(600, 1000 - 已用 - bestcf保底)`，订阅层在数学上吃不光保底层。官方 Cloudflare CIDR 采样层已下线（`PROXY_OFFICIAL_CANDIDATES` 不再读取）。
+**候选源配额（防单源垄断）**：刷新按优先序灌入但每层封顶——`user ≤100`、`cfdata ≤250`、`subscription ≤300`、`bestcf ≤350`（吸收余量），总池 ≤1000。前三层配额之和 650，bestcf 吃剩余 350；灌入按优先序进行且每层封顶，故任何一层都吃不光其他层。官方 Cloudflare CIDR 采样层已下线（`PROXY_OFFICIAL_CANDIDATES` 不再读取）。
 
 **渠道健康账**：`/api/status` 的 `sources` 节逐源记录抓取次数、成功次数、累计 IP 数与最近一次成败——bestcf 的每个 URL、订阅的每个维护者、user/域名表各一席。哪个源死了，一眼可辨；渠道审计以此为准。
 
@@ -170,7 +170,7 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 
 调大它的理由来自 2026-10-21 的事故：上游链路中断约 3 小时，池里混入 0%–30% 成功率的成员，而 `-num 1` 让「一次拨号超时」直接等于「丢连接」，用户侧表现为整站打不开。深度 1 等于没有任何容错，3 才是能扛住单个死目标的最小值。显式设成 `1` 仍被尊重。
 
-`CFNAT_PRIORITY_IPS` 仅为兼容旧配置保留，不再在数据面重复加权；这样 active pool 才是严格 IP 轮换。候选控制面按 `user > subscription > official > proxy` 保留来源顺序（每层配额封顶），但任何来源都必须先通过真实 Host/SNI/WebSocket/VLESS 验证才可进入 active pool。
+`CFNAT_PRIORITY_IPS` 仅为兼容旧配置保留，不再在数据面重复加权；这样 active pool 才是严格 IP 轮换。候选控制面按 `user > cfdata > subscription > bestcf` 保留来源顺序（每层配额封顶），但任何来源都必须先通过真实 Host/SNI/WebSocket/VLESS 验证才可进入 active pool。
 
 自动候选池相关变量：
 
@@ -189,7 +189,7 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 | `PROXY_DOMAIN_FORWARD` | 并入 CFnat 固定转发池的优选域名，逗号分隔 | 空 |
 | `PROXY_AUTO_DOMAINS` | 优选域名并入 cfnat 兜底转发（-fallback） | `false`（Compose 为 `true`） |
 | `PROXY_PREFERRED_RESOLVE` / `PROXY_PREFERRED_IPS_PER_DOMAIN` / `PROXY_PREFERRED_RESOLVED_CANDIDATES` | 已废弃不再读取（优选域名直接做 `-fixed` 成员活解析） | -- |
-| `PROXY_CFDATA_CANDIDATES` | 已废弃不再读取（cfdata 不再供候选） | -- |
+| `PROXY_CFDATA_CANDIDATES` | 已废弃不再读取（cfdata 走 `result.csv` 供给层） | -- |
 | `PROXY_OFFICIAL_CANDIDATES` | 已废弃不再读取（官方 CIDR 采样层已下线，内置 snapshot 与采样器已随死码清除） | -- |
 | `PROXY_USER_CANDIDATES` | 用户指定的公网 IPv4，逗号或空白分隔 | 空 |
 | `PROXY_BACKGROUND_OPTIMIZER` | 是否启用低占用后台轮转优选 | `true` |
@@ -235,7 +235,81 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 
 所以联网正常时无需把作者包里的 IP 列表强行塞进镜像；需要离线运行时再预置到 `./data` 即可。
 
-注意：本地 `ips-v4.txt` 当前是数千个 `/24` 的广义 CDN/合作网络候选，不等同于 Cloudflare 官方公布的 15 个 IPv4 CIDR。自动维护按配额合并用户输入、订阅池、官方 CIDR 抽样和启用的社区源（优选域名不解析供 IP、cfdata 仅手动推送）；所有候选最终都必须通过实际 Host + WebSocket path 的 `101` 初筛，并在启用 VLESS probe 时完成真实数据面终审。内置 snapshot 只解决官方列表获取失败，不绕过业务验证。
+注意：本地 `ips-v4.txt` 当前是数千个 `/24` 的广义 CDN/合作网络候选，不等同于 Cloudflare 官方公布的 15 个 IPv4 CIDR。自动维护按配额合并用户输入、cfdata 自扫结果、订阅池和启用的社区源（优选域名不解析供 IP）；所有候选都先过 CF 段闸（必须是官方 15 段内的边缘地址），再必须通过实际 Host + WebSocket path 的 `101` 初筛，并在启用 VLESS probe 时完成真实数据面终审。内置 snapshot 只解决官方列表获取失败，不绕过业务验证。
+
+## 无人值守运维
+
+### 健康判据从哪看
+
+唯一的健康出口是 `GET /api/status`（配合 `GET /api/health`）。判读表：
+
+| 字段 | 健康值 | 异常含义 |
+|---|---|---|
+| `health.ok` | `true` | `false` 或端点不通 = 服务挂了 |
+| `proxyAuto.ips` | 非空 | 空 = 没有在位 IP，转发无从谈起 |
+| `poolSegments` | ≥ 2 个段 | 只有 1 段 = 抗单点能力弱，该段一挂全灭 |
+| `activeProbe.members[*].consecutiveFailures` | 全 0 | ≥ `failThreshold`（默认 3）= 该成员已连续探活失败 |
+| `activeProbe.members[*].lastLatencyMs` | 通常 < 2000 | 持续 > 3000 = 成员劣化但未达失败阈值 |
+| `forward.dialMs` | < 1000 | > 3000 = 拨号显著变慢 |
+| `forward.total` | 持续增长 | 长时间不变 = 没有流量在走 |
+| `domainFallback` | `null` | 非空 = 正在靠被质量闸拦下的域名兜底撑（降级中，不算故障） |
+| `sources[*].consecutiveFailures` | 全 0 | 连续失败 ≥ 3 = 该源已进退避期 |
+| `sources[*].backoffUntil` | 零值 | 非零 = 该源退避中 |
+| `cfnat.running` | `true` | `false` = 转发进程已停 |
+
+**`proxyAuto.error` 不是异常判据。** 它是**粘滞字段**——换池成功后不一定被清。线上实测（2026-10-23）：池子在 09:28 重建成功、转发完全正常，而 `error` 仍留着 08:52 的「自动换池被换池闸拦截」。那只是换池冷却期的提示，把「error 非空」当异常判据会永远误报。
+
+### 降级级（L1 / L2 / L3）
+
+| 级 | 触发条件 | 行为 |
+|---|---|---|
+| L1 扩池 | 终审通过数 < `PROXY_AUTO_MIN_POOL` | 扩大 shortlist 重新考（**尚未实现**） |
+| L2 放宽延迟 | 同上 | 放宽延迟上限（**尚未实现**） |
+| L3 降级采用 | VLESS 终审 0 个通过 | 采用 WS 101 已过的候选（`degradedFromWSResults`，已实现） |
+| 域名兜底 | 可用域名 < `minFallbackForwardDomains`（3） | 按体检成功率降序放行至多 3 个并标 degraded |
+
+### 确定性巡检（不依赖 LLM）
+
+`scripts/cf_inspect.py` 是替代 openclaw LLM 巡检的方案。2026-10-22~23 实测：LLM 巡检连续 7 次失败（上游 provider 拒绝 schema / 缺 API key / 请求超时），且 Telegram 投递也失败过一次（`sendMessage` 网络错误）——告警通道名义存在、实际又瞎又哑。
+
+脚本读 `/api/status`，按上表固定规则判定，命中才推 Telegram：
+
+```bash
+# 判定并打印（不推送）
+python3 scripts/cf_inspect.py --dry-run
+
+# 判定 + 有异常才推送
+python3 scripts/cf_inspect.py
+
+# 无条件推送一条状态摘要
+python3 scripts/cf_inspect.py --always
+```
+
+退出码：`0` 无异常 / `1` 有 WARN 或 CRITICAL / `2` 脚本自身故障。
+
+**部署要点（NAS）**：
+
+- 脚本位置 `/vol1/1000/Docker/CFNat/scripts/cf_inspect.py`
+- 调度用**用户级 crontab**（`administer`），每 2 小时整点：`0 */2 * * *`
+- 日志 `/vol1/1000/Docker/CFNat/data/cf-inspect.log`
+
+**Telegram 投递必须走代理**：NAS 上 `api.telegram.org` 被 DNS 污染到 Meta 的 IP 段（`31.13.76.65` 等），直连必然超时。`127.0.0.1:39281` 是本机 sing-box 容器的代理口，实测可达：
+
+```bash
+CF_TG_PROXY=http://127.0.0.1:39281
+```
+
+脚本默认从 openclaw 配置里读 bot token 与 chat id（`CF_OPENCLAW_CONFIG`，默认指向
+`/vol2/@apphome/trim.openclaw/data/home/.openclaw/openclaw.json`），也可用
+`CF_TG_TOKEN` / `CF_TG_CHAT` 环境变量覆盖。**不必为巡检再复制一份凭据。**
+
+### 已知运维陷阱
+
+- **CF 官方段可能被运营商掐断，无预警。** 2026-10-21 上午 8 点至下午 3 点，CF 官方段全部不可达，症状是 `dial tcp ...: i/o timeout`（静默丢包，**不是** `connection refused`），累计 79889 次拨号超时；TCP 连通性检查无法区分「拒绝」与「丢包」，必须看超时。恢复后系统靠自动换池自愈（10-22 13:04、10-23 09:28 各重建一次）。巡检脚本内置了 CF 段可达性抽查来发现这类故障。
+- **同 IP 不同 SNI 结果不同。** `curl https://IP/`（SNI=IP）通不代表 VLESS 用域名 SNI 也通；判断 CF 入口可用性必须用 WS 101 握手或完整 VLESS 链路。
+- **`CFNAT_FIXED_IPS` 会被池文件覆盖。** `web/pool.go` 在每次换池时用 `proxy-active.json` 的成员覆盖它，改 compose 对转发**无作用**，只在池文件尚不存在时作冷启动种子。
+- **`CFNAT_NUM` 是回退深度不是并发数。** 任何时刻只有一个上游连接在建立。
+- **cfnat 日志时区是 UTC**，不是容器 `TZ=Asia/Shanghai`。
 
 ## 日志上限
 

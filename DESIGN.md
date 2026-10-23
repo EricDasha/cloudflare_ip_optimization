@@ -89,10 +89,11 @@ When a Standby IP is promoted, the old Active IP demotes to Standby (preserved f
 Source priority determines **when** IPs are tested (ingestion order on ties), not their final performance ranking:
 
 1. **User** (manual IPs, `PROXY_USER_CANDIDATES`, manual apply) - Tested first, highest priority
-2. **Subscription** (third-party maintainer feed, WS-verified into `subscription-pool.json`) - Tested second
-3. **bestcf** (the merged bestcf table: IP lists, ISP feeds, and mirrors) - the expansion layer
+2. **cfdata** (this host's own measured scan, read from `result.csv`) - Tested second. The only source measured over *our* network path, hence the most relevant one
+3. **Subscription** (third-party maintainer feed, WS-verified into `subscription-pool.json`) - Tested third; the rawest material, so it comes last among the verified layers
+4. **bestcf** (the merged bestcf table: IP lists, ISP feeds, and mirrors) - the expansion layer
 
-Preferred domains are not a candidate source: they are promoted directly to cfnat `-fixed` members with dial-time DNS. CFdata is a manual push source only. The official Cloudflare CIDR sampling layer was **removed** (user directive) — `PROXY_OFFICIAL_CANDIDATES` is no longer read.
+Preferred domains are not a candidate source: they are promoted directly to cfnat `-fixed` members with dial-time DNS. The official Cloudflare CIDR sampling layer was **removed** (user directive) — `PROXY_OFFICIAL_CANDIDATES` is no longer read.
 
 ### Source Quotas (anti-monopoly)
 
@@ -101,11 +102,12 @@ Priority alone does not stop one source from eating the whole pool — productio
 | Layer | Quota | Constant |
 |---|---|---|
 | user | ≤ 100 | `userCandidatesCap` |
-| subscription | ≤ 600 | `subscriptionCandidatesCap` |
-| bestcf | ≥ 300 floor, absorbs remaining capacity | `bestcfCandidatesFloor` |
+| cfdata | ≤ 250 | `cfdataCandidatesCap` |
+| subscription | ≤ 300 | `subscriptionCandidatesCap` |
+| bestcf | ≤ 350 | `bestcfCandidatesReserve` |
 | **total** | **≤ 1000** | `candidatePoolTotalCap` |
 
-`subscriptionQuota = min(600, total - used - bestcfFloor)` makes it mathematically impossible for the subscription layer to starve the bestcf floor.
+The three explicit caps sum to 650; bestcf absorbs the remaining 350 up to the 1000 total. Since ingestion runs in priority order and each layer is capped, no single layer can starve the others.
 
 The actual Active Pool selection is based on measured performance (Mbps, latency, stability), not source priority.
 
@@ -141,30 +143,37 @@ Root files carry `//go:build ignore`, because otherwise `go build ./...` fails o
 | `quality_runtime.go` / `quality_scheduler.go` | quality records store + promotion state machine |
 | `preferred.go` / `subscription_candidates.go` / `cfnat_connections.go` | preferred domains, subscription hostname extraction, connection views |
 
-## CFdata Manual-Only
+## CFdata Supply Layer (background scan, 6h)
 
-CFdata is a **manual IP discovery scanner**, with no background self-start of any kind:
+CFdata is an **IP discovery scanner whose results feed the candidate pool**. It runs both on explicit request and on a background timer:
 
 ```
+Background timer (every 6h, CFDATA_AUTO_SCAN, default on)
+    │
+    ├──> cfdata scan (-auto -no-wait -update=false)  ->  result.csv
+    │
 User (explicit /api/cfdata/run request)
     │
-    │ Explicit trigger only
-    ▼
-ip.csv (cache)
-    │
-    │ Read-only access (results display only; no candidate feeding)
-    ▼
-Web results pages
+    └──> cfdata scan                                   ->  result.csv
+                    │
+                    │ cfdataCandidateIPs() reads result.csv,
+                    │ filtered through the CF segment gate
+                    ▼
+              Candidate Pool (second supply layer, ≤250)
 ```
 
-- There is no background loop, no periodic scan, and no post-scan sift.
-- CFdata output is display-only; its IPs no longer feed the candidate pool (official CIDR layer, cfdata supply and the `cfdataCandidateIPs()` reader were removed with the supply rework).
+- `web/main.go` starts `runCFdataBackgroundScan()` on boot; `cfdataScanInterval = 6 * time.Hour`.
+- `CFDATA_AUTO_SCAN` (default **true**) gates the background loop; set it to `false` for manual-only operation.
+- The supply reader `cfdataCandidateIPs()` (`web/cfdata_supply.go`) is live and is called from `web/candidates.go`.
+- Production evidence (2026-10-23): the `cfdata:result.csv` source shows `fetches=10 successes=10` — the background scan is running and is the second-largest supply layer.
+
+> Earlier revisions of this document described CFdata as "manual-only, display-only". That never matched the code; the code is the truth and this section now describes it.
 
 ## Candidate Pipeline
 
 Candidate generation and business acceptance are separate stages:
 
-1. Supply layers merge under per-source quotas: user-supplied IPs (≤100), subscription-feed IPs (≤600 with floor reservation), bestcf community tables (≥300 floor, absorbing remaining capacity); total ≤1000. Preferred domains are promoted directly to cfnat `-fixed` members and never enter the candidate pool. The official Cloudflare CIDR sampling layer is **removed** (user directive); its bundled snapshot, fetcher and sampler were deleted as dead code.
+1. Supply layers merge under per-source quotas: user-supplied IPs (≤100), cfdata's own scan (≤250), subscription-feed IPs (≤300), bestcf community tables (≤350, absorbing remaining capacity); total ≤1000. Preferred domains are promoted directly to cfnat `-fixed` members and never enter the candidate pool. The official Cloudflare CIDR sampling layer is **removed** (user directive); its bundled snapshot, fetcher and sampler were deleted as dead code.
 2. The first active-pool stage validates the configured TLS SNI, HTTP Host and WebSocket path in parallel, and records the serving datacenter (colo) from the `CF-RAY` response header.
 3. If VLESS probing is enabled, WS passes are tested sequentially through a short-lived sing-box process. Each pass must complete both the configured `generate_204` request and a bounded download through the same tunnel; a speed test that exhausts its time budget with ≥64 KiB read yields an honest partial score (EWMA-smoothed) instead of zero.
 4. The VLESS probe replaces only the candidate server and port; UUID, TLS/ECH/uTLS and WebSocket settings come from the local outbound template. Results preserve source priority and use measured Mbps, then data-plane latency, within each source tier; the colo soft-preference (`PROXY_POOL_COLO_PREFER`) then reorders passing candidates — preferred colos first, scarcity backfills from the rest, never rejecting or shrinking the list.
@@ -241,11 +250,12 @@ CFST community evidence: high-concurrency probing can be classified as network s
 ### VLESS Speed v2 (honest partial scores)
 The speed probe samples reads in 250ms slices and smooths them with hand-rolled EWMA (α=0.3, burst spikes damped). A candidate that exhausts its time budget with ≥64 KiB read receives an **honest partial score** instead of zero — previously an 800KB/20s member scored 0 and fell to the WS track indistinguishably from a dead one, blinding the throughput track to slow-but-working lines. True failures (status mismatch, read error without budget exhaustion, <64 KiB) still error out.
 
-### CFdata (manual-only; background vars deprecated)
-- `PROXY_CFDATA_BACKGROUND_ENABLED/MINUTES/TIMEOUT`, `PROXY_CFDATA_SIFT_COUNT`: no longer read; CFdata runs only on explicit user trigger
+### CFdata (background scan; supply layer)
+- `CFDATA_AUTO_SCAN` (default **true**): gates the 6-hour background scan started by `web/main.go`. Set to `false` for manual-only operation.
+- `PROXY_CFDATA_BACKGROUND_ENABLED/MINUTES/TIMEOUT`, `PROXY_CFDATA_SIFT_COUNT`: no longer read.
 
 ### Preferred Domains (fixed-member dial + optional fallback)
-- `PROXY_PREFERRED_MAX_DOMAINS`: cap on enabled preferred domains (default: 20). The hard code constant is `maxForwardDomains = 12`.
+- `PROXY_PREFERRED_MAX_DOMAINS`: cap on enabled preferred domains (default: 20). The hard code constant is `maxForwardDomains = 30`.
 - `PROXY_PREFERRED_RESOLVE`, `PROXY_PREFERRED_IPS_PER_DOMAIN`, `PROXY_PREFERRED_RESOLVED_CANDIDATES`: deprecated, no longer read (C-zone resolve-supply was removed; domains dial as `-fixed` members with live DNS)
 - `PROXY_PREFERRED_PROBE_MINUTES`, `PROXY_DYNAMIC_DISCOVERY`: deprecated, no longer read
 
