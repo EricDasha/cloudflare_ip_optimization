@@ -40,6 +40,7 @@ import argparse
 import calendar
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -201,12 +202,35 @@ def check_pool(verdicts, status):
         verdicts.append(Verdict("INFO", "正在靠域名兜底撑",
                                 json.dumps(fb, ensure_ascii=False)[:200]))
 
-    # proxyAuto.error：粘滞字段，只作附注。
+    # proxyAuto.error：粘滞字段，只作附注；已过放行时间的视为历史残留。
     err = pa.get("error")
     if err:
-        verdicts.append(Verdict("INFO", "proxyAuto.error 附注", err[:200]))
+        expiry = _proxy_auto_expiry(err)
+        if expiry is not None and expiry < time.time():
+            verdicts.append(Verdict("INFO", "proxyAuto.error 已过期",
+                                    "上次拦截 %s 已放行，当前无实际故障" %
+                                    time.strftime("%Y-%m-%d %H:%M:%S",
+                                                  time.localtime(expiry))))
+        else:
+            verdicts.append(Verdict("INFO", "proxyAuto.error 附注", err[:200]))
 
     return ips
+
+
+def _proxy_auto_expiry(err):
+    """从 proxyAuto.error 文本里抠出「下轮放行」时间，转成 epoch 秒。
+
+    文案形如「自动换池被换池闸拦截，下轮放行约 2026-10-24T18:33:04Z」。
+    抠不到（换个说法、没有时间）就返回 None——那种情况按当前故障处理。
+    """
+    m = re.search(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})Z?", err or "")
+    if not m:
+        return None
+    try:
+        return calendar.timegm(time.strptime(m.group(1) + "T" + m.group(2),
+                                             "%Y-%m-%dT%H:%M:%S"))
+    except Exception:
+        return None
 
 
 def check_active_probe(verdicts, status):
