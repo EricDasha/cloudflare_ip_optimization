@@ -388,11 +388,11 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 			return
 		}
 	}
-	if latest := a.proxyCandidateSnapshot(); !latest.UpdatedAt.Equal(snapshot.UpdatedAt) {
-		// A source refresh completed while this expensive scan was running.
-		// Never let the old scan overwrite the newer candidate generation.
-		a.setProxyPoolError("候选在考试中途刷新，本轮结果已作废；保留旧池", results)
-		log.Printf("proxy auto apply skipped: candidate snapshot changed during scan")
+	if latest := a.proxyCandidateSnapshot(); !candidateResultsStillValid(latest, passed) {
+		// 候选在考试中途被刷新，且本轮通关的 IP 已不在新候选里——结果指向的
+		// 那一代候选已经不存在，作废并如实报出。
+		a.setProxyPoolError("候选在考试中途刷新，本轮通关的 IP 已不在候选池中，本轮结果作废；保留旧池", results)
+		log.Printf("proxy auto apply skipped: passed candidates no longer present in refreshed snapshot (passed=%d)", len(passed))
 		return
 	}
 	current := a.proxyActivePoolSnapshot()

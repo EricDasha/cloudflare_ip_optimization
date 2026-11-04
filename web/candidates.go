@@ -427,6 +427,32 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 	return true, nil
 }
 
+// candidateResultsStillValid 判断一轮考试的结果在候选刷新之后是否仍然成立。
+//
+// 旧判据是「快照 UpdatedAt 有没有变」——它把「刷新发生了」当成「结果失效了」，
+// 于是一次无害的重启式刷新就能作废一整轮 90 秒的考试。线上形态：12:18 与 12:21
+// 两轮各有 20 个候选通过 VLESS 终审，全被这条判据丢掉；直到 12:24 恰好没有刷新
+// 插进来，池子才第一次建起来。真正要防的只有一件事：**结果指向的那代候选已经没了**
+// （例如某源整体下线、IP 被上游拉黑），此时采用旧名单等于用一份不存在的供给建池。
+//
+// 所以判据改成看结果本身：本轮通关的每一个 IP 是否仍在刷新后的候选池里。
+// 候选集合不变（只是更新了一次）时照常放行；集合真的变了、且通关 IP 被移出时才作废。
+func candidateResultsStillValid(latest proxyCandidateSnapshot, passed []string) bool {
+	if len(passed) == 0 {
+		return true
+	}
+	present := make(map[string]struct{}, len(latest.IPs))
+	for _, ip := range latest.IPs {
+		present[ip] = struct{}{}
+	}
+	for _, ip := range passed {
+		if _, ok := present[ip]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func (a *app) proxyCandidateSnapshot() proxyCandidateSnapshot {
 	a.candidateMu.RLock()
 	defer a.candidateMu.RUnlock()
