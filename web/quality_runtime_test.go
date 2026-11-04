@@ -82,6 +82,61 @@ func TestQualityRuntimeActiveFailureFailsOverAfterThreeStrikes(t *testing.T) {
 	}
 }
 
+// 载入时对账：池为空、没人再触发 seedActive 时，历史脏数据也必须被清掉。
+func TestLoadReconcilesOrphanActives(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, proxyQualityFile)
+	seed := qualityStoreData{
+		Version: 1, ActiveIP: "172.64.229.111",
+		Records: map[string]*qualityRecord{
+			"172.64.229.111": {IP: "172.64.229.111", State: lineActive},
+			"43.132.185.96":  {IP: "43.132.185.96", State: lineActive},
+		},
+	}
+	b, _ := json.Marshal(seed)
+	if err := os.WriteFile(path, b, 0600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	r := &qualitySchedulerRuntime{path: path, policy: defaultSchedulerPolicy(), data: qualityStoreData{Version: 1, Records: map[string]*qualityRecord{}}}
+	if err := r.load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := r.data.Records["43.132.185.96"].State; got != lineStandby {
+		t.Fatalf("orphan not demoted on load: %s", got)
+	}
+	// 修复必须落盘，重启后不能原样回来。
+	var reread qualityStoreData
+	raw, _ := os.ReadFile(path)
+	_ = json.Unmarshal(raw, &reread)
+	if reread.Records["43.132.185.96"].State != lineStandby {
+		t.Fatal("reconciliation was not persisted")
+	}
+}
+
+// ActiveIP 为空但只有一条 ACTIVE：认它作代表，不能把唯一的信息也丢掉。
+func TestLoadAdoptsLoneActiveWhenActiveIPMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, proxyQualityFile)
+	seed := qualityStoreData{
+		Version: 1,
+		Records: map[string]*qualityRecord{"9.9.9.9": {IP: "9.9.9.9", State: lineActive}},
+	}
+	b, _ := json.Marshal(seed)
+	_ = os.WriteFile(path, b, 0600)
+
+	r := &qualitySchedulerRuntime{path: path, policy: defaultSchedulerPolicy()}
+	if err := r.load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if r.data.ActiveIP != "9.9.9.9" {
+		t.Fatalf("lone ACTIVE not adopted, activeIp = %q", r.data.ActiveIP)
+	}
+	if r.data.Records["9.9.9.9"].State != lineActive {
+		t.Fatal("lone ACTIVE was demoted")
+	}
+}
+
 // --- 单 ACTIVE 不变量 ---
 
 // 线上脏数据形态：两条记录同时是 ACTIVE，其中一条 lastProbeAt 为零值。

@@ -128,7 +128,41 @@ func (r *qualitySchedulerRuntime) load() error {
 		data.Records = make(map[string]*qualityRecord)
 	}
 	r.data = data
+	if r.reconcileActiveLocked(time.Now()) {
+		// 修复要落盘：否则进程在下一次写入前重启，脏数据原样回来。
+		_ = r.saveLocked()
+	}
 	return nil
+}
+
+// reconcileActiveLocked 在载入账本时修复「单 ACTIVE」不变量。
+//
+// 只在变更点修复不够：池为空时 seedActive/commitSwitch 都不会跑，历史脏数据
+// 会一直躺在文件里。所以载入时也要对一次账。
+//   - ActiveIP 有指向 → 其余 ACTIVE 一律降为 STANDBY；
+//   - ActiveIP 为空但恰好只有一条 ACTIVE → 认它作代表，不丢信息；
+//   - ActiveIP 为空且多条 ACTIVE → 全部降级，让调度器按成绩重新选。
+//
+// 返回是否改动了账本（调用方据此决定要不要落盘）。
+func (r *qualitySchedulerRuntime) reconcileActiveLocked(now time.Time) bool {
+	changed := false
+	if r.data.ActiveIP == "" {
+		var only string
+		count := 0
+		for ip, rec := range r.data.Records {
+			if rec != nil && rec.State == lineActive {
+				only, count = ip, count+1
+			}
+		}
+		if count == 1 {
+			r.data.ActiveIP = only
+			changed = true
+		}
+	}
+	if r.demoteOrphanActivesLocked(r.data.ActiveIP, reasonOrphanActiveDemoted, now) > 0 {
+		changed = true
+	}
+	return changed
 }
 
 func (r *qualitySchedulerRuntime) saveLocked() error {

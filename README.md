@@ -123,7 +123,7 @@ CFdata 供给层：扫描器在启动时后台自扫一次，此后每 6 小时�
 
 **片区降权（软性，不淘汰）**：每轮探测结果会按 CF 段汇总失败率。某段样本 ≥5 且失败率 ≥80% 时，该段的候选在终审名单里被稳定移到末尾——候选不够时照样会被采用，只是排在后面。判定是单轮滚动，片区恢复后下一轮自动解除，无需人工重置。失败原因同时被归类为 `timeout / refused / unreachable / handshake / protocol / other`（`proxyScanResult.errorClass`），便于事后判断"整片被掐"还是"个别地址没了"。
 
-**成绩册单 ACTIVE 不变量**：成绩册里同一时刻只应有一条 `ACTIVE`。历史上会漏：无 Active 时的晋升（`promoted_without_active`）其 `FromIP` 为空，执行层降不到任何记录，旧的 `ACTIVE` 就永久留在账上（线上曾见两条并存，其中一条 `lastProbeAt` 为零值）。现在 `seedActive` 与 `commitSwitch` 都会把除当前 Active 之外的所有 `ACTIVE` 降为 `STANDBY`，原因记为 `orphan_active_demoted`。这一条不只是整洁问题——墓碑清理永不淘汰 `ACTIVE`，幽灵记录会一直占着名额。
+**成绩册单 ACTIVE 不变量**：成绩册里同一时刻只应有一条 `ACTIVE`。历史上会漏：无 Active 时的晋升（`promoted_without_active`）其 `FromIP` 为空，执行层降不到任何记录，旧的 `ACTIVE` 就永久留在账上（线上曾见两条并存，其中一条 `lastProbeAt` 为零值）。现在 `seedActive` 与 `commitSwitch` 都会把除当前 Active 之外的所有 `ACTIVE` 降为 `STANDBY`，原因记为 `orphan_active_demoted`；成绩册载入时也会对一次账（`ActiveIP` 为空但只有一条 `ACTIVE` 时认它作代表，多条则全部降级）。这一条不只是整洁问题——墓碑清理永不淘汰 `ACTIVE`，幽灵记录会一直占着名额。
 
 **报错必显**：凡是考试通过却被换池闸拦下的自动终审，一律把原因写进在位池 `error`（优选台 toast 即此字段的原文）——包括冷却拦截与快照过期。以前这两条路只写容器日志，前端却弹"优选完成"，属于吞单谎报；现已修：拦了就说拦了。`error` 现在同时带 `errorAt` 时间戳，`/api/status` 另有结构化的 `poolBlock`（`blocked / reason / source / at / nextAllowedAt`），换池成功后自动清空。
 
