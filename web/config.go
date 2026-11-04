@@ -52,6 +52,13 @@ const (
 	cfdataCandidatesCap       = 250
 	subscriptionCandidatesCap = 300
 	bestcfCandidatesReserve   = 350
+	// 片区降权的最小样本量与失败率门槛。
+	//
+	// 为什么要有最小样本量：片区里只有一两个候选时，一个失败就是 50%~100%，
+	// 直接降权会误伤。2026-10-22 的教训是闸门拦得太狠会把服务拦死，所以
+	// 样本不足时宁可不判。降权只是排到名单末尾，不是拉黑，候选不够照样用。
+	segmentDemoteMinSamples   = 5
+	segmentDemoteFailureRatio = 0.8
 )
 
 type proxyAutoConfig struct {

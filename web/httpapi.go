@@ -525,6 +525,10 @@ func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// poolSegments 是当前池的 CF 段分布。段数 < 2 意味着抗单点能力弱，
 		// 2026-10-22 事故就是池里只有一个段，该段一挂全灭。
 		"poolSegments": poolSegmentStats(pool.IPs),
+		// poolBlock 是最近一次「换池被拦」的结构化原因（reason/source/at/
+		// nextAllowedAt）。与 proxyAuto.error 的自由文本互补：那个带时间戳但
+		// 仍是句子，这个可以直接当判据用。blocked=false 表示当前无拦截。
+		"poolBlock": a.poolBlockStatus(),
 		// domainFallback 非空表示当前转发域名处于降级状态：
 		// 质量闸本要拦下，为了不空池才放行。巡检据此判断「是不是靠兜底在撑」。
 		"domainFallback": a.domainFallbackSnapshot(),

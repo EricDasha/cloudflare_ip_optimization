@@ -210,12 +210,12 @@ func TestAllowPoolSwitchWaivesUnderstaffedPool(t *testing.T) {
 	a.activePool = proxyActivePool{UpdatedAt: now.Add(-time.Minute), Host: "h", Path: "/p", IPs: []string{"10.0.0.1"}}
 	a.markPoolSwitched(now) // 冷却进行中
 	// 残员（1 < MinPool=3）:放行
-	if !a.allowPoolSwitch(now.Add(time.Minute), "test-understaffed") {
+	if !a.allowPoolSwitch(now.Add(time.Minute), "test-understaffed").Allowed {
 		t.Fatal("understaffed pool (1 < MinPool) was blocked by cooldown")
 	}
 	// 整池（≥ MinPool）:同条件必须拦——防抖闸本体仍在
 	a.activePool = proxyActivePool{UpdatedAt: now.Add(-time.Minute), Host: "h", Path: "/p", IPs: []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"}}
-	if a.allowPoolSwitch(now.Add(time.Minute), "test-fullpool") {
+	if a.allowPoolSwitch(now.Add(time.Minute), "test-fullpool").Allowed {
 		t.Fatal("full healthy-cooldown pool passed a switch it should block")
 	}
 }
@@ -232,8 +232,90 @@ func TestAllowPoolSwitchHealthGateStillBlocksHealthyFullPool(t *testing.T) {
 	}
 	a.activePool = proxyActivePool{UpdatedAt: now.Add(-time.Hour), Host: "h", Path: "/p", IPs: []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}}
 	a.lastPoolSwitchAt = now.Add(-time.Hour) // 冷却已过
-	if a.allowPoolSwitch(now, "test-healthgate") {
+	if a.allowPoolSwitch(now, "test-healthgate").Allowed {
 		t.Fatal("all-healthy full pool was not blocked by health gate")
+	}
+}
+
+// 救援快车道：整池每个成员都达到连续失败阈值 → 跳过冷却与健康闸。
+// 冷却仍在进行、池子也不「健康」，但此时不换就是断网，防抖必须让路。
+func TestAllowPoolSwitchRescueBypassesCooldownAndHealth(t *testing.T) {
+	now := time.Now()
+	a := &app{
+		dataDir:      t.TempDir(),
+		activeHealth: map[string]*activeHealthStat{},
+		throneProbe:  map[string]*throneProbeStat{},
+	}
+	ips := []string{"104.16.0.1", "104.17.0.1", "104.18.0.1"}
+	a.activePool = proxyActivePool{UpdatedAt: now.Add(-time.Minute), Host: "h", Path: "/p", IPs: ips}
+	a.markPoolSwitched(now) // 冷却进行中
+	threshold := throneProbeFailThreshold()
+	for _, ip := range ips {
+		a.throneProbe[ip] = &throneProbeStat{ConsecutiveFailures: threshold, LastProbe: now}
+	}
+	verdict := a.allowPoolSwitch(now.Add(time.Minute), "test-rescue")
+	if !verdict.Allowed || !verdict.Rescue {
+		t.Fatalf("all-dead pool was not rescued: %+v", verdict)
+	}
+	if verdict.Reason != "rescue" {
+		t.Fatalf("rescue reason = %q, want rescue", verdict.Reason)
+	}
+}
+
+// 救援不误伤：只要还有成员没到阈值，防抖闸照常生效。
+func TestAllowPoolSwitchRescueRequiresEveryMemberDead(t *testing.T) {
+	now := time.Now()
+	a := &app{
+		dataDir:      t.TempDir(),
+		activeHealth: map[string]*activeHealthStat{},
+		throneProbe:  map[string]*throneProbeStat{},
+	}
+	ips := []string{"104.16.0.1", "104.17.0.1", "104.18.0.1"}
+	a.activePool = proxyActivePool{UpdatedAt: now.Add(-time.Minute), Host: "h", Path: "/p", IPs: ips}
+	a.markPoolSwitched(now) // 冷却进行中
+	threshold := throneProbeFailThreshold()
+	// 两个死、一个还活着（计数未达阈值）
+	a.throneProbe[ips[0]] = &throneProbeStat{ConsecutiveFailures: threshold, LastProbe: now}
+	a.throneProbe[ips[1]] = &throneProbeStat{ConsecutiveFailures: threshold, LastProbe: now}
+	a.throneProbe[ips[2]] = &throneProbeStat{ConsecutiveFailures: threshold - 1, LastProbe: now}
+	verdict := a.allowPoolSwitch(now.Add(time.Minute), "test-partial")
+	if verdict.Allowed {
+		t.Fatal("partially dead pool must still obey the cooldown gate")
+	}
+	if verdict.Reason != "cooldown" {
+		t.Fatalf("blocked reason = %q, want cooldown", verdict.Reason)
+	}
+	if verdict.NextAllowedAt.IsZero() {
+		t.Fatal("cooldown verdict must carry nextAllowedAt")
+	}
+}
+
+// 无验活记录的空池不算「整组已死」：没有成员就没有可救援对象。
+func TestAllowPoolSwitchEmptyPoolIsNotRescue(t *testing.T) {
+	now := time.Now()
+	a := &app{dataDir: t.TempDir(), activeHealth: map[string]*activeHealthStat{}, throneProbe: map[string]*throneProbeStat{}}
+	a.activePool = proxyActivePool{Host: "h", Path: "/p"}
+	verdict := a.allowPoolSwitch(now, "test-empty")
+	if verdict.Rescue {
+		t.Fatal("empty pool must not be treated as an all-dead rescue")
+	}
+}
+
+// 拦截原因可读：被拦时 blocked=true 且带来源与时间；换池成功后自动清空。
+func TestPoolBlockStatusTracksAndClears(t *testing.T) {
+	now := time.Now()
+	a := &app{dataDir: t.TempDir()}
+	a.recordPoolBlock(poolSwitchVerdict{Reason: "cooldown", NextAllowedAt: now.Add(30 * time.Minute)}, "scheduler", now)
+	got := a.poolBlockStatus()
+	if got["blocked"] != true || got["reason"] != "cooldown" || got["source"] != "scheduler" {
+		t.Fatalf("poolBlockStatus() = %v", got)
+	}
+	if got["nextAllowedAt"] == nil {
+		t.Fatal("blocked status must expose nextAllowedAt")
+	}
+	a.markPoolSwitched(now)
+	if a.poolBlockStatus()["blocked"] != false {
+		t.Fatal("poolBlock must clear after a successful switch")
 	}
 }
 

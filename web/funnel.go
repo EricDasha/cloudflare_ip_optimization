@@ -349,6 +349,8 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 		passed = rankVLESSPassesBySpeed(parent, passed, results, cfg.Port, cfg.VLESS, vlessTemplate)
 		// 机房软偏好：Mbps 序排定后分区重排，截断时充裕取偏好、匮乏放行。
 		passed = orderPassedByColoPreference(passed, results, poolColoPreferenceSet())
+		// 片区降权：整片高失败率的段排到末尾（不淘汰，候选不够照样用）。
+		passed = orderPassedBySegmentHealth(passed, results)
 		passed = spreadBySegment(passed, cfg.PoolSize)
 	} else {
 		for _, result := range results {
@@ -357,6 +359,7 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 			}
 		}
 		passed = orderPassedByColoPreference(passed, results, poolColoPreferenceSet())
+		passed = orderPassedBySegmentHealth(passed, results)
 		passed = spreadBySegment(passed, cfg.PoolSize)
 	}
 	if len(passed) < cfg.MinPool {
@@ -411,13 +414,14 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 	// （残员豁免：池缩到最小数之下时 allowPoolSwitch 放行补员，见函数注释。）
 	// 拦截必须写回 pool.Error——用户点的立即优选若被拦，前端靠它报信；
 	// 只打容器日志等于静默吞单（生产 17:41/17:53 两次"优选完成"假捷报即此）。
-	if !a.allowPoolSwitch(now, "auto-apply") {
-		poolGuard := a.poolGuardStatus()
+	verdict := a.allowPoolSwitch(now, "auto-apply")
+	if !verdict.Allowed {
+		a.recordPoolBlock(verdict, "auto-apply", now)
 		var reason string
-		if next, ok := poolGuard["nextAllowedAt"].(string); ok && next != "" {
-			reason = fmt.Sprintf("自动换池被换池闸拦截，下轮放行约 %s；保留旧池", next)
+		if !verdict.NextAllowedAt.IsZero() {
+			reason = fmt.Sprintf("自动换池被换池闸拦截（%s），下轮放行约 %s；保留旧池", verdict.Reason, verdict.NextAllowedAt.Format(time.RFC3339))
 		} else {
-			reason = "自动换池被换池闸拦截；保留旧池"
+			reason = fmt.Sprintf("自动换池被换池闸拦截（%s）；保留旧池", verdict.Reason)
 		}
 		a.setProxyPoolError(reason, results)
 		return
@@ -448,6 +452,7 @@ func scanProxyWebSockets(parent context.Context, ips []string, cfg proxyAutoConf
 			if err != nil {
 				results[i].Stage = "WS_FAIL"
 				results[i].Error = err.Error()
+				results[i].ErrorClass = classifyProbeError(err)
 			}
 		}(i, ip)
 	}
@@ -548,7 +553,11 @@ type proxyScanResult struct {
 	SourceRank   int     `json:"sourceRank,omitempty"`
 	Stage        string  `json:"stage,omitempty"`
 	Error        string  `json:"error,omitempty"`
-	Note         string  `json:"note,omitempty"`
+	// ErrorClass 是 Error 的归类（timeout/refused/unreachable/handshake/protocol/other）。
+	// 原始报错文本随版本平台变化，直接统计没法用；归类后才能看出「整片被掐」
+	// 与「个别地址没了」的区别。
+	ErrorClass string `json:"errorClass,omitempty"`
+	Note       string `json:"note,omitempty"`
 }
 
 func normalizeProxyScan(c proxyScanConfig) (proxyScanConfig, error) {
@@ -619,6 +628,7 @@ func scanProxyIPs(parent context.Context, ips []string, cfg proxyScanConfig) []p
 			if err != nil {
 				results[i].Stage = "TLS_FAIL"
 				results[i].Error = err.Error()
+				results[i].ErrorClass = classifyProbeError(err)
 				return
 			}
 			if latency > int64(cfg.MaxLatency) {

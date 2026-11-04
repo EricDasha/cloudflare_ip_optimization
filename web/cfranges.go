@@ -1,6 +1,150 @@
 package main
 
-import "net"
+import (
+	"crypto/tls"
+	"errors"
+	"net"
+	"strings"
+	"syscall"
+)
+
+// 失败归类：把千变万化的底层报错收敛成有限的几类。
+//
+// 为什么需要它：候选池只知道「通/不通」，于是同一个段里的 IP 成批死掉时，
+// 系统看不出这是「整片被掐」还是「个别地址没了」，只能一个个盲试。
+// 归类之后，片区级统计才有意义（见 segmentFailureStats）。
+//
+// 判定顺序：先认类型（net.Error 超时、syscall 错误码、tls 类型错误），
+// 字符串匹配只做兜底——Go 的报错文本随版本与平台变化，只靠文本会误归类。
+const (
+	failureNone        = ""            // 成功
+	failureTimeout     = "timeout"     // 超时 / 静默丢包：最常见于整片被掐
+	failureRefused     = "refused"     // 对方主动拒绝：地址没了或端口关了
+	failureUnreachable = "unreachable" // 无路由 / 网络不可达
+	failureHandshake   = "handshake"   // TLS 握手失败：对方不是目标服务或证书不对
+	failureProtocol    = "protocol"    // 连上了但协议不对：WS 状态码非 101、提前 EOF
+	failureOther       = "other"       // 归不了类
+)
+
+// classifyProbeError 把探测错误归入有限类别。nil 返回 failureNone。
+func classifyProbeError(err error) string {
+	if err == nil {
+		return failureNone
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return failureTimeout
+	}
+	switch {
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return failureRefused
+	case errors.Is(err, syscall.EHOSTUNREACH), errors.Is(err, syscall.ENETUNREACH):
+		return failureUnreachable
+	case errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE):
+		return failureProtocol
+	}
+	var recordErr tls.RecordHeaderError
+	if errors.As(err, &recordErr) {
+		return failureHandshake
+	}
+	// 兜底：文本匹配。注意大小写与常见变体，宁可归 other 也不乱归类。
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "timeout"), strings.Contains(msg, "deadline exceeded"):
+		return failureTimeout
+	case strings.Contains(msg, "connection refused"):
+		return failureRefused
+	case strings.Contains(msg, "no route to host"), strings.Contains(msg, "network is unreachable"):
+		return failureUnreachable
+	case strings.Contains(msg, "tls"), strings.Contains(msg, "certificate"), strings.Contains(msg, "handshake"):
+		return failureHandshake
+	case strings.Contains(msg, "ws 状态码"), strings.Contains(msg, "eof"), strings.Contains(msg, "connection reset"):
+		return failureProtocol
+	}
+	return failureOther
+}
+
+// segmentFailureStat 是单个 CF 段在一轮探测里的成绩。
+type segmentFailureStat struct {
+	Total   int
+	Failed  int
+	Classes map[string]int
+}
+
+// segmentFailureStats 按段汇总一轮探测结果。
+// 非 CF 段（segmentOf 返回空）不进统计——它们本来就不该出现在候选池里。
+func segmentFailureStats(results []proxyScanResult) map[string]segmentFailureStat {
+	out := make(map[string]segmentFailureStat, 4)
+	for _, result := range results {
+		seg := segmentOf(net.ParseIP(result.IP))
+		if seg == "" {
+			continue
+		}
+		st := out[seg]
+		if st.Classes == nil {
+			st.Classes = make(map[string]int, 2)
+		}
+		st.Total++
+		if result.Error != "" {
+			st.Failed++
+			class := result.ErrorClass
+			if class == "" {
+				class = failureOther
+			}
+			st.Classes[class]++
+		}
+		out[seg] = st
+	}
+	return out
+}
+
+// demotedSegments 返回本轮应当降权的段：失败率过高且样本足够。
+//
+// 降权不是拉黑：只把该段的候选排到名单末尾（见 orderPassedBySegmentHealth），
+// 候选不够时照样会被采用。2026-10-22 的教训是「闸门拦得太狠会把服务拦死」，
+// 所以这里既要求最小样本量（一两个候选失败 50% 说明不了问题），
+// 也只在单轮内生效——下一轮样本滚动覆盖，片区恢复就自动解除，无需人工重置。
+func demotedSegments(results []proxyScanResult) map[string]struct{} {
+	stats := segmentFailureStats(results)
+	out := make(map[string]struct{}, len(stats))
+	for seg, st := range stats {
+		if st.Total < segmentDemoteMinSamples {
+			continue
+		}
+		if float64(st.Failed)/float64(st.Total) >= segmentDemoteFailureRatio {
+			out[seg] = struct{}{}
+		}
+	}
+	return out
+}
+
+// orderPassedBySegmentHealth 把被降权段的候选稳定移到名单末尾。
+// 输入顺序（Mbps / 延迟 / 机房偏好）在两组内部原样保留；名单长度不变。
+func orderPassedBySegmentHealth(passed []string, results []proxyScanResult) []string {
+	demoted := demotedSegments(results)
+	if len(demoted) == 0 || len(passed) < 2 {
+		return passed
+	}
+	head := make([]string, 0, len(passed))
+	tail := make([]string, 0, len(passed))
+	for _, ip := range passed {
+		if _, ok := demoted[segmentOf(net.ParseIP(ip))]; ok {
+			tail = append(tail, ip)
+		} else {
+			head = append(head, ip)
+		}
+	}
+	return append(head, tail...)
+}
+
+// degradedSegmentDiversity 报告一次换人操作是否会让池的段数变少。
+// 池成员顺序就是 cfnat 的尝试顺序，但段数决定的是抗单点能力——两者都要。
+// 非 CF 成员（段为空）不计入，避免测试地址干扰判断。
+func degradedSegmentDiversity(before, after []string) bool {
+	beforeSegs := poolSegmentStats(before)
+	afterSegs := poolSegmentStats(after)
+	return len(afterSegs) < len(beforeSegs)
+}
 
 // cloudflareIPv4CIDRs 是 Cloudflare 官方公布的 IPv4 边缘段（15 段）。
 //

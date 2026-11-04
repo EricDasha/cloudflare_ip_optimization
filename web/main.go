@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -43,18 +44,24 @@ func (a *app) domainFallbackSnapshot() []string {
 }
 
 type app struct {
-	dataDir            string
-	cfnat              *managedProcess
-	cfdata             *managedProcess
-	proxyScanMu        sync.Mutex
-	cfnatCtlMu         sync.Mutex
-	candidateMu        sync.RWMutex
-	refreshMu          sync.Mutex
-	candidates         proxyCandidateSnapshot
-	activeMu           sync.RWMutex
-	activePool         proxyActivePool
-	poolGuardMu        sync.Mutex
-	lastPoolSwitchAt   time.Time
+	dataDir          string
+	cfnat            *managedProcess
+	cfdata           *managedProcess
+	proxyScanMu      sync.Mutex
+	cfnatCtlMu       sync.Mutex
+	candidateMu      sync.RWMutex
+	refreshMu        sync.Mutex
+	candidates       proxyCandidateSnapshot
+	activeMu         sync.RWMutex
+	activePool       proxyActivePool
+	poolGuardMu      sync.Mutex
+	lastPoolSwitchAt time.Time
+	// poolBlock 记录最近一次「换池闸拒绝」的结构化原因，供 /api/status 直读。
+	// 与 proxyActivePool.Error（自由文本、粘滞）互补：这个字段带时间、带来源、
+	// 带下次放行时间，巡检不必再从中文句子里抠时间戳。
+	poolBlock          poolSwitchVerdict
+	poolBlockAt        time.Time
+	poolBlockBy        string
 	activeHealthMu     sync.Mutex
 	activeHealth       map[string]*activeHealthStat
 	optimizerMu        sync.RWMutex
@@ -434,13 +441,27 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	// 决策：检查是否有 Standby IP 应该晋升为 Active
 	decision := a.quality.decide(now)
 	if decision.Event == switchNone || decision.ToIP == "" || !a.quality.apply {
+		// 救援只代表「允许换」，不代表「有得换」：整池已死却没有合格替补时，
+		// 决策层返回 NONE，链路就停在这里。此时必须留下明确记录，否则运维
+		// 看到的是「调度器每轮正常结束」，实际上一个能用的 IP 都没有。
+		if allDead, deadCount := a.activePoolAllDead(current.IPs); allDead {
+			log.Printf("scheduler rescue stalled: all %d members dead but no eligible standby (event=%s reason=%s)", deadCount, decision.Event, decision.Reason)
+			a.quality.setError(fmt.Sprintf("整池 %d 个成员均已判死，但候选池没有合格替补；需人工补 IP 或等待供给层恢复", deadCount))
+		}
 		return
 	}
 
 	// 执行换池：旧 Active → Standby，新 IP → Active。
-	// 防顶池三道闸：同池跳过、全局冷却、active 自检先行。
-	if !a.allowPoolSwitch(now, "scheduler") {
+	// 防顶池闸：同池跳过、整池判死救援、全局冷却、active 自检先行。
+	// 被拦时把原因落进 poolBlock——调度器被拦若只打日志，前端仍显示「一切正常」。
+	verdict := a.allowPoolSwitch(now, "scheduler")
+	if !verdict.Allowed {
+		a.recordPoolBlock(verdict, "scheduler", now)
+		a.quality.setError("调度器换池被换池闸拦截: " + verdict.Reason)
 		return
+	}
+	if verdict.Rescue {
+		log.Printf("scheduler rescue lane open: %s -> %s", decision.FromIP, decision.ToIP)
 	}
 	if latest := a.proxyCandidateSnapshot(); !latest.UpdatedAt.Equal(snapshot.UpdatedAt) {
 		log.Printf("scheduler pool switch skipped: candidate snapshot changed during probe")
@@ -450,9 +471,18 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 		log.Printf("scheduler pool switch skipped: target already in current pool")
 		return
 	}
+	// 片区多样性：调度器单独换一个成员时，若换完会让池的段数变少就拒绝。
+	// spreadBySegment 只在全量重挑/踢人补位里跑过，这条路径此前完全绕过片区
+	// 检查——池结构可以一轮一轮被换成同一段，而所有指标都显示正常。
+	nextIPs := replacePoolMember(current.IPs, decision.FromIP, decision.ToIP)
+	if degradedSegmentDiversity(current.IPs, nextIPs) {
+		log.Printf("scheduler pool switch skipped: segment diversity would drop %v -> %v", poolSegmentStats(current.IPs), poolSegmentStats(nextIPs))
+		a.quality.setError("调度器换池被片区多样性检查拦截：换入后段数减少")
+		return
+	}
 	pool := current
 	pool.UpdatedAt, pool.Host, pool.Path = now, cfg.Host, cfg.Path
-	pool.IPs = replacePoolMember(current.IPs, decision.FromIP, decision.ToIP)
+	pool.IPs = nextIPs
 	pool.Results = mergePoolResults(pool.IPs, current.Results, results)
 	if err := a.applyProxyPool(pool, current); err != nil {
 		a.quality.setError("调度器换池失败: " + err.Error())

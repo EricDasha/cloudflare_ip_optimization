@@ -21,6 +21,10 @@ type proxyActivePool struct {
 	Domains   []string          `json:"domains,omitempty"`
 	Results   []proxyScanResult `json:"results,omitempty"`
 	Error     string            `json:"error,omitempty"`
+	// ErrorAt 是 Error 的写入时间。以前只有自由文本，下游只能靠正则从中文句子里
+	// 抠「下轮放行时间」来判断这条报错是不是历史残留（见 scripts/cf_inspect.py）。
+	// 加时间戳后，粘滞字段终于能自证新旧。
+	ErrorAt time.Time `json:"errorAt,omitempty"`
 
 	// Disabled 是用户显式关闭的成员（IP 或域名）：仍在位、仍可体检，但不进
 	// cfnat -fixed，绝不参与转发。为空即「全开」。
@@ -219,6 +223,10 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 	a.activeMu.Lock()
 	a.activePool = pool
 	a.activeMu.Unlock()
+	// 换池成功，历史报错随之作废——粘滞字段不该继续挂着上一轮的拦截原因。
+	a.poolGuardMu.Lock()
+	a.poolBlock, a.poolBlockAt, a.poolBlockBy = poolSwitchVerdict{}, time.Time{}, ""
+	a.poolGuardMu.Unlock()
 	if a.quality != nil && len(pool.IPs) > 0 {
 		a.quality.seedActive(pool.IPs[0], pool.UpdatedAt)
 	}
@@ -229,6 +237,7 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 func (a *app) setProxyPoolError(message string, results []proxyScanResult) {
 	pool := a.proxyActivePoolSnapshot()
 	pool.Error = message
+	pool.ErrorAt = time.Now()
 	if results != nil {
 		pool.Results = results
 	}
@@ -300,6 +309,49 @@ type activeHealthStat struct {
 	LastCheck time.Time
 }
 
+// poolSwitchVerdict 是一次换池闸判定的完整结果。
+//
+// 只返回 bool 的时代已经过去：调度器被拦时只打容器日志，前端照样弹「优选完成」，
+// 属于静默吞单。现在把「放没放、为什么、下次什么时候放」一并交回调用方，
+// 由它统一落进 /api/status。
+type poolSwitchVerdict struct {
+	Allowed bool
+	// Reason 取值：rescue / understaffed / ok / cooldown / healthy / no_pool
+	Reason string
+	// Rescue 为真表示整池判死、跳过全部防抖放行。
+	Rescue bool
+	// NextAllowedAt 仅在 cooldown 拦截时非零。
+	NextAllowedAt time.Time
+}
+
+// activePoolAllDead 报告现生效池是否「整组已死」：每个成员都达到连续失败阈值。
+//
+// 数据源是 throneProbe（在位验活），不是 quality 成绩册，也不是 activeHealth：
+//   - throneProbe 按「成员」建模，每轮给池里每个 IP 各记一次连续失败数，
+//     正好回答「整组是不是全死了」；quality 成绩册是按「单条线路」建模的，
+//     ActiveIP 只有一个，对多成员池答不上来。
+//   - activeHealth 是 scheduler 每轮顺手记的被动健康，探测失败与调度器
+//     主动请下台走的是同一份计数，语义混在一起；救援判定要的是干净的
+//     验活口径，故不用它。
+//
+// 空池不算「死」：没有成员就没有可救援对象，交给残员豁免处理。
+func (a *app) activePoolAllDead(ips []string) (bool, int) {
+	if len(ips) == 0 {
+		return false, 0
+	}
+	threshold := throneProbeFailThreshold()
+	a.throneProbeMu.Lock()
+	defer a.throneProbeMu.Unlock()
+	dead := 0
+	for _, ip := range ips {
+		st := a.throneProbe[ip]
+		if st != nil && st.ConsecutiveFailures >= threshold {
+			dead++
+		}
+	}
+	return dead == len(ips), dead
+}
+
 // seedPoolGuardFromActive 启动时用持久化生效池时间初始化冷却锚点，
 // 避免重启后立即被后台换池顶掉正在工作的 IP。
 func (a *app) seedPoolGuardFromActive() {
@@ -315,18 +367,63 @@ func (a *app) seedPoolGuardFromActive() {
 func (a *app) markPoolSwitched(now time.Time) {
 	a.poolGuardMu.Lock()
 	a.lastPoolSwitchAt = now
+	// 换池成功即清除上一次的拦截原因：留着会让前端把历史拦截当成当前状态。
+	a.poolBlock, a.poolBlockAt, a.poolBlockBy = poolSwitchVerdict{}, time.Time{}, ""
 	a.poolGuardMu.Unlock()
 }
 
-// allowPoolSwitch 自动换池三道半闸：
-// 1) 全局冷却未过 → 拒绝（残员豁免：池 < MinPool 时只走健康/数量闸，不空等）；
-// 2) 现生效池全部健康（近 N 次无失败）→ 拒绝顶池；
+// recordPoolBlock 记下「这次换池被谁、为什么拦下」。
+// 三个换池入口（scheduler / auto-apply / 救援）统一走这里，别各自拼字符串。
+func (a *app) recordPoolBlock(verdict poolSwitchVerdict, source string, now time.Time) {
+	a.poolGuardMu.Lock()
+	a.poolBlock, a.poolBlockAt, a.poolBlockBy = verdict, now, source
+	a.poolGuardMu.Unlock()
+}
+
+// poolBlockStatus 把最近一次拦截整理成 /api/status 可直读的结构。
+// blocked 为 false 表示当前没有生效的拦截（从未拦过，或换池成功后已清）。
+func (a *app) poolBlockStatus() map[string]any {
+	a.poolGuardMu.Lock()
+	verdict, at, source := a.poolBlock, a.poolBlockAt, a.poolBlockBy
+	a.poolGuardMu.Unlock()
+	if verdict.Allowed || source == "" {
+		return map[string]any{"blocked": false}
+	}
+	next := ""
+	if !verdict.NextAllowedAt.IsZero() {
+		next = verdict.NextAllowedAt.Format(time.RFC3339)
+	}
+	out := map[string]any{
+		"blocked": true,
+		"reason":  verdict.Reason,
+		"source":  source,
+		"at":      at,
+	}
+	if next != "" {
+		out["nextAllowedAt"] = next
+	}
+	return out
+}
+
+// allowPoolSwitch 自动换池闸门，按顺序判定：
+// 1) 整池判死救援：每个在位成员都达到连续失败阈值 → 放行，跳过冷却与健康闸；
+// 2) 全局冷却未过 → 拒绝（残员豁免：池 < MinPool 时只走健康/数量闸，不空等）；
 // 3) 残员豁免：现池规模 < 自动换池最小数 → 放行（整池健康也不拦——残员补回优先）；
-// 通过才允许换池。通过后调用方必须 markPoolSwitched。
-func (a *app) allowPoolSwitch(now time.Time, reason string) bool {
+// 4) 现生效池全部健康（近 N 次无失败）→ 拒绝顶池。
+//
+// 返回 poolSwitchVerdict 而非 bool：调用方要能把「为什么没换」写进 /api/status，
+// 只打容器日志等于静默吞单（生产 17:41/17:53 两次"优选完成"假捷报即此）。
+// 放行后调用方必须 markPoolSwitched。
+func (a *app) allowPoolSwitch(now time.Time, reason string) poolSwitchVerdict {
 	current := a.proxyActivePoolSnapshot()
 	minPool := defaultProxyAutoConfig().MinPool
-	// 残员豁免先行：池缩到最小数之下时，冷却不再是拒绝理由——补员优先于防抖。
+	// 救援先行：整组已死时，冷却与健康闸都失去意义——它们防的是"瞎换"，
+	// 而此刻不换就是断网。判死口径见 activePoolAllDead。
+	if allDead, deadCount := a.activePoolAllDead(current.IPs); allDead {
+		log.Printf("pool switch RESCUE: all %d members reached failure threshold, bypassing cooldown/health gate (%s)", deadCount, reason)
+		return poolSwitchVerdict{Allowed: true, Reason: "rescue", Rescue: true}
+	}
+	// 残员豁免：池缩到最小数之下时，冷却不再是拒绝理由——补员优先于防抖。
 	// 冷却日志照打（审计不断），但不再拦截。
 	understaffed := len(current.IPs) < minPool
 	cooldown := poolSwitchCooldown()
@@ -335,19 +432,19 @@ func (a *app) allowPoolSwitch(now time.Time, reason string) bool {
 	a.poolGuardMu.Unlock()
 	if !understaffed && !last.IsZero() && now.Sub(last) < cooldown {
 		log.Printf("pool switch blocked by cooldown (%s ago < %s): %s", now.Sub(last).Round(time.Second), cooldown, reason)
-		return false
+		return poolSwitchVerdict{Reason: "cooldown", NextAllowedAt: last.Add(cooldown)}
 	}
 	if understaffed && !last.IsZero() && now.Sub(last) < cooldown {
 		log.Printf("pool switch cooldown waived for understaffed pool (%d<%d IPs, %s ago < %s): %s", len(current.IPs), minPool, now.Sub(last).Round(time.Second), cooldown, reason)
 	}
 	if understaffed {
-		return true
+		return poolSwitchVerdict{Allowed: true, Reason: "understaffed"}
 	}
 	if len(current.IPs) > 0 && a.activePoolHealthy(current.IPs) {
 		log.Printf("pool switch blocked: active pool healthy, keep working IPs (%s)", reason)
-		return false
+		return poolSwitchVerdict{Reason: "healthy"}
 	}
-	return true
+	return poolSwitchVerdict{Allowed: true, Reason: "ok"}
 }
 
 // activePoolHealthy 现生效池健康即“全部 IP 近期无失败记录”。
