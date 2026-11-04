@@ -480,8 +480,8 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	if verdict.Rescue {
 		log.Printf("scheduler rescue lane open: %s -> %s", decision.FromIP, decision.ToIP)
 	}
-	if latest := a.proxyCandidateSnapshot(); !candidateResultsStillValid(latest, []string{decision.ToIP}) {
-		log.Printf("scheduler pool switch skipped: target %s no longer present in refreshed candidate snapshot", decision.ToIP)
+	if admitted, _ := filterPoolAdmissibleIPs([]string{decision.ToIP}); len(admitted) == 0 {
+		log.Printf("scheduler pool switch skipped: target %s fails pool gate (not a public CF edge IPv4)", decision.ToIP)
 		return
 	}
 	if containsString(current.IPs, decision.ToIP) {

@@ -427,30 +427,37 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 	return true, nil
 }
 
-// candidateResultsStillValid 判断一轮考试的结果在候选刷新之后是否仍然成立。
+// filterPoolAdmissibleIPs 在候选池已刷新之后，重新校验本轮通关的 IP 还能不能进池。
 //
-// 旧判据是「快照 UpdatedAt 有没有变」——它把「刷新发生了」当成「结果失效了」，
-// 于是一次无害的重启式刷新就能作废一整轮 90 秒的考试。线上形态：12:18 与 12:21
-// 两轮各有 20 个候选通过 VLESS 终审，全被这条判据丢掉；直到 12:24 恰好没有刷新
-// 插进来，池子才第一次建起来。真正要防的只有一件事：**结果指向的那代候选已经没了**
-// （例如某源整体下线、IP 被上游拉黑），此时采用旧名单等于用一份不存在的供给建池。
+// 历史沿革值得记一笔，因为这里连着错过两次：
 //
-// 所以判据改成看结果本身：本轮通关的每一个 IP 是否仍在刷新后的候选池里。
-// 候选集合不变（只是更新了一次）时照常放行；集合真的变了、且通关 IP 被移出时才作废。
-func candidateResultsStillValid(latest proxyCandidateSnapshot, passed []string) bool {
-	if len(passed) == 0 {
-		return true
-	}
-	present := make(map[string]struct{}, len(latest.IPs))
-	for _, ip := range latest.IPs {
-		present[ip] = struct{}{}
-	}
-	for _, ip := range passed {
-		if _, ok := present[ip]; !ok {
-			return false
+//  1. 最初判据是「快照 UpdatedAt 有没有变」——它把「刷新发生了」当成「结果失效了」。
+//     容器重启后启动刷新、订阅慢扫、cfdata 后刷新扎堆，2~3 分钟一次，于是每轮
+//     90 秒的考试几乎必被作废。线上 2026-11-04 12:18 / 12:21 两轮各有 20 个候选
+//     通过 VLESS 终审全被丢弃，池子直到 12:24 恰好没有刷新插入才第一次建起来。
+//
+//  2. 改成「通关 IP 是否仍在候选名单里」——12:38 又丢一轮（passed=10）。这次看清了
+//     根因：候选池不是一份稳定名册，是按层配额灌入、上限 1000 的**轮转采样队列**，
+//     每轮重新排序。GitHub raw 六个源超时一次（12:37 实测），整池从 743 掉到 650，
+//     同一个 IP 这轮在榜、下轮掉出榜完全是常态。拿供给队列的抖动去否定一个已经
+//     用真实 VLESS 数据面端到端验过的结论，是本末倒置。
+//
+// 真正必须守的不变量只有一条：**进池的必须是公网 IPv4，且必须是 Cloudflare 边缘段**。
+// 这条与候选名单无关，可以就地复验，也正好是刷新时那道段闸的同一把尺子。
+// 复验不过的（例如地址已被上游拉黑、或本是第三方 VPS 冒充）逐个剔除，
+// 剩下的照常采用——不因为一两个地址失效就作废整轮。
+func filterPoolAdmissibleIPs(passed []string) ([]string, []string) {
+	admitted := make([]string, 0, len(passed))
+	rejected := make([]string, 0)
+	for _, raw := range passed {
+		ip := net.ParseIP(strings.TrimSpace(raw))
+		if !isPublicIPv4(ip) || !isCloudflareIPv4(ip) {
+			rejected = append(rejected, raw)
+			continue
 		}
+		admitted = append(admitted, ip.To4().String())
 	}
-	return true
+	return admitted, rejected
 }
 
 func (a *app) proxyCandidateSnapshot() proxyCandidateSnapshot {

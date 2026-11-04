@@ -2,35 +2,45 @@ package main
 
 import "testing"
 
-// 刷新发生了但候选集合没变：考试结果依然指向同一代候选，必须放行。
-// 线上形态：12:18 / 12:21 两轮各有 20 个候选通过 VLESS 终审，只因订阅慢扫
-// 触发了一次刷新就被整轮丢掉，池子直到 12:24 恰好没有刷新插入才建起来。
-func TestCandidateResultsStillValidWhenSameGeneration(t *testing.T) {
-	latest := proxyCandidateSnapshot{IPs: []string{"1.1.1.1", "2.2.2.2", "3.3.3.3"}}
-	if !candidateResultsStillValid(latest, []string{"2.2.2.2", "3.3.3.3"}) {
-		t.Fatal("same-generation refresh must not void a good round")
+// 通过的 IP 只要过得了「公网 + CF 边缘段」这道闸，就必须放行。
+// 这是刷新时那道段闸的同一把尺子，与候选名单顺序无关。
+func TestFilterPoolAdmissibleKeepsCloudflareEdge(t *testing.T) {
+	admitted, rejected := filterPoolAdmissibleIPs([]string{"162.159.131.118", "104.16.224.171"})
+	if len(rejected) != 0 {
+		t.Fatalf("CF edge IPs rejected: %v", rejected)
+	}
+	if len(admitted) != 2 {
+		t.Fatalf("admitted = %v", admitted)
 	}
 }
 
-// 通关的 IP 已从候选池消失：那代候选不存在了，结果必须作废。
-func TestCandidateResultsInvalidWhenPassedIPPurged(t *testing.T) {
-	latest := proxyCandidateSnapshot{IPs: []string{"1.1.1.1"}}
-	if candidateResultsStillValid(latest, []string{"1.1.1.1", "9.9.9.9"}) {
-		t.Fatal("round must be voided when a passed IP was purged from candidates")
+// 第三方 VPS 冒充优选（非 CF 段）必须被剔除。
+func TestFilterPoolAdmissibleDropsNonCloudflare(t *testing.T) {
+	admitted, rejected := filterPoolAdmissibleIPs([]string{"162.159.131.118", "45.32.100.7"})
+	if len(admitted) != 1 || admitted[0] != "162.159.131.118" {
+		t.Fatalf("admitted = %v", admitted)
+	}
+	if len(rejected) != 1 || rejected[0] != "45.32.100.7" {
+		t.Fatalf("rejected = %v", rejected)
 	}
 }
 
-// 空结果没有可作废的对象；调用方另有 MinPool 判据兜底。
-func TestCandidateResultsValidWhenNothingPassed(t *testing.T) {
-	if !candidateResultsStillValid(proxyCandidateSnapshot{}, nil) {
-		t.Fatal("empty pass list should not be reported as stale snapshot")
+// 私网 / 回环 / 非法字符串一律不进池。
+func TestFilterPoolAdmissibleDropsPrivateAndGarbage(t *testing.T) {
+	_, rejected := filterPoolAdmissibleIPs([]string{"192.168.1.50", "127.0.0.1", "not-an-ip", ""})
+	if len(rejected) != 4 {
+		t.Fatalf("rejected = %v, want all 4 dropped", rejected)
 	}
 }
 
-// 候选池整体换血（刷新后全新一批）：旧结果一个都对不上，必须作废。
-func TestCandidateResultsInvalidWhenPoolReplacedWholesale(t *testing.T) {
-	latest := proxyCandidateSnapshot{IPs: []string{"10.0.0.1", "10.0.0.2"}}
-	if candidateResultsStillValid(latest, []string{"1.1.1.1", "2.2.2.2"}) {
-		t.Fatal("round must be voided when the whole candidate generation was replaced")
+// 混合场景：多数合格、少量失效时不作废整轮——这是 12:38 那轮被误丢的形态。
+func TestFilterPoolAdmissibleKeepsRoundWithFewBadEntries(t *testing.T) {
+	passed := []string{"162.159.131.118", "162.159.194.115", "172.64.68.116", "104.16.224.171", "45.32.100.7"}
+	admitted, rejected := filterPoolAdmissibleIPs(passed)
+	if len(admitted) != 4 || len(rejected) != 1 {
+		t.Fatalf("admitted=%v rejected=%v, want 4 kept / 1 dropped", admitted, rejected)
+	}
+	if len(admitted) < 3 {
+		t.Fatal("a predominantly valid round must not be voided by one bad entry")
 	}
 }

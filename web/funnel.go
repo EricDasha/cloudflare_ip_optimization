@@ -362,6 +362,13 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 		passed = orderPassedBySegmentHealth(passed, results)
 		passed = spreadBySegment(passed, cfg.PoolSize)
 	}
+	// 考试结果的有效性就地复验：进池的必须是公网 IPv4 且属于 CF 边缘段。
+	// 不用「候选快照有没有变」作判据——候选池是轮转采样队列，每轮重新排序，
+	// 拿它的抖动去否定一个端到端验过的结论属于本末倒置（详见 filterPoolAdmissibleIPs）。
+	if admitted, rejected := filterPoolAdmissibleIPs(passed); len(rejected) > 0 {
+		log.Printf("proxy auto apply: dropped %d passed candidates failing pool gate: %v", len(rejected), rejected)
+		passed = admitted
+	}
 	if len(passed) < cfg.MinPool {
 		message := fmt.Sprintf("%s 终审仅 %d 个通过，低于最小池 %d", finalStage, len(passed), cfg.MinPool)
 		// L3 降级：VLESS 数据面没验过，但 WS 101 已经通过 —— 说明 TCP/TLS/WS
@@ -387,13 +394,6 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 			log.Printf("proxy pool CRITICAL: 建池失败且旧池全灭（0/%d 可达），需要人工介入", total)
 			return
 		}
-	}
-	if latest := a.proxyCandidateSnapshot(); !candidateResultsStillValid(latest, passed) {
-		// 候选在考试中途被刷新，且本轮通关的 IP 已不在新候选里——结果指向的
-		// 那一代候选已经不存在，作废并如实报出。
-		a.setProxyPoolError("候选在考试中途刷新，本轮通关的 IP 已不在候选池中，本轮结果作废；保留旧池", results)
-		log.Printf("proxy auto apply skipped: passed candidates no longer present in refreshed snapshot (passed=%d)", len(passed))
-		return
 	}
 	current := a.proxyActivePoolSnapshot()
 	domains := a.poolDomainMembers()
