@@ -145,6 +145,28 @@ func (r *qualitySchedulerRuntime) saveLocked() error {
 	return os.Rename(tmp, r.path)
 }
 
+// demoteOrphanActivesLocked 维护「同一时刻只有一个 ACTIVE」这条不变量。
+//
+// 历史脏数据的来源：decideLineSwitch 在没有 Active 时会返回 FromIP 为空的
+// PROMOTION（reasonPromotedNoActive），而 commitSwitch 只降级 decision.FromIP——
+// 空字符串查不到任何记录，于是旧的那条 ACTIVE 永远留在账上。线上已见两条记录
+// 同时是 ACTIVE（其中一条 lastProbeAt 为零值，是彻底没人管的幽灵记录）。
+//
+// 幽灵 ACTIVE 的实际危害不是界面难看：pruneRecordsLocked 永不淘汰 ACTIVE，
+// 它会一直占着墓碑名额；台账读者也无法判断到底谁在位上。所以每次 Active 变更
+// 都顺手把除 keep 之外的所有 ACTIVE 降到 STANDBY，并留下可追溯的原因。
+func (r *qualitySchedulerRuntime) demoteOrphanActivesLocked(keep, reason string, now time.Time) int {
+	demoted := 0
+	for ip, rec := range r.data.Records {
+		if ip == keep || rec == nil || rec.State != lineActive {
+			continue
+		}
+		rec.State, rec.StateReason, rec.StateChangedAt = lineStandby, reason, now
+		demoted++
+	}
+	return demoted
+}
+
 func (r *qualitySchedulerRuntime) seedActive(ip string, now time.Time) {
 	if ip == "" {
 		return
@@ -157,6 +179,7 @@ func (r *qualitySchedulerRuntime) seedActive(ip string, now time.Time) {
 	r.data.ActiveIP = ip
 	rec := r.ensureRecordLocked(ip, "active_pool", now)
 	rec.State, rec.StateReason, rec.StateChangedAt = lineActive, reasonPromotedNoActive, now
+	r.demoteOrphanActivesLocked(ip, reasonOrphanActiveDemoted, now)
 	_ = r.saveLocked()
 }
 
@@ -397,6 +420,9 @@ func (r *qualitySchedulerRuntime) commitSwitch(decision schedulerDecision, now t
 		next.State, next.StateReason, next.StateChangedAt = lineActive, decision.Reason, now
 		next.ConsecutiveSuperior = 0
 	}
+	// 无 Active 时的晋升（FromIP 为空）降不到任何记录，必须靠这条不变量兜住
+	// 历史遗留的第二条 ACTIVE——否则它永远不会被降级，也永远不会被墓碑清理。
+	r.demoteOrphanActivesLocked(decision.ToIP, reasonOrphanActiveDemoted, now)
 	r.data.ActiveIP, r.data.LastSwitchAt, r.data.LastDecision, r.data.LastError = decision.ToIP, now, decision, ""
 	_ = r.saveLocked()
 }

@@ -65,6 +65,9 @@ const (
 	reasonThroughputDrop             = "throughput_drop"
 	reasonProbeTimeout               = "probe_timeout"
 	reasonFailoverAfterActiveFailure = "failover_after_active_failure"
+	// reasonOrphanActiveDemoted：不变量修复时清出的「幽灵 ACTIVE」。
+	// 与 active_pool_replaced 区分开，便于事后分辨是正常换代还是历史脏数据被清理。
+	reasonOrphanActiveDemoted = "orphan_active_demoted"
 )
 
 // lineQuality 表示单个 IP 的质量状态，用于三池模型的晋升决策。
