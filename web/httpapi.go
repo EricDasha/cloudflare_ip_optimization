@@ -38,7 +38,12 @@ func (a *app) handleProxyCandidates(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if ok {
-			a.autoApplyProxyPool(r.Context())
+			// 与 post-cfdata 同理：刷新会把请求预算吃光，漏斗必须换新预算，
+			// 否则精筛阶段的每个拨号都瞬间返回 i/o timeout（看起来像全网断线）。
+			// 也不复用 r.Context()——客户端一断开就会把整轮考试连根取消。
+			applyCtx, cancel := newAutoApplyContext()
+			a.autoApplyProxyPool(applyCtx)
+			cancel()
 		}
 		writeSnapshot()
 	default:

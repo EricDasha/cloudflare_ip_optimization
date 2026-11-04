@@ -258,6 +258,22 @@ func (a *app) triggerCFdataScan() {
 	go a.refreshCandidatesAfterCFdata()
 }
 
+// autoApplyBudget 是漏斗（初筛 + WS 精筛 + VLESS 终审）的独立时间预算。
+//
+// 为什么必须独立：候选刷新会先把几乎整份请求预算吃掉（26 个源并发，
+// 上限 90 秒）。若漏斗沿用刷新那一个 ctx，进到精筛时 deadline 早已到期，
+// 每个拨号瞬间返回「dial tcp …: i/o timeout」，整轮 0 通过——日志看起来
+// 像「全网断线」，实际是预算没了。线上实测：初筛还能跑（快），紧接着
+// 60 个候选 2 秒内全超时，同一时刻在 NAS 上手工握手却是 101。
+//
+// 也不复用 HTTP 请求的 ctx：用户关掉页面就会把整轮考试连根取消。
+const autoApplyBudget = 10 * time.Minute
+
+// newAutoApplyContext 每次漏斗都开一份全新预算，与刷新/请求 ctx 彻底解耦。
+func newAutoApplyContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), autoApplyBudget)
+}
+
 // refreshCandidatesAfterCFdata 轮询等待 cfdata 退出，然后重算候选。
 // 最多等 10 分钟（单轮实测约 2.5 分钟），超时只记日志、不阻塞任何链路。
 func (a *app) refreshCandidatesAfterCFdata() {
@@ -269,17 +285,18 @@ func (a *app) refreshCandidatesAfterCFdata() {
 		if a.cfdata.status().Running {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		ok, err := a.refreshProxyCandidates(ctx)
+		refreshCtx, cancelRefresh := context.WithTimeout(context.Background(), 60*time.Second)
+		ok, err := a.refreshProxyCandidates(refreshCtx)
+		cancelRefresh()
 		if err != nil {
-			cancel()
 			log.Printf("post-cfdata candidate refresh skipped: %v", err)
 			return
 		}
 		if ok {
-			a.autoApplyProxyPool(ctx)
+			applyCtx, cancelApply := newAutoApplyContext()
+			a.autoApplyProxyPool(applyCtx)
+			cancelApply()
 		}
-		cancel()
 		log.Printf("post-cfdata candidate refresh done: ok=%v", ok)
 		return
 	}
@@ -501,7 +518,10 @@ func (a *app) refreshAndApplyProxyPool(ctx context.Context) {
 		return
 	}
 	if ok {
-		a.autoApplyProxyPool(ctx)
+		// 漏斗另开预算：刷新会把调用方 ctx 的 deadline 吃光（见 autoApplyBudget）。
+		applyCtx, cancel := newAutoApplyContext()
+		defer cancel()
+		a.autoApplyProxyPool(applyCtx)
 	}
 }
 
