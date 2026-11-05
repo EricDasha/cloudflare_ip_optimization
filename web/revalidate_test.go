@@ -13,12 +13,13 @@ import (
 // revalidateFixture 造一个只够跑「暂停—验—剔」的 app，并把四个外部依赖
 // 换成可编排的假货。真的 fork cfnat、真的拨号外网，单测既不稳也验不出东西。
 type revalidateFixture struct {
-	app        *app
-	started    []proxyActivePool // 每次恢复转发时传进去的池
-	applied    []proxyActivePool // 每次落地新池时传进去的池
-	startCalls int
-	applyErr   error
-	startErr   error
+	app         *app
+	started     []proxyActivePool // 每次恢复转发时传进去的池
+	applied     []proxyActivePool // 每次落地新池时传进去的池
+	startCalls  int
+	refillCalls int
+	applyErr    error
+	startErr    error
 }
 
 func newRevalidateFixture(t *testing.T, pool proxyActivePool) *revalidateFixture {
@@ -55,6 +56,7 @@ func newRevalidateFixture(t *testing.T, pool proxyActivePool) *revalidateFixture
 			f.applied = append(f.applied, pool)
 			return f.applyErr
 		},
+		refill: func(a *app) { f.refillCalls++ },
 	}
 	return f
 }
@@ -93,6 +95,9 @@ func TestRevalidateKeepsPoolWhenEveryMemberFails(t *testing.T) {
 	// 报告仍要列出每个成员的死因——「为什么不踢」必须看得见。
 	if len(report.Members) != 3 {
 		t.Fatalf("report members = %d, want 3", len(report.Members))
+	}
+	if f.refillCalls != 0 {
+		t.Fatal("all-fail round triggered a refill although the pool was left untouched")
 	}
 }
 
@@ -148,6 +153,11 @@ func TestRevalidatePrunesOnlyFailedMembers(t *testing.T) {
 	if f.startCalls != 0 {
 		t.Fatalf("forwarding restarted %d times after a successful apply, want 0", f.startCalls)
 	}
+	// 剔了人就要补：只清不补，池会一轮比一轮薄，最后两三个成员时一次
+	// 抖动就是全灭。
+	if f.refillCalls != 1 {
+		t.Fatalf("refill called %d times after removing members, want 1", f.refillCalls)
+	}
 	if report.Passed != 3 || len(report.Removed) != 2 {
 		t.Fatalf("passed=%d removed=%v", report.Passed, report.Removed)
 	}
@@ -176,6 +186,9 @@ func TestRevalidateRestartsForwardingWhenNothingRemoved(t *testing.T) {
 	}
 	if f.startCalls != 1 {
 		t.Fatalf("forwarding restarted %d times, want 1", f.startCalls)
+	}
+	if f.refillCalls != 0 {
+		t.Fatalf("refill called %d times although nothing was removed", f.refillCalls)
 	}
 }
 

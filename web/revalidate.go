@@ -161,6 +161,10 @@ type revalidateDependencies struct {
 	stopForwarding  func(a *app) error
 	startForwarding func(a *app, pool proxyActivePool) error
 	applyPool       func(a *app, pool, current proxyActivePool) error
+	// refill 是剔除后的补位。默认实现起协程调 refillPoolAfterKick——
+	// 那家伙要抢 proxyScanMu 与 cfnatCtlMu，而调用点两把锁都还攥着，
+	// 同步调用会当场自锁。
+	refill func(a *app)
 }
 
 var revalidateDeps = revalidateDependencies{
@@ -196,6 +200,9 @@ var revalidateDeps = revalidateDependencies{
 	},
 	applyPool: func(a *app, pool, current proxyActivePool) error {
 		return a.applyPoolLocked(pool, current)
+	},
+	refill: func(a *app) {
+		go a.refillPoolAfterKick()
 	},
 }
 
@@ -367,6 +374,14 @@ func (a *app) revalidateActivePool(parent context.Context) (report revalidateRep
 	a.markPoolSwitched(pool.UpdatedAt)
 	log.Printf("revalidate: removed %v, %d IPs + %d domains remain", removed, len(pool.IPs), len(pool.Domains))
 	report.Note = fmt.Sprintf("剔除 %d 个，保留 %d 个", len(removed), len(kept))
+
+	// 剔除之后按「踢人补位」同一条路把池补回 PoolSize：只清不补，池会
+	// 一轮比一轮薄，最后剩两三个成员时一次抖动就是全灭。
+	//
+	// 必须放到协程里：refillPoolAfterKick 要抢 proxyScanMu 与 cfnatCtlMu，
+	// 而这两把锁此刻都还在本函数手里。它自己会等（最多 3 分钟），我们一
+	// 返回它就拿到。同步调用会当场自锁。
+	revalidateDeps.refill(a)
 	return report, nil
 }
 
