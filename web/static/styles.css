@@ -67,6 +67,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .btn.primary { background: var(--bright); color: #000; border-color: var(--bright); font-weight: 700; }
 .btn.primary:hover { background: transparent; color: var(--bright); }
 .btn.mini { padding: 5px 10px; font-size: 12px; min-width: 32px; min-height: 30px; }
+/* 页面切换按钮用 <a> 而不是 <button>：它是真链接，可中键新开、可收藏。
+   但 <a> 默认带下划线与行内基线，必须显式抹平，否则与旁边的按钮不齐。 */
+a.btn { display: inline-block; text-decoration: none; line-height: 1.4; }
 .rowbtn { display: flex; gap: var(--s1); }
 
 /* ---------- 舞台 ---------- */

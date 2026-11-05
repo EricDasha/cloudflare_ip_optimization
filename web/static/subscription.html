@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="data:,">
+<title>皇位厅 · 订阅本子</title>
+<link rel="stylesheet" href="/styles.css?v=20261105b">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-glyph" aria-hidden="true">本</span>
+    <div><strong>订阅本子</strong><small>采集 / 考试 · 独立页</small></div>
+  </div>
+  <div class="top-status"><span class="st idle" id="subDot">◌</span><span id="subStateLine">…</span></div>
+  <span class="clock mono" id="clock">--:--:--</span>
+  <div class="drawerbar">
+    <a class="btn mini" id="homeNav" href="/">主页</a>
+  </div>
+</header>
+
+<main class="stage">
+
+  <!-- 壹 · 总览 -->
+  <section class="card" aria-label="订阅总览">
+    <div class="head-row">
+      <p class="overline">壹 · 订阅总览</p>
+      <div class="actions">
+        <button class="btn mini" id="subHarvestBtn" type="button">立即去收</button>
+        <button class="btn mini" id="subProbeBtn" type="button">立即考试</button>
+        <button class="btn mini" id="subRefreshBtn" type="button">刷新</button>
+      </div>
+    </div>
+    <div class="tally sub-tally" aria-live="polite">
+      <div><span class="n mono" id="subTallyTotal">–</span><span class="u">本子里的候选</span></div>
+      <div><span class="n mono" id="subTallyPending">–</span><span class="u">还没考</span></div>
+      <div><span class="n mono" id="subTallyPass">–</span><span class="u">考过能用</span></div>
+      <div><span class="n mono" id="subTallyFail">–</span><span class="u">判死</span></div>
+    </div>
+    <div class="cololine mono" id="subTimeline">最近采集 – ｜ 最近考试 –</div>
+    <div class="degraded" id="subErrorFlag" hidden></div>
+    <p class="foot">收与考是两件事：先全部收进来记账，再按预算慢慢考。只有考过的才进候选汇合。</p>
+  </section>
+
+  <!-- 贰 · 维护者 -->
+  <section class="card" aria-label="订阅维护者">
+    <div class="head-row">
+      <p class="overline">贰 · 维护者 · <span id="subMaintainerCount">0</span> 个</p>
+    </div>
+    <div class="supply-row">
+      <input id="subAddInput" type="text" placeholder="新增维护者域名，例如 example.com（可一次贴多个，空格或逗号分隔）" autocomplete="off">
+      <button class="btn" id="subAddBtn" type="button">添加</button>
+    </div>
+    <p class="hintline">维护者就是提供订阅地址的人。所有维护者默认启用；停用的不再拉取，但记录留着。</p>
+    <div class="table-wrap"><table aria-label="订阅维护者">
+      <thead><tr><th>维护者</th><th>状态</th><th class="mono">最近一次</th><th class="mono">收到</th><th>说明</th><th></th></tr></thead>
+      <tbody id="subMaintainerBody"><tr><td colspan="6" class="inline-status">尚未载入</td></tr></tbody>
+    </table></div>
+    <p class="foot">「收到」= 这一次从该维护者提取到、且此前没见过的地址数。近 5 次失败 ≥ 3 次的会被点名——通常是域名失效了。</p>
+  </section>
+
+  <!-- 叁 · 待考本子 -->
+  <section class="card" aria-label="待考本子">
+    <div class="head-row">
+      <p class="overline">叁 · 待考本子</p>
+      <div class="actions"><span class="foot" style="margin:0" id="subEntryFoot">显示 – / – 条</span></div>
+    </div>
+    <div class="sub-filter" id="subFilter" role="tablist" aria-label="按状态筛选">
+      <button class="btn mini on" type="button" data-state="all">全部</button>
+      <button class="btn mini" type="button" data-state="pending">还没考</button>
+      <button class="btn mini" type="button" data-state="pass">能用</button>
+      <button class="btn mini" type="button" data-state="fail">判死</button>
+    </div>
+    <div class="table-wrap"><table aria-label="待考本子">
+      <thead><tr><th>地址</th><th>状态</th><th class="mono">成绩</th><th>来源</th><th>最近</th><th></th></tr></thead>
+      <tbody id="subEntryBody"><tr><td colspan="6" class="inline-status">尚未载入</td></tr></tbody>
+    </table></div>
+  </section>
+
+</main>
+
+<footer class="foot">皇位厅 · 订阅本子 · <span id="footClock">--</span></footer>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="/app.js?v=20261105b"></script>
+</body>
+</html>

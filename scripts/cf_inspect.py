@@ -28,6 +28,15 @@
   （线上实测：池子在 09:28 重建成功、转发正常，而 error 仍留着 08:52 的
   "自动换池被换池闸拦截"）。把它当异常判据会永远误报，故降级为附注。
 
+  2026-11-05 修正：CF 官方段从准入闸降级为标签之后，「池内有官方段外 IP」
+  不再是故障（线上 45 个在位成员里 30 个属于此类且转发正常）。原先把这条
+  判成 WARN，结果每两小时雷打不动报一次警——真正的事故会被淹没。
+  现在改为 INFO，只报「整片成员不可达」这种真信号。
+
+推送可靠性：发不出去不再静默丢弃，而是入队等下一轮补发（见 QUEUE_FILE）。
+  2026-11-03 运营商掐断 CF 段时的三次告警就是这样丢的——巡检判断对了，
+  结论却只留下一行「推送：失败」。
+
 用法：
   python3 cf_inspect.py            # 巡检 + 有异常才推送
   python3 cf_inspect.py --dry-run  # 只打印判定，不推送
@@ -179,14 +188,17 @@ def check_pool(verdicts, status):
         verdicts.append(Verdict("CRITICAL", "生效池没有 IP",
                                 "proxyAuto.ips 为空，域名 %d 个" % len(domains)))
     else:
+        # 2026-11-05 起 CF 官方段从「准入闸」降级为「标签」：反代 IP 可用但
+        # 不属官方段是常态，线上实测 45 个在位成员里 30 个属于此类，转发与
+        # 延迟都正常。继续按 WARN 报，等于每两小时雷打不动地喊一次狼来了，
+        # 真正的事故反而被淹没——这正是「通知失灵」最常见的样子。
         non_cf = [ip for ip in ips if not in_cf_segment(ip)]
         if non_cf:
-            verdicts.append(Verdict("WARN", "池内存在非 CF 官方段 IP",
-                                    ", ".join(non_cf)))
-        else:
-            verdicts.append(Verdict("OK", "生效池正常",
-                                    "%d IP + %d 域名，全在 CF 官方段" %
-                                    (len(ips), len(domains))))
+            verdicts.append(Verdict("INFO", "池内含官方段外地址",
+                                    "%d/%d 个（反代常态，不算故障）" %
+                                    (len(non_cf), len(ips))))
+        verdicts.append(Verdict("OK", "生效池在位",
+                                "%d IP + %d 域名" % (len(ips), len(domains))))
 
     # 段分布：少于 2 段意味着抗单点能力弱（2026-10-22 事故形态）。
     segs = status.get("poolSegments") or {}
@@ -304,11 +316,14 @@ def check_sources(verdicts, status):
 
 
 def check_cf_segment(verdicts, ips):
-    """CF 官方段可达性抽查。
+    """在位成员可达性抽查。
 
     2026-10-21 运营商把 CF 段掐了 7 小时，症状是 i/o timeout（静默丢包），
     不是 connection refused。TCP 探测能区分这两者：被丢包的地址会超时。
     用池内成员做抽查，不新增外部依赖。
+
+    2026-11-05 起池里会有官方段外的反代地址，所以这里测的是「成员通不通」，
+    不再是「官方段通不通」——但故障信号（整片超时＝被掐）完全一样。
     """
     if not ips:
         return
@@ -324,14 +339,14 @@ def check_cf_segment(verdicts, ips):
         finally:
             s.close()
     if len(unreachable) == len(sample):
-        verdicts.append(Verdict("CRITICAL", "CF 官方段全部不可达",
-                                "抽查 %s 全部超时——疑似运营商再次掐断" %
+        verdicts.append(Verdict("CRITICAL", "在位成员全部不可达",
+                                "抽查 %s 全部超时——疑似运营商掐断" %
                                 ", ".join(sample)))
     elif unreachable:
-        verdicts.append(Verdict("WARN", "部分 CF 官方段不可达",
+        verdicts.append(Verdict("WARN", "部分在位成员不可达",
                                 "抽查超时：%s" % ", ".join(unreachable)))
     else:
-        verdicts.append(Verdict("OK", "CF 官方段可达",
+        verdicts.append(Verdict("OK", "在位成员可达",
                                 "抽查 %s 全部连通" % ", ".join(sample)))
 
 
@@ -381,31 +396,99 @@ def send_telegram(text):
     # 先走本地 sing-box 代理（NAS 上 api.telegram.org 被 DNS 污染到 Meta 的
     # IP 段，直连必然超时），失败再试直连——将来 DNS 若被修好，兜底这条路
     # 会自己生效，不必回来改脚本。
+    #
+    # 每条路重试一次：2026-11-03 那三次丢失都是「一次超时就放弃」。
+    # 代理端口刚重启时会有十几秒不可用，多打一次就能过去。
     attempts = []
     if TELEGRAM_PROXY:
         attempts.append(("代理 " + TELEGRAM_PROXY, TELEGRAM_PROXY))
     attempts.append(("直连", ""))
 
+    tried = []
     last = ""
     for label, proxy in attempts:
-        try:
-            import urllib.request as u
-            handlers = []
-            if proxy:
-                handlers.append(u.ProxyHandler({"http": proxy, "https": proxy}))
-            else:
-                handlers.append(u.ProxyHandler({}))
-            opener = u.build_opener(*handlers)
-            req = u.Request(url, data=payload,
-                            headers={"Content-Type": "application/json"})
-            with opener.open(req, timeout=25) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-            if body.get("ok"):
-                return True, "已推送（%s）" % label
-            last = "%s 拒绝：%s" % (label, str(body.get("description"))[:120])
-        except Exception as e:
-            last = "%s 失败：%s %s" % (label, type(e).__name__, e)
+        for attempt in range(2):
+            try:
+                import urllib.request as u
+                handlers = [u.ProxyHandler(
+                    {"http": proxy, "https": proxy} if proxy else {})]
+                opener = u.build_opener(*handlers)
+                req = u.Request(url, data=payload,
+                                headers={"Content-Type": "application/json"})
+                with opener.open(req, timeout=25) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+                if body.get("ok"):
+                    return True, "已推送（%s）" % label
+                # API 明确拒绝（chat 不存在、bot 被封）——重试无意义，换下一条路。
+                last = "%s 拒绝：%s" % (label, str(body.get("description"))[:120])
+                break
+            except Exception as e:
+                last = "%s 失败：%s %s" % (label, type(e).__name__, e)
+                tried.append(label)
+                if attempt == 0:
+                    time.sleep(3)
+    if not TELEGRAM_PROXY:
+        last += "（未配置 CF_TG_PROXY，从未尝试代理——NAS 上直连必失败）"
     return False, last
+
+
+# ---- 未送达告警的补发队列 ------------------------------------------------
+#
+# 2026-11-03 实测：CF 官方段被掐断的三次告警全部没送达，日志里只留下
+# 「推送：失败」四个字，然后就没有然后了。巡检脚本自己判断出了问题，
+# 却把结论丢在地上——这比不巡检更糟，因为它会让人以为「没消息=没事」。
+#
+# 做法与 cfnat-watchdog 一致：发不出去就排队，下一轮先补发，再发新的。
+# 队列文件刻意放在项目根目录，不写进 data/——那是生产账本与日志目录，
+# 巡检不该往里加文件。
+
+QUEUE_FILE = os.environ.get("CF_TG_QUEUE", "/vol1/1000/Docker/CFNat/cf-inspect-pending.json")
+QUEUE_MAX = 20
+
+
+def _queue_load():
+    try:
+        with open(QUEUE_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _queue_save(items):
+    tmp = QUEUE_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(items, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, QUEUE_FILE)
+    except Exception as e:
+        print("队列写入失败：%s" % e, file=sys.stderr)
+
+
+def flush_pending():
+    """每轮最多补发一条，避免积压后一次性刷屏。"""
+    items = _queue_load()
+    if not items:
+        return None
+    head = items.pop(0)
+    age_min = int((time.time() - head.get("t", time.time())) // 60)
+    text = "[补发·%d 分钟前]\n%s" % (age_min, head.get("text", ""))
+    ok, why = send_telegram(text)
+    if ok:
+        _queue_save(items)
+        return "补发成功（剩 %d 条）" % len(items)
+    items.insert(0, head)          # 还是发不出去，原样放回
+    _queue_save(items)
+    return "补发失败（%s）" % why
+
+
+def enqueue(text):
+    items = _queue_load()
+    items.append({"t": int(time.time()), "text": text})
+    del items[:-QUEUE_MAX]
+    _queue_save(items)
+    return len(items)
+
 
 
 def format_report(verdicts):
@@ -458,8 +541,21 @@ def main():
         print("\n[dry-run] 跳过推送")
         return 1 if bad else 0
 
+    # 先补发上一轮没送达的，再发这一轮的。顺序不能反：先发新的会让补发
+    # 永远排在后面，一旦持续有告警，旧的永远发不出去。
+    flushed = flush_pending()
+    if flushed:
+        print("\n补发：%s" % flushed)
+
     ok, why = send_telegram(report)
-    print("\n推送：%s（%s）" % ("成功" if ok else "失败", why))
+    if ok:
+        print("\n推送：成功（%s）" % why)
+        return 1 if bad else 0
+
+    # 发不出去就把结论存下来。丢在地上的告警等于没有告警，还会让人误以为
+    # 「没消息=没事」——2026-11-03 那三次断网告警就是这么消失的。
+    pending = enqueue(report)
+    print("\n推送：失败（%s）→ 已入队，待下轮补发（队列 %d 条）" % (why, pending))
     return 1 if bad else 0
 
 

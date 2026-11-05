@@ -1,7 +1,18 @@
-/* 皇位厅全部逻辑：单页三区（在位/供给/候选）+ 日志设备双抽屉 + 五个用户动作。
+/* 皇位厅全部逻辑：主页（在位/供给/候选/日志/设备）+ 订阅页（维护者/本子）。
+   两个页面共用这一份脚本，按「页面上有没有对应元素」决定拉什么、渲染什么。
    零依赖。API 契约见 web/httpapi.go；mock 形状见 docs/ui-demo/index.html。 */
 (() => {
   const $ = (id) => document.getElementById(id);
+  // 本脚本同时服务主页与 /subscription。有些元素只在其中一页存在，
+  // 直接取属性会抛 TypeError 把整份脚本带崩——所有按页可选的东西都先问它。
+  const has = (id) => !!$(id);
+  // 页面身份：主页有在位表（throneRows），订阅页有本子表（subEntryBody）。
+  // 用元素存在与否判断，而不是看 location.pathname——同一份脚本被两页共用，
+  // 路由前缀以后怎么改都不影响这里。
+  const HOME_PAGE = has("throneRows");
+  const SUB_PAGE = has("subEntryBody");
+  // 按页可选的事件绑定。元素不在这一页上就静默跳过，别让一个 null 把整份脚本带崩。
+  const on = (id, evt, fn) => { const el = $(id); if (el) el.addEventListener(evt, fn); };
   let toastTimer;
   const toast = (msg) => {
     const t = $("toast");
@@ -94,9 +105,11 @@
       const st = await api("/api/status");
       if (!isCurrentPoll("status", version)) return;
       const running = !!st.cfnat?.running;
-      $("cfnatDot").className = `st ${running ? "ok" : "idle"}`;
-      $("cfnatDot").textContent = running ? "●" : "◌";
-      $("cfnatState").textContent = running ? "转发运行中" : "转发已停止";
+      if (has("cfnatDot")) {
+        $("cfnatDot").className = `st ${running ? "ok" : "idle"}`;
+        $("cfnatDot").textContent = running ? "●" : "◌";
+        $("cfnatState").textContent = running ? "转发运行中" : "转发已停止";
+      }
       if (st.sources && typeof st.sources === "object") {
         sourceHealth = st.sources;
         renderHealth();
@@ -254,6 +267,7 @@
   }
 
   function renderThrone() {
+    if (!HOME_PAGE) return;   // 订阅页没有在位表，不必渲染
     const active = poolSnapshot?.active || {};
     const ips = active.ips || [];
     const domains = active.domains || [];
@@ -588,7 +602,7 @@
     if (!body) return;
     const sources = snap?.sources || [];
     body.replaceChildren();
-    $("lanHead").textContent = `陆 · 设备名册 · ${sources.length} 台`;
+    if (has("lanHead")) $("lanHead").textContent = `陆 · 设备名册 · ${sources.length} 台`;
     if (!sources.length) {
       const tr = document.createElement("tr");
       const td = document.createElement("td");
@@ -840,6 +854,15 @@
     setNum("subTallyPass", sum.pass ?? 0);
     setNum("subTallyFail", sum.fail ?? 0);
 
+    // 订阅页顶栏状态灯：有异常变空心，正常实心。用「最近一次采集/考试是不是
+    // 报错」判断，而不是看有没有数据——本子非空但采集全挂也是一种故障。
+    if (has("subDot")) {
+      const broken = !!(sum.lastHarvestErr || sum.lastProbeErr);
+      $("subDot").className = `st ${broken ? "idle" : "ok"}`;
+      $("subDot").textContent = broken ? "◌" : "●";
+      $("subStateLine").textContent = broken ? "有异常" : `本子 ${sum.total ?? 0} 条`;
+    }
+
     const line = $("subTimeline");
     if (line) {
       const parts = [];
@@ -1036,8 +1059,7 @@
       const total = subSummary.total ?? 0;
       const shown = subEntries.length;
       foot.textContent = `显示 ${shown} / ${total} 条` +
-        (total > shown ? "（只显示前 300 条，用上方筛选缩小范围）" : "") +
-        "。收与考是两件事：先全部收进来记账，再按预算慢慢考。";
+        (total > shown ? "（只显示前 300 条，用上方筛选缩小范围）" : "");
     }
   }
 
@@ -1100,30 +1122,33 @@
     if ($("logFollow").checked) box.scrollTop = box.scrollHeight;
   }
 
-  /* ---------- 装配 ---------- */
-  $("optimizeBtn").addEventListener("click", optimize);
-  $("supplyBtn").addEventListener("click", supply);
-  $("endorseBtn").addEventListener("click", endorse);
-  $("supplyInput").addEventListener("input", updateSupplyHint);
-  $("benchRefresh").addEventListener("click", pullPool);
-  $("logToggle").addEventListener("click", () => { $("drawerLog").hidden = !$("drawerLog").hidden; if (!$("drawerLog").hidden) pullLogs(); });
-  $("throneAll").addEventListener("change", () => {
-    const on = $("throneAll").checked;
-    for (const b of document.querySelectorAll(".memchk")) b.checked = on;
-    commitSelection(on ? "已全选参与转发" : "已全部取消勾选");
+  /* ---------- 装配 ----------
+     两页共用这份脚本，各自只绑定本页存在的元素。
+     以前这里全是裸 $("x").addEventListener(...)：订阅区一拆出去，
+     主页就会在某个 null 上抛 TypeError，整份脚本连时钟都不再走。 */
+  on("optimizeBtn", "click", optimize);
+  on("supplyBtn", "click", supply);
+  on("endorseBtn", "click", endorse);
+  on("supplyInput", "input", updateSupplyHint);
+  on("benchRefresh", "click", pullPool);
+  on("logToggle", "click", () => { $("drawerLog").hidden = !$("drawerLog").hidden; if (!$("drawerLog").hidden) pullLogs(); });
+  on("throneAll", "change", () => {
+    const all = $("throneAll").checked;
+    for (const b of document.querySelectorAll(".memchk")) b.checked = all;
+    commitSelection(all ? "已全选参与转发" : "已全部取消勾选");
   });
-  $("throneLock").addEventListener("change", () =>
+  on("throneLock", "change", () =>
     commitSelection($("throneLock").checked ? "锁位已开：只转扶持登基的" : "锁位已关：已勾成员恢复轮转"));
-  $("logTarget").addEventListener("change", pullLogs);
-  $("logQuery").addEventListener("input", renderLogs);
-  $("subAddBtn").addEventListener("click", subAddMaintainers);
-  $("subAddInput").addEventListener("keydown", (e) => {
+  on("logTarget", "change", pullLogs);
+  on("logQuery", "input", renderLogs);
+  on("subAddBtn", "click", subAddMaintainers);
+  on("subAddInput", "keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); subAddMaintainers(); }
   });
-  $("subHarvestBtn").addEventListener("click", (e) => subTrigger("harvest", e.currentTarget));
-  $("subProbeBtn").addEventListener("click", (e) => subTrigger("probe", e.currentTarget));
-  $("subRefreshBtn").addEventListener("click", () => pullSubscriptions(true));
-  $("subFilter").addEventListener("click", (e) => {
+  on("subHarvestBtn", "click", (e) => subTrigger("harvest", e.currentTarget));
+  on("subProbeBtn", "click", (e) => subTrigger("probe", e.currentTarget));
+  on("subRefreshBtn", "click", () => pullSubscriptions(true));
+  on("subFilter", "click", (e) => {
     const btn = e.target.closest("button[data-state]");
     if (!btn) return;
     subState = btn.dataset.state;
@@ -1133,7 +1158,7 @@
     invalidatePoll("subs");
     pullSubscriptions();
   });
-  $("logCopy").addEventListener("click", async () => {
+  on("logCopy", "click", async () => {
     try {
       await navigator.clipboard.writeText(logLines.join("\n"));
       toast("日志已复制");
@@ -1146,21 +1171,29 @@
   function tick() {
     const d = new Date();
     const t = [d.getHours(), d.getMinutes(), d.getSeconds()].map((x) => String(x).padStart(2, "0")).join(":");
-    $("clock").textContent = t;
-    $("footClock").textContent = d.toLocaleDateString();
+    if (has("clock")) $("clock").textContent = t;
+    if (has("footClock")) $("footClock").textContent = d.toLocaleDateString();
   }
 
   async function boot() {
-    updateSupplyHint();
     tick();
     setInterval(tick, 1000);
+    if (SUB_PAGE) {
+      // 订阅页：只拉订阅相关数据。不碰 cfnat 连接表、不外呼下游池——那些
+      // 数据在这页上用不上，15 秒一次的轮询里白拉一遍纯属浪费。
+      await pullSubscriptions(true);
+      setInterval(() => pullSubscriptions(false), 15000);
+      return;
+    }
+    updateSupplyHint();
     await pullConfig();
-    await Promise.allSettled([pullStatus(), pullPool(), pullUpstreams(), pullLan(), pullSubscriptions(true)]);
+    // 主页不再轮询订阅本子：订阅区已迁到 /subscription，主页拉它纯属白跑一趟
+    // （每次都是全量条目 JSON）。订阅页自己会在下面那条分支里拉。
+    await Promise.allSettled([pullStatus(), pullPool(), pullUpstreams(), pullLan()]);
     setInterval(pullStatus, 3000);
     setInterval(pullUpstreams, 4000);
     setInterval(pullPool, 9000);
     setInterval(pullLan, 12000);
-    setInterval(() => pullSubscriptions(false), 15000);
     setInterval(() => { if (!$("drawerLog").hidden) pullLogs(); }, 5000);
   }
   boot();

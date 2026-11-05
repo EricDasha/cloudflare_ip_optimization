@@ -25,7 +25,13 @@ func staticHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/", "/cfnat", "/pool", "/cfdata", "/files":
+			// 主控台。订阅区已迁出成独立页，这里不再渲染它。
 			http.ServeFileFS(w, r, sub, "index.html")
+			return
+		case "/subscription", "/subscription/":
+			// 订阅本子独立页。与主页共用同一份 app.js：脚本按「页面上有哪个
+			// 元素」决定渲染哪块，所以两个页面各自只拉自己需要的数据。
+			http.ServeFileFS(w, r, sub, "subscription.html")
 			return
 		default:
 			fileServer.ServeHTTP(w, r)
