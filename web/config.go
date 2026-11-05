@@ -171,6 +171,20 @@ func subscriptionRefreshMinutes() time.Duration {
 	return time.Duration(minutes) * time.Minute
 }
 
+// subscriptionProbeInterval 是「考」的节奏，与「收」分开。
+//
+// 拆开的意义：收的节奏由维护者上游决定（六小时一轮足够），而考的节奏只受
+// 本机预算约束。合成一个周期，就等于让采集速度去迁就考试速度——旧实现正是
+// 这样，收得再多也只能考那么点，剩下的连记录都不留。
+// 默认 10 分钟一批，每批从本子里挑新/过期的候选。
+func subscriptionProbeInterval() time.Duration {
+	minutes := envInt("PROXY_SUBSCRIPTION_PROBE_MINUTES", 10)
+	if minutes < 1 || minutes > 24*60 {
+		minutes = 10
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
 func subscriptionMaxHosts() int {
 	return maxSubscriptionHostnames
 }

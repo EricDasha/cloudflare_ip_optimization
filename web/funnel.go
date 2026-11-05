@@ -201,7 +201,9 @@ func spreadBySegment(ips []string, poolSize int) []string {
 		}
 		seg := segmentOf(net.ParseIP(ip))
 		if seg == "" {
-			seg = "\x00non-cf" // 非 CF 地址单独成组，不与其他段混算
+			// 只有非公网/非法地址会走到这里——它们本就进不了池，此处兜底防止
+			// 空串把不同来源的无效条目混成一组。
+			seg = "\x00invalid"
 		}
 		if _, ok := groups[seg]; !ok {
 			order = append(order, seg)

@@ -76,17 +76,36 @@ services:
       PROXY_SCHEDULER_APPLY: "true"
       # CFdata 供给层：启动即后台自扫一次，此后每 6 小时一轮（CFDATA_AUTO_SCAN
       # 默认开启，置 false 退回纯手动 /api/cfdata/run）。结果写 result.csv，
-      # 经 CF 段闸后汇入候选池（第二大供给层）。
-      # 日常 IP 供给另有订阅慢扫：PROXY_SUBSCRIPTION_*。
+      # 只要求公网 IPv4，直接汇入候选池（第二大供给层；2026-11-05 起不再过
+      # CF 官方段闸，见 README「官方段降级为标签」）。
+      # 日常 IP 供给另有订阅采集/考试：PROXY_SUBSCRIPTION_*。
       # 订阅日常慢入池：维护者域名清单 + 转换器基地址 + token（token 从 .env 注入）。
+      # 这里的 MAINTAINERS 只是「首次启动的种子」：之后维护者清单以页面上编辑的
+      # data/proxy-subscriptions.json 为准，改这里不会覆盖页面上的增删。
       PROXY_SUBSCRIPTION_CONVERTER: "https://vlesdy.trojanjd.dpdns.org/sub"
       PROXY_SUBSCRIPTION_MAINTAINERS: "owo.o00o.ooo,cm.soso.edu.kg,zrf.zrf.me,sub.keaeye.icu,sub.mot.cloudns.biz,sub.mia.xx.kg,sub.lzjbaby.com,sub.xdu.qzz.io"
       PROXY_SUBSCRIPTION_TOKEN: "${PROXY_SUBSCRIPTION_TOKEN:-}"
       PROXY_SUBSCRIPTION_REFRESH_ENABLED: "true"
+      # 收与考分开两条节奏：
+      #   收（harvest）= 拉订阅、提取、记账。跟着维护者上游走，6 小时一轮足够。
+      #   考（probe）  = 从本子里挑候选做真实考试。只受本机预算约束，跑得勤。
+      # 旧实现把两者绑成一个周期，于是采集量被考试预算卡死：收得再多也只能考
+      # 那么点，剩下的当场丢弃且不留记录。拆开后本子里有全量候选可查可复盘。
       PROXY_SUBSCRIPTION_REFRESH_MINUTES: "360"
+      PROXY_SUBSCRIPTION_PROBE_MINUTES: "10"
+      PROXY_SUBSCRIPTION_PROBE_BATCH: "400"
+      PROXY_SUBSCRIPTION_RECHECK_MINUTES: "360"
+      PROXY_SUBSCRIPTION_RETRY_MINUTES: "120"
       PROXY_SUBSCRIPTION_PER_MAINTAINER: "30"
       PROXY_SUBSCRIPTION_FETCH_TIMEOUT: "45"
+      # WS 101 粗筛的时间预算（便宜，并发 4）。这一层只剔「门都敲不开」的。
       PROXY_SUBSCRIPTION_VERIFY_TIMEOUT: "240"
+      # sing-box 真实数据面（贵，每条约 12 秒，并发 2）。这才是裁判。
+      # 模板未配置时自动降级为「仅握手级结论」，并在页面异常栏写明原因。
+      PROXY_SUBSCRIPTION_VLESS_TIMEOUT: "12"
+      PROXY_SUBSCRIPTION_VLESS_MAX: "120"
+      PROXY_SUBSCRIPTION_VLESS_CONCURRENCY: "2"
+      PROXY_SUBSCRIPTION_VLESS_BUDGET: "900"
       # 换池防抖：自动换池全局冷却 +生效池健康窗口。
       PROXY_POOL_SWITCH_COOLDOWN_MINUTES: "30"
       PROXY_ACTIVE_HEALTH_WINDOW_MINUTES: "60"

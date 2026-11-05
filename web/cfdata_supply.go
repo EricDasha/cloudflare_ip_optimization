@@ -108,7 +108,9 @@ func (a *app) cfdataCandidateIPs(limit int) ([]string, error) {
 			break
 		}
 		ip := net.ParseIP(row.IP)
-		if !isCloudflareIPv4(ip) {
+		// 只要求公网 IPv4：cfdata 是本机亲手测的延迟与丢包，比任何地址表都准，
+		// 不需要再用官方段二次过滤（2026-11-05 实测：非官方段反代同样可用）。
+		if !isPublicIPv4(ip) {
 			continue
 		}
 		key := ip.To4().String()

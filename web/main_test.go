@@ -336,16 +336,6 @@ func TestSubscriptionMaintainersDefaultList(t *testing.T) {
 	}
 }
 
-func TestInterleaveByMaintainerIsRoundRobin(t *testing.T) {
-	ips := []string{"a1", "a2", "a3", "b1"}
-	sources := map[string]string{"a1": "A", "a2": "A", "a3": "A", "b1": "B"}
-	got := interleaveByMaintainer(ips, sources)
-	want := []string{"a1", "b1", "a2", "a3"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("interleaveByMaintainer() = %v, want %v", got, want)
-	}
-}
-
 func TestEnabledPreferredDomainsDefaultsToAllImported(t *testing.T) {
 	a := &app{dataDir: t.TempDir()}
 	a.loadPreferredSettings()

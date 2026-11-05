@@ -69,13 +69,15 @@ type app struct {
 	optimizerCursor    int
 	optimizerLastRun   time.Time
 	optimizerLastError string
-	subMu              sync.RWMutex
-	subSweepMu         sync.Mutex
-	subIPs             []string
-	subSources         map[string]string
-	subLastRun         time.Time
-	subLastError       string
-	subLastCount       int
+	// 订阅器状态：「收」与「考」是两条独立管线，各自一把锁、各自一套时间戳，
+	// 免得一个卡住时看不出卡在哪一段；配置另用一把锁，改配置不该等考试。
+	subMu        sync.RWMutex
+	subInv       subscriptionInventory
+	subHarvestMu sync.Mutex
+	subProbeMu   sync.Mutex
+	subCfgMu     sync.Mutex
+	subSettings  subscriptionSettings
+	subSweepMu   sync.Mutex
 	quality            *qualitySchedulerRuntime
 	preferredMu        sync.Mutex
 	preferredProbeMu   sync.Mutex
@@ -114,7 +116,6 @@ func main() {
 		cfdata:           newManagedProcess("cfdata", env("CFDATA_BIN", "/usr/local/bin/cfdata")),
 		optimizerEnabled: envBool("PROXY_BACKGROUND_OPTIMIZER", true),
 		activeHealth:     make(map[string]*activeHealthStat),
-		subSources:       make(map[string]string),
 		sourceHealth:     make(map[string]*sourceHealthStat),
 		throneProbe:      make(map[string]*throneProbeStat),
 		domainLatency:    make(map[string]domainLatency),
@@ -124,7 +125,8 @@ func main() {
 	a.loadProxyActivePool()
 	a.loadOptimizerSettings()
 	a.loadPreferredSettings()
-	a.loadSubscriptionPool()
+	a.loadSubscriptionSettings()
+	a.loadSubscriptionInventory()
 	a.loadDomainQuality()
 	a.seedPoolGuardFromActive()
 	a.quality = newQualitySchedulerRuntime(a.dataDir)
@@ -165,6 +167,8 @@ func main() {
 	mux.HandleFunc("/api/cfnat/proxy-scan/apply", a.handleProxyScanApply)
 	mux.HandleFunc("/api/cfnat/preferred", a.handlePreferredDomains)
 	mux.HandleFunc("/api/subscriptions/refresh", a.handleSubscriptionRefresh)
+	mux.HandleFunc("/api/subscriptions/settings", a.handleSubscriptionSettings)
+	mux.HandleFunc("/api/subscriptions/inventory", a.handleSubscriptionInventory)
 	mux.HandleFunc("/api/cfdata/run", a.handleCFdataRun)
 	mux.HandleFunc("/api/cfdata/stop", a.handleCFdataStop)
 	mux.HandleFunc("/api/cfdata/results", a.handleCFdataResults)
@@ -481,7 +485,7 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 		log.Printf("scheduler rescue lane open: %s -> %s", decision.FromIP, decision.ToIP)
 	}
 	if admitted, _ := filterPoolAdmissibleIPs([]string{decision.ToIP}); len(admitted) == 0 {
-		log.Printf("scheduler pool switch skipped: target %s fails pool gate (not a public CF edge IPv4)", decision.ToIP)
+		log.Printf("scheduler pool switch skipped: target %s fails pool gate (not a public IPv4)", decision.ToIP)
 		return
 	}
 	if containsString(current.IPs, decision.ToIP) {
@@ -538,19 +542,40 @@ func (a *app) cfnatStartupConfig() cfnatConfig {
 	return cfg
 }
 
-// runSubscriptionSweepLoop 日常订阅慢扫：按维护者逐个拉取订阅内容，
-// 提取明文 IP 与节点域名解析出的 IP，低成本 WS 验活后丢入订阅池慢慢候选。
+// runSubscriptionSweepLoop 订阅器后台循环。
+//
+// 「收」和「考」拆成两条独立节奏：收按 6 小时一轮（跟随维护者上游的刷新频率），
+// 考跑得更勤（默认 10 分钟一批），只从本子里挑还没考过或已经过期的。
+// 旧实现把两者绑在一起，于是采集量被考试预算卡死——收得再多也只能考那么点，
+// 剩下的当场丢弃。
 func (a *app) runSubscriptionSweepLoop() {
 	initial := time.NewTimer(60 * time.Second)
 	defer initial.Stop()
 	<-initial.C
+	harvestTimer := time.NewTimer(0)
+	probeTimer := time.NewTimer(0)
+	defer harvestTimer.Stop()
+	defer probeTimer.Stop()
 	for {
-		if subscriptionRefreshEnabled() {
-			a.sweepSubscriptions(context.Background())
+		select {
+		case <-harvestTimer.C:
+			if subscriptionRefreshEnabled() {
+				if _, err := a.harvestSubscriptions(context.Background()); err != nil {
+					log.Printf("subscription harvest failed: %v", err)
+				}
+			}
+			harvestTimer.Reset(subscriptionRefreshMinutes())
+		case <-probeTimer.C:
+			if subscriptionRefreshEnabled() {
+				if passed, err := a.probeSubscriptions(context.Background()); err != nil {
+					log.Printf("subscription probe skipped: %v", err)
+				} else if passed > 0 {
+					// 有新通过才有必要重建聚合快照；空手而归不惊动下游。
+					go a.refreshAndApplyProxyPool(context.Background())
+				}
+			}
+			probeTimer.Reset(subscriptionProbeInterval())
 		}
-		ticker := time.NewTimer(subscriptionRefreshMinutes())
-		<-ticker.C
-		ticker.Stop()
 	}
 }
 

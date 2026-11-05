@@ -23,19 +23,23 @@ func writeCFdataResult(t *testing.T, body string) *app {
 	return &app{dataDir: dir}
 }
 
-func TestCFdataCandidateIPsFiltersNonCloudflare(t *testing.T) {
-	a := writeCFdataResult(t, cfdataSampleResult)
+// cfdata 是本机亲手测的延迟与丢包，比任何地址表都准——官方段外的公网地址
+// 照样放行（2026-11-05 起官方段降级为标签；线上实测非官方段反代同样在转发）。
+// 私网与非 IPv4 仍然必须挡住。
+func TestCFdataCandidateIPsKeepsAllPublicIPv4(t *testing.T) {
+	body := cfdataSampleResult + "192.168.1.50,1,2,1.5,0\nnot-an-ip,1,2,1.5,0\n"
+	a := writeCFdataResult(t, body)
 	got, err := a.cfdataCandidateIPs(10)
 	if err != nil {
 		t.Fatalf("cfdataCandidateIPs: %v", err)
 	}
 	for _, ip := range got {
-		if ip == "47.245.131.215" {
-			t.Fatal("non-Cloudflare VPS leaked into cfdata candidates")
+		if ip == "192.168.1.50" || ip == "not-an-ip" {
+			t.Fatalf("non-public address leaked into cfdata candidates: %v", got)
 		}
 	}
-	if len(got) != 4 {
-		t.Fatalf("got %d IPs (%v), want 4 Cloudflare IPs", len(got), got)
+	if len(got) != 5 {
+		t.Fatalf("got %d IPs (%v), want 5 public IPv4", len(got), got)
 	}
 }
 
@@ -54,9 +58,11 @@ func TestCFdataCandidateIPsZeroLossFirst(t *testing.T) {
 			t.Fatalf("lossy IP ranked inside top 2: %v", got)
 		}
 	}
-	// 零丢包组内按延迟升序：104.16.0.9(55ms) 先于 172.64.229.135(72ms)。
-	if got[0] != "104.16.0.9" || got[1] != "172.64.229.135" {
-		t.Fatalf("got %v, want [104.16.0.9 172.64.229.135]", got)
+	// 零丢包组内按延迟升序：47.245.131.215(15ms) < 104.16.0.9(55ms) < 172.64.229.135(72ms)。
+	// 47.245 不是官方段地址，但它是这台机器实测最快、零丢包的一条——本机实测
+	// 高于地址表归属，这正是 cfdata 层排在 subscription/bestcf 之前的原因。
+	if got[0] != "47.245.131.215" || got[1] != "104.16.0.9" {
+		t.Fatalf("got %v, want [47.245.131.215 104.16.0.9]", got)
 	}
 }
 

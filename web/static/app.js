@@ -588,7 +588,7 @@
     if (!body) return;
     const sources = snap?.sources || [];
     body.replaceChildren();
-    $("lanHead").textContent = `伍 · 设备名册 · ${sources.length} 台`;
+    $("lanHead").textContent = `陆 · 设备名册 · ${sources.length} 台`;
     if (!sources.length) {
       const tr = document.createElement("tr");
       const td = document.createElement("td");
@@ -790,6 +790,297 @@
     }
   }
 
+  /* ---------- 订阅区（肆） ----------
+     这一块与上面的「候选」不是一回事：上面是已经考过、可供建池的名单；
+     这里是本子——所有被维护者供出来的地址都在，考没考过、考成什么样，
+     分开记。分开的理由很实际：合成一个数就看不出「收不进来」和
+     「收进来了但考不过」的区别，而这两种故障的处理办法完全不同。 */
+  let subSettings = { maintainers: [], converter: "", tokenSet: false };
+  let subSummary = {};
+  let subEntries = [];
+  let subState = "all";
+  let subHistory = {};       // 维护者 -> 最近拉取记录，单独取、单独缓存
+  let subLastFetch = {};     // 维护者 -> 最近一条
+
+  // 拉取历史与候选列表分开取：历史按维护者存，与当前筛选无关，体积也大得多，
+  // 没必要跟着 15 秒轮询每回都拉。只在开机、手动刷新、改配置、触发采集后取一次。
+  async function pullSubscriptions(withHistory = false) {
+    const version = beginPoll("subs");
+    try {
+      const [settings, inv] = await Promise.all([
+        withHistory ? api("/api/subscriptions/settings") : Promise.resolve(null),
+        api(`/api/subscriptions/inventory?state=${encodeURIComponent(subState)}&limit=300${withHistory ? "&history=1" : ""}`),
+      ]);
+      if (!isCurrentPoll("subs", version)) return;
+      if (settings?.settings) subSettings = settings.settings;
+      subSummary = inv.summary || {};
+      subEntries = Array.isArray(inv.entries) ? inv.entries : [];
+      if (withHistory) {
+        subHistory = subSummary.fetchHistory || {};
+        subLastFetch = subSummary.lastFetch || {};
+      }
+      renderSubscriptions();
+    } catch (_) { /* 心跳容错 */ }
+  }
+
+  const SUB_STATE_LABEL = { pass: "能用", pending: "还没考", fail: "判死" };
+  const subStateChip = (state) => {
+    const s = state || "pending";
+    const chip = document.createElement("span");
+    chip.className = `state-chip ${s}`;
+    chip.textContent = SUB_STATE_LABEL[s] || s;
+    return chip;
+  };
+
+  function renderSubscriptions() {
+    const sum = subSummary || {};
+    const setNum = (id, v) => { const el = $(id); if (el) el.textContent = v == null ? "–" : String(v); };
+    setNum("subTallyTotal", sum.total ?? 0);
+    setNum("subTallyPending", sum.pending ?? 0);
+    setNum("subTallyPass", sum.pass ?? 0);
+    setNum("subTallyFail", sum.fail ?? 0);
+
+    const line = $("subTimeline");
+    if (line) {
+      const parts = [];
+      parts.push(`最近采集 ${fmtAgo(sum.lastHarvestAt)}${sum.lastHarvested != null ? ` · 收到 ${sum.lastHarvested} 个` : ""}`);
+      parts.push(`最近考试 ${fmtAgo(sum.lastProbeAt)}${sum.lastProbed != null ? ` · 考了 ${sum.lastProbed} 个、过 ${sum.lastPassed ?? 0} 个` : ""}`);
+      if (subSettings.converter) parts.push(`转换器 ${subSettings.converter.replace(/^https:\/\//, "")}`);
+      if (!subSettings.tokenSet) parts.push("token 未配置");
+      line.textContent = parts.join(" ｜ ");
+    }
+
+    const flag = $("subErrorFlag");
+    if (flag) {
+      const errs = [];
+      if (sum.lastHarvestErr) errs.push(`采集：${sum.lastHarvestErr}`);
+      if (sum.lastProbeErr) errs.push(`考试：${sum.lastProbeErr}`);
+      if (!subSettings.tokenSet) errs.push("订阅 token 未配置，收与考都不会跑");
+      if (errs.length) {
+        flag.hidden = false;
+        flag.innerHTML = `<b>订阅区有异常</b>：${errs.join(" ｜ ")}`;
+      } else {
+        flag.hidden = true;
+        flag.textContent = "";
+      }
+    }
+
+    renderSubMaintainers();
+    renderSubEntries();
+  }
+
+  /* 维护者表：一行一个，带启用开关、最近一次拉取成绩与删除。
+     拉取记录来自后端本子，不是前端推算——页面刷新后仍然在。 */
+  function renderSubMaintainers() {
+    const body = $("subMaintainerBody");
+    if (!body) return;
+    const list = Array.isArray(subSettings.maintainers) ? subSettings.maintainers : [];
+    const cnt = $("subMaintainerCount");
+    if (cnt) cnt.textContent = String(list.length);
+    body.replaceChildren();
+    if (!list.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 6;
+      td.className = "inline-status";
+      td.textContent = "还没有维护者。加一个域名就能开始收。";
+      tr.append(td);
+      body.append(tr);
+      return;
+    }
+    const lastFetch = subLastFetch || {};
+    const history = subHistory || {};
+    const frag = document.createDocumentFragment();
+    for (const item of list) {
+      const host = item.host || "";
+      const enabled = item.enabled !== false;
+      const rec = lastFetch[host];
+      const hist = Array.isArray(history[host]) ? history[host] : [];
+      const tr = document.createElement("tr");
+      if (!enabled) tr.className = "off";
+
+      tr.append(Object.assign(document.createElement("td"), { className: "mono", textContent: host }));
+
+      const stTd = document.createElement("td");
+      stTd.append(Object.assign(document.createElement("span"), {
+        className: `st ${enabled ? "ok" : "idle"}`,
+        textContent: enabled ? "● 启用" : "◌ 停用",
+      }));
+      tr.append(stTd);
+
+      let when = "–";
+      let got = "–";
+      let note = "";
+      if (rec) {
+        when = fmtAgo(rec.at);
+        if (rec.ok) {
+          got = String(rec.extracted ?? 0);
+          if (rec.durationMs) note = `用时 ${(rec.durationMs / 1000).toFixed(1)}s`;
+        } else {
+          got = "0";
+          note = rec.error || (rec.status ? `HTTP ${rec.status}` : "失败");
+        }
+        // 连续失败时点出来：一个维护者长期拉不到，通常是域名失效了，
+        // 页面要能让人一眼看出该删哪个。
+        const fails = hist.slice(-5).filter((h) => !h.ok).length;
+        if (fails >= 3) note = `近 5 次失败 ${fails} 次` + (note ? " · " + note : "");
+      }
+      tr.append(Object.assign(document.createElement("td"), { className: "mono", textContent: when }));
+      tr.append(Object.assign(document.createElement("td"), { className: "mono", textContent: got }));
+      tr.append(Object.assign(document.createElement("td"), { className: "wrap", textContent: note || "—" }));
+
+      const actTd = document.createElement("td");
+      const acts = document.createElement("div");
+      acts.className = "rowbtn";
+      const toggle = document.createElement("button");
+      toggle.className = "btn mini";
+      toggle.type = "button";
+      toggle.textContent = enabled ? "停用" : "启用";
+      toggle.addEventListener("click", () => subUpdate(enabled ? { disable: [host] } : { enable: [host] },
+        enabled ? `${host} 已停用` : `${host} 已启用`));
+      const del = document.createElement("button");
+      del.className = "btn mini";
+      del.type = "button";
+      del.textContent = "删";
+      del.addEventListener("click", () => {
+        if (!window.confirm(`删除维护者 ${host}？\n只是不再从它拉取；本子里已收的地址保留。`)) return;
+        subUpdate({ remove: [host] }, `${host} 已删除`);
+      });
+      acts.append(toggle, del);
+      actTd.append(acts);
+      tr.append(actTd);
+      frag.append(tr);
+    }
+    body.append(frag);
+  }
+
+  /* 本子表：每条候选一行。成绩列显示考试结论与来源，判死的带删除线。 */
+  function renderSubEntries() {
+    const body = $("subEntryBody");
+    if (!body) return;
+    body.replaceChildren();
+    if (!subEntries.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 6;
+      td.className = "inline-status";
+      td.textContent = subState === "all" ? "本子是空的。点「立即去收」拉一轮。" : "该状态下没有记录。";
+      tr.append(td);
+      body.append(tr);
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    for (const e of subEntries) {
+      const tr = document.createElement("tr");
+      if (e.state === "fail") tr.className = "off";
+
+      const addrTd = document.createElement("td");
+      addrTd.className = "mono";
+      addrTd.textContent = e.ip;
+      if (e.colo) {
+        addrTd.append(Object.assign(document.createElement("span"), {
+          className: "chip mono", textContent: e.colo, style: "margin-left:6px",
+        }));
+      }
+      tr.append(addrTd);
+
+      const stTd = document.createElement("td");
+      stTd.append(subStateChip(e.state));
+      tr.append(stTd);
+
+      const score = [];
+      if (e.state === "pass") {
+        if (e.mbps) score.push(`${Number(e.mbps).toFixed(1)} Mbps`);
+        if (e.latencyMs) score.push(`${e.latencyMs} ms`);
+        if (e.stage) score.push(e.stage === "vless" ? "真实数据面" : "仅握手");
+      } else if (e.state === "fail") {
+        score.push(e.errorClass || e.lastError || "失败");
+        if (e.consecutiveFails) score.push(`连败 ${e.consecutiveFails}`);
+      } else {
+        score.push("等考");
+      }
+      tr.append(Object.assign(document.createElement("td"), { className: "mono", textContent: score.join(" · ") }));
+
+      const srcTd = document.createElement("td");
+      srcTd.className = "wrap";
+      const sources = Array.isArray(e.sources) ? e.sources : [];
+      const via = Array.isArray(e.via) ? e.via : [];
+      srcTd.textContent = (sources.join("、") || "—") + (via.length ? `（经 ${via[0]}）` : "");
+      tr.append(srcTd);
+
+      tr.append(Object.assign(document.createElement("td"), { textContent: e.lastProbe ? fmtAgo(e.lastProbe) : "未考" }));
+
+      const actTd = document.createElement("td");
+      const del = document.createElement("button");
+      del.className = "btn mini";
+      del.type = "button";
+      del.textContent = "删";
+      del.title = "从本子里移除这个地址";
+      del.addEventListener("click", async () => {
+        if (!window.confirm(`从本子里删掉 ${e.ip}？`)) return;
+        try {
+          await api(`/api/subscriptions/inventory?ip=${encodeURIComponent(e.ip)}`, { method: "DELETE" });
+          toast(`${e.ip} 已从本子移除`);
+          await pullSubscriptions();
+        } catch (err) {
+          toast(`删除失败：${err.message}`);
+        }
+      });
+      actTd.append(del);
+      tr.append(actTd);
+      frag.append(tr);
+    }
+    body.append(frag);
+    const foot = $("subEntryFoot");
+    if (foot) {
+      const total = subSummary.total ?? 0;
+      const shown = subEntries.length;
+      foot.textContent = `显示 ${shown} / ${total} 条` +
+        (total > shown ? "（只显示前 300 条，用上方筛选缩小范围）" : "") +
+        "。收与考是两件事：先全部收进来记账，再按预算慢慢考。";
+    }
+  }
+
+  async function subUpdate(body, note) {
+    invalidatePoll("subs");
+    try {
+      const data = await api("/api/subscriptions/settings", { method: "POST", body: JSON.stringify(body) });
+      if (data.settings) subSettings = data.settings;
+      const rejected = Array.isArray(data.rejected) ? data.rejected : [];
+      toast(rejected.length ? `${note}；拒收：${rejected.join("、")}` : note);
+      await pullSubscriptions(true);
+    } catch (e) {
+      toast(`订阅配置未生效：${e.message}`);
+    }
+  }
+
+  async function subAddMaintainers() {
+    const input = $("subAddInput");
+    const raw = input.value.trim();
+    if (!raw) { input.focus(); toast("先填一个维护者域名"); return; }
+    const hosts = raw.split(/[\s,，]+/).filter(Boolean);
+    await subUpdate({ add: hosts }, `已添加 ${hosts.length} 个维护者`);
+    input.value = "";
+  }
+
+  async function subTrigger(stage, button) {
+    button.disabled = true;
+    const prev = button.textContent;
+    button.textContent = "…";
+    try {
+      await api(`/api/subscriptions/refresh?stage=${stage}`, { method: "POST", body: "{}" });
+      toast(stage === "harvest" ? "已开始拉取；完成后点「刷新」看结果" : "已开始考试；一批大约几分钟");
+      // 后台任务不阻塞 HTTP，给一点时间再刷新一次，让人看到进度。
+      setTimeout(() => pullSubscriptions(true), 4000);
+      setTimeout(() => pullSubscriptions(true), 20000);
+    } catch (e) {
+      toast(`触发失败：${e.message}`);
+    } finally {
+      button.disabled = false;
+      button.textContent = prev;
+    }
+  }
+
   /* ---------- 日志抽屉 ---------- */
   async function pullLogs() {
     const version = beginPoll("logs");
@@ -825,6 +1116,23 @@
     commitSelection($("throneLock").checked ? "锁位已开：只转扶持登基的" : "锁位已关：已勾成员恢复轮转"));
   $("logTarget").addEventListener("change", pullLogs);
   $("logQuery").addEventListener("input", renderLogs);
+  $("subAddBtn").addEventListener("click", subAddMaintainers);
+  $("subAddInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); subAddMaintainers(); }
+  });
+  $("subHarvestBtn").addEventListener("click", (e) => subTrigger("harvest", e.currentTarget));
+  $("subProbeBtn").addEventListener("click", (e) => subTrigger("probe", e.currentTarget));
+  $("subRefreshBtn").addEventListener("click", () => pullSubscriptions(true));
+  $("subFilter").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-state]");
+    if (!btn) return;
+    subState = btn.dataset.state;
+    for (const b of $("subFilter").querySelectorAll("button[data-state]")) {
+      b.classList.toggle("on", b === btn);
+    }
+    invalidatePoll("subs");
+    pullSubscriptions();
+  });
   $("logCopy").addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(logLines.join("\n"));
@@ -847,11 +1155,12 @@
     tick();
     setInterval(tick, 1000);
     await pullConfig();
-    await Promise.allSettled([pullStatus(), pullPool(), pullUpstreams(), pullLan()]);
+    await Promise.allSettled([pullStatus(), pullPool(), pullUpstreams(), pullLan(), pullSubscriptions(true)]);
     setInterval(pullStatus, 3000);
     setInterval(pullUpstreams, 4000);
     setInterval(pullPool, 9000);
     setInterval(pullLan, 12000);
+    setInterval(() => pullSubscriptions(false), 15000);
     setInterval(() => { if (!$("drawerLog").hidden) pullLogs(); }, 5000);
   }
   boot();

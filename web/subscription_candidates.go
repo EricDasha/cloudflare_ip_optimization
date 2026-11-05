@@ -118,6 +118,37 @@ func resolveSubscriptionHostnames(parent context.Context, hosts []string, remain
 	if len(hosts) > maxSubscriptionHostnames {
 		hosts = hosts[:maxSubscriptionHostnames]
 	}
+	byIndex := resolveSubscriptionHostnameMap(parent, hosts)
+
+	seen := make(map[string]struct{})
+	result := make([]string, 0, remaining)
+	for _, ips := range byIndex {
+		for _, ip := range ips {
+			if _, ok := seen[ip]; ok {
+				continue
+			}
+			seen[ip] = struct{}{}
+			result = append(result, ip)
+			if len(result) >= remaining {
+				return result
+			}
+		}
+	}
+	return result
+}
+
+// resolveSubscriptionHostnameMap 按主机名解析，返回 主机名序号 -> 该主机名的公网 IPv4。
+//
+// 与 resolveSubscriptionHostnames 拆开，是因为溯源需要「哪个主机名解析到了哪个 IP」。
+// 旧实现把平坦结果再按「每个主机名配全部 IP」去回填，于是同一维护者的多个域名
+// 全都记成第一个域名——排障时看到的来源是错的，比没有来源更糟。
+func resolveSubscriptionHostnameMap(parent context.Context, hosts []string) [][]string {
+	if len(hosts) == 0 {
+		return nil
+	}
+	if len(hosts) > maxSubscriptionHostnames {
+		hosts = hosts[:maxSubscriptionHostnames]
+	}
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
 
@@ -130,7 +161,7 @@ func resolveSubscriptionHostnames(parent context.Context, hosts []string, remain
 	var wg sync.WaitGroup
 	for index, host := range hosts {
 		wg.Add(1)
-		go func() {
+		go func(index int, host string) {
 			defer wg.Done()
 			select {
 			case sem <- struct{}{}:
@@ -149,7 +180,7 @@ func resolveSubscriptionHostnames(parent context.Context, hosts []string, remain
 				}
 			}
 			answers <- answer{index: index, ips: ips}
-		}()
+		}(index, host)
 	}
 	go func() {
 		wg.Wait()
@@ -160,19 +191,5 @@ func resolveSubscriptionHostnames(parent context.Context, hosts []string, remain
 	for item := range answers {
 		byIndex[item.index] = item.ips
 	}
-	seen := make(map[string]struct{})
-	result := make([]string, 0, remaining)
-	for _, ips := range byIndex {
-		for _, ip := range ips {
-			if _, ok := seen[ip]; ok {
-				continue
-			}
-			seen[ip] = struct{}{}
-			result = append(result, ip)
-			if len(result) >= remaining {
-				return result
-			}
-		}
-	}
-	return result
+	return byIndex
 }

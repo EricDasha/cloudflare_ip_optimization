@@ -289,7 +289,7 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 	resolved := make([]string, 0, candidatePoolTotalCap)
 	sourceByIP := make(map[string]string)
 	sourceErrors := []string{}
-	nonCloudflare := 0
+	offEdgeCount := 0
 	// appendGroup 按层配额灌入：quota 是本层最多进入候选池的数量，
 	// 总池上限 candidatePoolTotalCap 兜底。优先级仍由「先灌者先得」实现
 	// （同 IP 先到先得，见 sourceByIP 认领），配额保证单层吃不光全池。
@@ -306,13 +306,17 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 			if !isPublicIPv4(ip) {
 				continue
 			}
-			// CF 段闸：入口 IP 必须是 Cloudflare 边缘。source 里混进来的
-			// 第三方 VPS（ProxyIP）到此为止，不进候选、不占探针。
-			if !isCloudflareIPv4(ip) {
-				nonCloudflare++
-				continue
-			}
+			// 是否落在 CF 官方段只作为标签，不再作为准入闸。
+			//
+			// 2026-11-05 线上实测推翻了原先的假设：在位池 45 个成员里 30 个
+			// 不在官方 15 段内，它们正在正常转发，延迟与官方段相差不到 30ms
+			// （788 对 813），健康比例也一致。反代 IP 可以是可用的，
+			// 「像不像 Cloudflare 自己的地址」与「能不能把流量送到 Cloudflare」
+			// 并不等价——后者该由真实考试判定，不该由一张会过期的地址表判。
 			key := ip.To4().String()
+			if !isCloudflareIPv4(ip) {
+				offEdgeCount++
+			}
 			if _, ok := sourceByIP[key]; ok {
 				continue
 			}
@@ -367,8 +371,8 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 		}
 		appendGroup("bestcf", bestcf, bestcfQuota)
 	}
-	if nonCloudflare > 0 {
-		sourceErrors = append(sourceErrors, fmt.Sprintf("CF 段闸剔除 %d 个非边缘 IP（ProxyIP 冒充优选）", nonCloudflare))
+	if offEdgeCount > 0 {
+		log.Printf("proxy candidate refresh: %d of %d candidates are outside the official Cloudflare CIDRs (kept; real probe decides)", offEdgeCount, len(resolved))
 	}
 	// bestcf 优选域名表：域名作为一等公民进池，绝不解析成 IP。
 	// 拉取失败只记 error，不影响 IP 候选。
@@ -442,16 +446,23 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 //     同一个 IP 这轮在榜、下轮掉出榜完全是常态。拿供给队列的抖动去否定一个已经
 //     用真实 VLESS 数据面端到端验过的结论，是本末倒置。
 //
-// 真正必须守的不变量只有一条：**进池的必须是公网 IPv4，且必须是 Cloudflare 边缘段**。
-// 这条与候选名单无关，可以就地复验，也正好是刷新时那道段闸的同一把尺子。
-// 复验不过的（例如地址已被上游拉黑、或本是第三方 VPS 冒充）逐个剔除，
-// 剩下的照常采用——不因为一两个地址失效就作废整轮。
+// 真正必须守的不变量只有一条：**进池的必须是公网 IPv4**。
+//
+// 2026-11-05 修正：原先这条还要求「必须属于 Cloudflare 官方段」，线上数据把它
+// 推翻了——在位池 45 个成员里 30 个不在官方 15 段内，正在正常转发，延迟与
+// 官方段相差不到 30ms，健康比例一致。反代 IP 可用但不是官方段，这是常态而非
+// 污染。官方段从「准入闸」降级为「标签」，用于段多样性分组与展示；能不能进池，
+// 由端到端考试说了算。
+//
+// 这条判据与候选名单无关，可以就地复验，不随供给队列的抖动变化。
+// 复验不过的（私网、回环、非法字符串）逐个剔除，剩下的照常采用——
+// 不因为一两个地址失效就作废整轮。
 func filterPoolAdmissibleIPs(passed []string) ([]string, []string) {
 	admitted := make([]string, 0, len(passed))
 	rejected := make([]string, 0)
 	for _, raw := range passed {
 		ip := net.ParseIP(strings.TrimSpace(raw))
-		if !isPublicIPv4(ip) || !isCloudflareIPv4(ip) {
+		if !isPublicIPv4(ip) {
 			rejected = append(rejected, raw)
 			continue
 		}
@@ -817,7 +828,11 @@ func (a *app) resolveProxySources(parent context.Context, sourceIDs []string, re
 		}
 	}
 
-	// round-robin 合流，只收 Cloudflare 边缘段内的地址。
+	// round-robin 合流，只收公网 IPv4。
+	//
+	// 这里原先是「只收 Cloudflare 官方段」，与候选池准入闸是同一把尺子。2026-11-05
+	// 起官方段降级为标签：反代 IP 可以正常转发，能不能用交给端到端考试判。
+	// 保留 isPublicIPv4 是必要的——私网、回环、非法字符串仍然必须挡在门外。
 	ips := make([]string, 0, remaining)
 	seenIP := make(map[string]struct{}, remaining)
 	cursor := make([]int, len(results))
@@ -828,7 +843,7 @@ func (a *app) resolveProxySources(parent context.Context, sourceIDs []string, re
 				raw := results[i][cursor[i]]
 				cursor[i]++
 				ip := net.ParseIP(strings.TrimSpace(raw))
-				if !isCloudflareIPv4(ip) {
+				if !isPublicIPv4(ip) {
 					continue
 				}
 				key := ip.To4().String()

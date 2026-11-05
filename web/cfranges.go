@@ -72,7 +72,8 @@ type segmentFailureStat struct {
 }
 
 // segmentFailureStats 按段汇总一轮探测结果。
-// 非 CF 段（segmentOf 返回空）不进统计——它们本来就不该出现在候选池里。
+// 非公网地址（segmentOf 返回空）不进统计——它们本来就不该出现在候选池里。
+// 官方段外的公网地址按 /16 归组后照常参与，见 segmentOf 的说明。
 func segmentFailureStats(results []proxyScanResult) map[string]segmentFailureStat {
 	out := make(map[string]segmentFailureStat, 4)
 	for _, result := range results {
@@ -139,7 +140,8 @@ func orderPassedBySegmentHealth(passed []string, results []proxyScanResult) []st
 
 // degradedSegmentDiversity 报告一次换人操作是否会让池的段数变少。
 // 池成员顺序就是 cfnat 的尝试顺序，但段数决定的是抗单点能力——两者都要。
-// 非 CF 成员（段为空）不计入，避免测试地址干扰判断。
+// 官方段外的公网成员按 /16 计入（见 segmentOf），非公网地址不计入，
+// 避免测试地址干扰判断。
 func degradedSegmentDiversity(before, after []string) bool {
 	beforeSegs := poolSegmentStats(before)
 	afterSegs := poolSegmentStats(after)
@@ -203,11 +205,22 @@ func isCloudflareIPv4(ip net.IP) bool {
 	return false
 }
 
-// segmentOf 返回 IP 所属的 Cloudflare 官方段标识（如 "104.16.0.0/13"），
-// 非 CF 段返回空串。用于建池时的段多样性配额。
+// segmentOf 返回 IP 所属片区的标识，用于建池时的段多样性配额。
 //
-// 为什么需要它：2026-10-22 事故里转发池只有 1 个 IP、1 个段，该段一挂就全灭。
-// 段多样性是抗单点故障的第一道防线，比"挑延迟最低的 3 个同段 IP"更重要。
+// 官方段内返回官方 CIDR（如 "104.16.0.0/13"）；官方段外的公网地址返回 /16
+// 归组（如 "43.159.0.0/16"）。非公网地址（私网、回环、非法输入）仍返回空串——
+// 它们进不了池，也不该污染段统计。
+//
+// 为什么非官方段必须归组：2026-11-05 起官方段从准入闸降级为标签，非官方段的
+// 反代 IP 可以正常进池（线上实测 45 个成员里 30 个属于此类，转发正常）。但段
+// 多样性的整套逻辑（spreadBySegment / degradedSegmentDiversity / 片区降权）
+// 都靠 segmentOf 分组，若这些地址返回空串就会被排除在计数之外——池里 30 个
+// 成员对防单点保护完全隐形，而所有指标照常显示正常。这类漏洞不会报错，
+// 只会让「一个片区全挂」的风险悄悄回来。
+//
+// /16 是一个刻意的折中：比 /13 细、比 /24 粗。同一家反代商常在一个 /16 内
+// 连续分配地址，用 /16 分组能把它们认作同一片区；再细就会把真正分散的地址
+// 误判成独立片区，反而失去保护意义。
 func segmentOf(ip net.IP) string {
 	if ip == nil {
 		return ""
@@ -221,7 +234,10 @@ func segmentOf(ip net.IP) string {
 			return network.String()
 		}
 	}
-	return ""
+	if !isPublicIPv4(ip) {
+		return ""
+	}
+	return (&net.IPNet{IP: v4.Mask(net.CIDRMask(16, 32)), Mask: net.CIDRMask(16, 32)}).String()
 }
 
 // poolSegmentStats 统计一组 IP 的段分布，返回 段标识 -> 个数。

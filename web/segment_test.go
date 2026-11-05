@@ -69,19 +69,40 @@ func TestSpreadBySegmentEdgeCases(t *testing.T) {
 	}
 }
 
-// 段识别必须命中官方 15 段，且非 CF 地址返回空串。
+// 段识别必须命中官方 15 段；官方段外的公网地址按 /16 归组；
+// 非公网地址（私网、回环）返回空串。
+//
+// 官方段外的公网地址必须归组，不能返回空串：官方段降级为标签之后，反代 IP
+// 也能进池，若它们在这里隐形，段多样性与片区降权就管不到池里的大半成员。
 func TestSegmentOf(t *testing.T) {
 	cases := map[string]string{
 		"104.16.0.1":    "104.16.0.0/13",
 		"172.64.0.1":    "172.64.0.0/13",
 		"162.158.0.1":   "162.158.0.0/15",
 		"108.162.192.1": "108.162.192.0/18",
-		"8.8.8.8":       "",
-		"192.168.1.1":   "",
+		"8.8.8.8":       "8.8.0.0/16",     // 官方段外公网：按 /16 归组
+		"45.32.100.7":   "45.32.0.0/16",   // 生产实测的反代地址
+		"43.159.12.34":  "43.159.0.0/16",
+		"192.168.1.1":   "",               // 私网
+		"127.0.0.1":     "",               // 回环
+		"":              "",
 	}
 	for ip, want := range cases {
 		if got := segmentOf(net.ParseIP(ip)); got != want {
 			t.Fatalf("segmentOf(%s) = %q, want %q", ip, got, want)
 		}
+	}
+}
+
+// 同一 /16 内的非官方段地址必须归为同一片区，否则片区降权会被稀释到失效。
+func TestSegmentOfGroupsNonCloudflareBy16(t *testing.T) {
+	a := segmentOf(net.ParseIP("45.32.100.7"))
+	b := segmentOf(net.ParseIP("45.32.200.9"))
+	if a == "" || a != b {
+		t.Fatalf("同一 /16 内应同组：%q vs %q", a, b)
+	}
+	c := segmentOf(net.ParseIP("45.33.1.1"))
+	if c == a {
+		t.Fatalf("不同 /16 不应同组：%q vs %q", a, c)
 	}
 }

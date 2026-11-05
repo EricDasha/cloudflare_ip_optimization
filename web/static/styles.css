@@ -260,3 +260,26 @@ select, input[type="search"] {
   color: #e8c07a; font-size: 12px; line-height: 1.6;
 }
 .degraded b { color: #f0cd8d; }
+
+/* ── 订阅区 ───────────────────────────────────────────────────────
+   本子里的三档状态用「明暗 + 删除线」区分，不引入新色彩：
+   pass 用亮色、pending 用次级灰、fail 用暗色加删除线。 */
+.sub-tally { gap: var(--s5); }
+.sub-tally .n { font-size: clamp(28px, 4vw, 38px); }
+.sub-filter { display: flex; gap: var(--s1); flex-wrap: wrap; margin: var(--s2) 0 0; }
+.sub-filter .btn.on { background: var(--bright); color: #000; border-color: var(--bright); }
+.state-chip {
+  font-family: var(--font-mono); font-size: 11px; white-space: nowrap;
+  border: 1px solid var(--line-strong); border-radius: var(--radius);
+  padding: 1px 6px; color: var(--text-2);
+}
+.state-chip.pass { color: var(--bright); border-color: var(--bright); }
+.state-chip.fail { color: var(--text-3); text-decoration: line-through; }
+.state-chip.pending { color: var(--text-3); }
+td.wrap { white-space: normal; word-break: break-all; min-width: 120px; color: var(--text-3); font-size: 11px; }
+tr.off td { opacity: .45; }
+input[type="text"] {
+  background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius);
+  padding: 6px 10px; font-size: 12px; font-family: var(--font-mono); width: 100%;
+}
+input[type="text"]::placeholder { color: var(--text-3); }

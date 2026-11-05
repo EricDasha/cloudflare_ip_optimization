@@ -51,14 +51,117 @@ func (a *app) handleProxyCandidates(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleSubscriptionRefresh 手动立即触发一轮订阅拉取（不阻塞 HTTP）。
+// handleSubscriptionRefresh 手动立即触发一轮订阅（不阻塞 HTTP）。
+//
+// 带 ?stage=harvest 只收、?stage=probe 只考、不带则收完再考。
+// 两个阶段分开触发是有意为之：跑排障时经常只想知道「到底收不进来」还是
+// 「收进来了但考不过」，合一个按钮就永远分不清。
 func (a *app) handleSubscriptionRefresh(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
-	go a.sweepSubscriptions(context.Background())
-	writeJSON(w, map[string]any{"ok": true, "started": true})
+	stage := strings.TrimSpace(r.URL.Query().Get("stage"))
+	switch stage {
+	case "harvest":
+		go func() {
+			if _, err := a.harvestSubscriptions(context.Background()); err != nil {
+				log.Printf("subscription harvest failed: %v", err)
+			}
+		}()
+	case "probe":
+		go func() {
+			if _, err := a.probeSubscriptions(context.Background()); err != nil {
+				log.Printf("subscription probe failed: %v", err)
+			}
+		}()
+	default:
+		go a.sweepSubscriptions(context.Background())
+	}
+	writeJSON(w, map[string]any{"ok": true, "started": true, "stage": stage})
+}
+
+// handleSubscriptionSettings 订阅器配置：GET 查看，POST 增删改。
+//
+// 可编辑的理由：维护者清单是会变的东西，钉在 compose 环境变量里等于每次调整
+// 都要走一遍发布流程，而且页面上根本看不见它。
+func (a *app) handleSubscriptionSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]any{
+			"settings": a.subscriptionSettingsSnapshot(),
+			"status":   a.subscriptionStatus(),
+		})
+	case http.MethodPost:
+		r.Body = http.MaxBytesReader(w, r.Body, 256<<10)
+		var body struct {
+			Add       []string `json:"add"`
+			Remove    []string `json:"remove"`
+			Enable    []string `json:"enable"`
+			Disable   []string `json:"disable"`
+			Converter string   `json:"converter"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "无效的请求体", http.StatusBadRequest)
+			return
+		}
+		added, removed, enabled, disabled, rejected, err := a.updateSubscriptionSettings(
+			body.Add, body.Remove, body.Enable, body.Disable, body.Converter)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"ok":       true,
+			"added":    added,
+			"removed":  removed,
+			"enabled":  enabled,
+			"disabled": disabled,
+			"rejected": rejected,
+			"settings": a.subscriptionSettingsSnapshot(),
+		})
+	default:
+		http.Error(w, "GET or POST required", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleSubscriptionInventory 待考本子：GET 分页查看，DELETE 移除单条。
+//
+// 拉取历史只在带 ?history=1 时返回：它按维护者存，与当前筛的候选无关，
+// 而且体积远大于候选本身。页面开一次取一次就够，不必跟着每次轮询走。
+func (a *app) handleSubscriptionInventory(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		state := strings.TrimSpace(r.URL.Query().Get("state"))
+		limit := queryInt(r, "limit", 200)
+		if limit > 2000 {
+			limit = 2000
+		}
+		summary := a.subscriptionInventorySummary()
+		if r.URL.Query().Get("history") == "1" {
+			history, last := a.subscriptionFetchHistory()
+			summary["fetchHistory"] = history
+			summary["lastFetch"] = last
+		}
+		writeJSON(w, map[string]any{
+			"summary": summary,
+			"entries": a.subscriptionInventoryEntries(state, limit),
+		})
+	case http.MethodDelete:
+		ip := strings.TrimSpace(r.URL.Query().Get("ip"))
+		if ip == "" {
+			http.Error(w, "缺少 ip 参数", http.StatusBadRequest)
+			return
+		}
+		removed, ok := a.removeSubscriptionEntry(ip)
+		if !ok {
+			http.Error(w, "本子里没有这条记录", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "removed": removed})
+	default:
+		http.Error(w, "GET or DELETE required", http.StatusMethodNotAllowed)
+	}
 }
 
 func (a *app) handleProxyScan(w http.ResponseWriter, r *http.Request) {
