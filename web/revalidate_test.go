@@ -38,7 +38,7 @@ func newRevalidateFixture(t *testing.T, pool proxyActivePool) *revalidateFixture
 			}
 			return out
 		},
-		checkDomains: func(a *app, ctx context.Context, domains []string) []revalidateMemberResult {
+		checkDomains: func(a *app, ctx context.Context, domains []string, base int) []revalidateMemberResult {
 			out := make([]revalidateMemberResult, 0, len(domains))
 			for _, d := range domains {
 				out = append(out, revalidateMemberResult{Member: d, Kind: "domain", OK: d != "bad.example"})
@@ -257,6 +257,22 @@ func TestRevalidateStatusExposesProgressAndLastReport(t *testing.T) {
 	detail := a.revalidateDetail()
 	if _, ok := detail["last"]; !ok {
 		t.Fatal("detail has no last report to show")
+	}
+}
+
+// 复验判据：偶发类失败值得再试一次，确定类失败不值得。
+// 这条防的是「一次超时就踢掉好成员」——实测一轮 26 个域名掉 3 个，
+// 其中一个上一轮还是 successRate=0.8 的健康成员。
+func TestRevalidateWorthRetry(t *testing.T) {
+	for _, class := range []string{failureTimeout, failureProtocol, failureOther, failureNone} {
+		if !revalidateWorthRetry(class) {
+			t.Fatalf("%q should be worth a retry", class)
+		}
+	}
+	for _, class := range []string{failureRefused, failureUnreachable, failureHandshake} {
+		if revalidateWorthRetry(class) {
+			t.Fatalf("%q is a definite answer, retrying only wastes budget", class)
+		}
 	}
 }
 

@@ -157,7 +157,7 @@ func (a *app) revalidateTargetCount() int {
 // 生产永远用下面这份默认实现。
 type revalidateDependencies struct {
 	checkIPs        func(a *app, ctx context.Context, ips []string, cfg proxyAutoConfig) []revalidateMemberResult
-	checkDomains    func(a *app, ctx context.Context, domains []string) []revalidateMemberResult
+	checkDomains    func(a *app, ctx context.Context, domains []string, base int) []revalidateMemberResult
 	stopForwarding  func(a *app) error
 	startForwarding func(a *app, pool proxyActivePool) error
 	applyPool       func(a *app, pool, current proxyActivePool) error
@@ -171,8 +171,8 @@ var revalidateDeps = revalidateDependencies{
 		}
 		return a.revalidateIPsByWS(ctx, ips, cfg)
 	},
-	checkDomains: func(a *app, ctx context.Context, domains []string) []revalidateMemberResult {
-		return a.revalidateDomains(ctx, domains)
+	checkDomains: func(a *app, ctx context.Context, domains []string, base int) []revalidateMemberResult {
+		return a.revalidateDomains(ctx, domains, base)
 	},
 	stopForwarding: func(a *app) error {
 		return a.cfnat.stop()
@@ -294,7 +294,7 @@ func (a *app) revalidateActivePool(parent context.Context) (report revalidateRep
 	var domainResults []revalidateMemberResult
 	if len(current.Domains) > 0 {
 		a.setRevalidatePhase("验证域名", len(ipResults))
-		domainResults = revalidateDeps.checkDomains(a, parent, current.Domains)
+		domainResults = revalidateDeps.checkDomains(a, parent, current.Domains, len(ipResults))
 	}
 	all := append(ipResults, domainResults...)
 	report.Members = all
@@ -419,12 +419,18 @@ func (a *app) revalidateIPsByTCP(parent context.Context, ips []string, port int)
 	return out
 }
 
-// revalidateDomains 验证一组域名。
+// revalidateDomains 验证一组域名。base 是已经验完的 IP 数，用于让进度
+// 连续递增——不从 0 起算的话，第一个域名验完会把 tested 从 6 打回 1，
+// 页面上的「3/31」会当着用户的面往回跳。
 //
 // 两级：先 TCP:443，不通即判死；通了再跑 VLESS 短时下载。只做 TCP 会漏掉
 // 「能连上但不是我们要找的入口」这类域名——那正是 `mfa.gov.ua` 之流
 // 最常见的形态，TCP 一直是通的，流量却根本到不了节点。
-func (a *app) revalidateDomains(parent context.Context, domains []string) []revalidateMemberResult {
+//
+// 单条失败要复验一次再判死。实测一轮 26 个域名里掉了 3 个，其中
+// `cfsaas.080112.xyz` 在上一次定时体检里还是 successRate=0.8 的健康成员——
+// 并发 3 压满时偶发超时是常态，一次不过就踢人等于把好成员当垃圾清掉。
+func (a *app) revalidateDomains(parent context.Context, domains []string, base int) []revalidateMemberResult {
 	speedCfg, template, speedErr := a.domainSpeedProbeConfig()
 	speedEnabled := speedErr == nil
 	if !speedEnabled {
@@ -449,10 +455,22 @@ func (a *app) revalidateDomains(parent context.Context, domains []string) []reva
 				out[i] = revalidateMemberResult{Member: domain, Kind: "domain", Stage: "skipped", Error: "验证预算用尽", ErrorClass: failureTimeout}
 				return
 			}
-			out[i] = a.revalidateOneDomain(ctx, domain, speedCfg, template, speedEnabled)
+			res := a.revalidateOneDomain(ctx, domain, speedCfg, template, speedEnabled)
+			if !res.OK && ctx.Err() == nil && revalidateWorthRetry(res.ErrorClass) {
+				// 只在「看起来是偶发」的类别上复验。超时与提前断流在并发压满时
+				// 很常见，一次不过就踢人等于把好成员当垃圾清掉；而「拒绝」「握手
+				// 失败」是对方的确定回答，复验只是白等一个超时预算。
+				if again := a.revalidateOneDomain(ctx, domain, speedCfg, template, speedEnabled); again.OK {
+					again.Stage += "+retry"
+					res = again
+				} else {
+					res.Stage += "+retry"
+				}
+			}
+			out[i] = res
 			mu.Lock()
 			done++
-			a.setRevalidatePhase("验证域名", done)
+			a.setRevalidatePhase("验证域名", base+done)
 			mu.Unlock()
 		}(i, domain)
 	}
@@ -493,6 +511,20 @@ func (a *app) revalidateOneDomain(ctx context.Context, domain string, cfg vlessP
 	out.Stage = "vless"
 	out.LatencyMs = metrics.Duration.Milliseconds()
 	return out
+}
+
+// revalidateWorthRetry 判断一个失败类别是否值得复验一次。
+//
+// 值得：超时、提前断流、归不了类的——这些在并发压满、瞬时丢包时很常见，
+// 复验一次能分清「偶发」和「真死」。
+// 不值得：拒绝、无路由、握手失败——那是对方的确定回答，复验只是白等一个
+// 超时预算，还拖慢整轮。
+func revalidateWorthRetry(class string) bool {
+	switch class {
+	case failureTimeout, failureProtocol, failureOther, failureNone:
+		return true
+	}
+	return false
 }
 
 // keepOnly 返回 items 中也在 keep 里的成员，保持原顺序。
