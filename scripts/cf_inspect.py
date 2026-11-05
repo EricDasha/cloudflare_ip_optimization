@@ -534,18 +534,27 @@ def main():
     print(report)
 
     bad = [v for v in verdicts if v.level in ("WARN", "CRITICAL")]
-    if not (bad or args.always):
-        return 0
 
     if args.dry_run:
-        print("\n[dry-run] 跳过推送")
+        print("\n[dry-run] 跳过推送与补发")
         return 1 if bad else 0
 
-    # 先补发上一轮没送达的，再发这一轮的。顺序不能反：先发新的会让补发
-    # 永远排在后面，一旦持续有告警，旧的永远发不出去。
+    # 补发必须先于「本轮有无告警」的判断，这一点极其要紧。
+    #
+    # 早先的写法是「无告警就 return 0」，补发排在它后面——于是出现一个
+    # 反向的陷阱：断网时告警推送失败入队，几分钟后网络恢复，下一轮巡检
+    # 一切正常，脚本直接返回，队列再也不会被碰。故障恢复得越快，那条
+    # 告警丢得越彻底。排队补发的意义就在于「没消息≠没事」，而它自己
+    # 只在有事的时候才工作，等于没修。
     flushed = flush_pending()
     if flushed:
         print("\n补发：%s" % flushed)
+
+    if not (bad or args.always):
+        return 0
+
+    # 再发这一轮的。顺序不能反：先发新的会让补发永远排在后面，
+    # 一旦持续有告警，旧的永远发不出去。
 
     ok, why = send_telegram(report)
     if ok:
