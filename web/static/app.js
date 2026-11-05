@@ -71,6 +71,7 @@
   let sourceHealth = {};     // /api/status.sources 健康账
   let poolSegments = {};     // /api/status.poolSegments：当前池的 CF 段分布
   let domainFallback = [];   // /api/status.domainFallback：非空＝域名闸正在降级兜底
+  let poolBlock = null;      // /api/status.poolBlock：最近一次「换池被拦」的结构化原因
   let qualityByIp = {};      // /api/status.qualityScheduler.records：最近一次探测成绩
   let vlessOn = false;       // /api/config.vlessProbe
   let coloPrefer = "";       // /api/config.poolColoPrefer
@@ -118,11 +119,22 @@
       renderForward();
       poolSegments = st.poolSegments || {};
       domainFallback = Array.isArray(st.domainFallback) ? st.domainFallback : [];
+      poolBlock = st.poolBlock || null;
       renderPoolHealth();
       const recs = st.qualityScheduler?.records;
       qualityByIp = {};
       if (Array.isArray(recs)) {
         for (const rec of recs) if (rec && rec.ip) qualityByIp[rec.ip] = rec;
+      }
+      // 别处（另一个标签页、脚本、定时任务）可能正在跑验证。页面刷新后
+      // 必须接上这轮进度，否则按钮会一直显示可点，点下去收到 429 才明白。
+      const rv = st.revalidate;
+      if (rv && rv.running) {
+        renderRevalidateProgress(rv);
+        revalidateWasRunning = true;
+        if (!revalidateTimer) revalidateTimer = setInterval(pollRevalidate, 2000);
+      } else if (!revalidateTimer) {
+        renderRevalidateProgress(rv);
       }
     } catch (_) { /* 心跳容错 */ }
   }
@@ -264,6 +276,48 @@
         flag.textContent = "";
       }
     }
+
+    // 换池被拦的说明。后端一直在算 poolBlock（reason/source/at/nextAllowedAt），
+    // 但前端此前从没读过它——于是「为什么没换线」只有钻接口才看得见，页面
+    // 一片平静。这正是「静默吞单」在界面上的样子，必须写出来。
+    const block = $("poolBlockFlag");
+    if (block) {
+      const text = poolBlockText(poolBlock);
+      if (text) {
+        block.hidden = false;
+        block.innerHTML = text;
+      } else {
+        block.hidden = true;
+        block.textContent = "";
+      }
+    }
+  }
+
+  // 换池拦截的中文说明。reason 是后端固定枚举，这里只做翻译与补充时限。
+  // rescue 不会出现在这里：救援是「放行」，被放行的换池不记 poolBlock。
+  const POOL_BLOCK_REASON = {
+    cooldown: "冷却期未过",
+    healthy: "现生效池全部健康，不必换",
+  };
+  function poolBlockText(pb) {
+    if (!pb || !pb.blocked) return "";
+    const src = pb.source === "scheduler" ? "调度器"
+      : pb.source === "auto-apply" ? "自动终审" : (pb.source || "未知入口");
+    const reason = POOL_BLOCK_REASON[pb.reason] ?? pb.reason ?? "原因未知";
+    let when = "";
+    if (pb.nextAllowedAt) {
+      const until = new Date(pb.nextAllowedAt).getTime();
+      if (!isNaN(until)) {
+        // nextAllowedAt 是「什么时候可以再试」，与 fmtAgo 的方向相反，
+        // 所以这里自己算，不能复用那个「多久以前」的函数。
+        const mins = Math.ceil((until - Date.now()) / 60000);
+        if (mins > 0) when = `，约 ${mins} 分钟后可再试`;
+      }
+    } else if (pb.at) {
+      when = `（${fmtAgo(pb.at)}）`;
+    }
+    return `<b>本轮没有换线</b>：${src}想换，被「${reason}」拦下${when}。` +
+      `地址本身可能没问题，只是防抖闸没放行。`;
   }
 
   function renderThrone() {
@@ -632,26 +686,88 @@
     body.append(frag);
   }
 
-  /* ---------- 动作一：立即优选 ---------- */
+  /* ---------- 动作一：立即优选（暂停 → 验证在位 → 剔除垃圾 → 恢复） ----------
+     语义变了：以前点它是「去外面捞一批更好的候选」，现在是「把现在占着位置的
+     这些逐个拉到真实数据面上验一遍，不合格的当场剔除」。用户点这个按钮时的
+     真实处境通常是「现在很卡，清理一下」，而不是「去扩张」。
+
+     一轮验证最长四分钟（域名要跑 VLESS 下载），后端立刻返回 202，这里轮询
+     进度。同步干等的话，中间任何一层超时都会让用户以为点坏了——而那时转发
+     其实已经停了、验证还在跑，正好是最不该被误判的时刻。 */
+  let revalidateTimer = null;
+  let revalidateWasRunning = false;
+
+  const stopRevalidatePoll = () => {
+    if (revalidateTimer) { clearInterval(revalidateTimer); revalidateTimer = null; }
+  };
+
+  function renderRevalidateProgress(st) {
+    const btn = $("optimizeBtn");
+    if (!btn) return;
+    const label = $("optimizeLabel");
+    if (!st || !st.running) {
+      btn.disabled = false;
+      btn.classList.remove("busy");
+      if (label) label.textContent = "立即优选";
+      return;
+    }
+    btn.disabled = true;
+    btn.classList.add("busy");
+    if (label) label.textContent = `${st.phase || "验证中"}${st.total ? ` ${st.tested}/${st.total}` : ""}`;
+  }
+
+  function revalidateToast(rep) {
+    if (!rep) return "验证结束，但没有拿到报告";
+    if (rep.aborted) return `验证中止，未作改动：${rep.note || "原因未知"}`;
+    const removed = Array.isArray(rep.removed) ? rep.removed : [];
+    if (!removed.length) return `验证完成：${rep.passed}/${rep.tested} 通过，未剔除任何成员`;
+    const head = removed.slice(0, 3).join("、");
+    const more = removed.length > 3 ? ` 等 ${removed.length} 个` : "";
+    return `验证完成：剔除 ${removed.length} 个（${head}${more}），保留 ${rep.passed} 个`;
+  }
+
+  async function pollRevalidate() {
+    let st;
+    try { st = await api("/api/cfnat/revalidate"); } catch (_) { return; }
+    const wasRunning = revalidateWasRunning;
+    renderRevalidateProgress(st);
+    if (st.running) { revalidateWasRunning = true; return; }
+    // 收尾：停轮询、解锁按钮。只有「确实看着它跑完」的页面才弹结论，
+    // 否则每次刷新主页都会重播一遍上一次的旧报告。
+    stopRevalidatePoll();
+    revalidateWasRunning = false;
+    if (!wasRunning) return;
+    await Promise.allSettled([pullPool(), pullStatus(), pullUpstreams()]);
+    toast(revalidateToast(st.last));
+  }
+
   async function optimize() {
-    const version = invalidatePoll("pool");
+    const btn = $("optimizeBtn");
+    if (btn.disabled) return;
+    let res;
+    try {
+      res = await fetch("/api/cfnat/revalidate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+    } catch (e) {
+      toast(`验证未能启动：${e.message}`);
+      return;
+    }
+    if (res.status === 429) { toast("已有一轮验证在进行中，等它跑完"); return; }
+    if (!res.ok) {
+      toast(`验证未能启动：${(await res.text()).trim() || `HTTP ${res.status}`}`);
+      return;
+    }
+    // 后端已经开跑了。先锁按钮，避免这 2 秒的空窗里被连点第二次。
+    invalidatePoll("pool");
     invalidatePoll("status");
     invalidatePoll("upstreams");
-    try {
-      const snap = await busy($("optimizeBtn"), "optimizeLabel", () =>
-        api("/api/cfnat/proxy-candidates", { method: "POST", body: "{}" }));
-      if (isCurrentPoll("pool", version)) {
-        poolSnapshot = snap;
-        renderThrone();
-        renderBench();
-      }
-      await Promise.allSettled([pullPool(), pullStatus(), pullUpstreams()]);
-      const n = snap.active?.ips?.length || 0;
-      const err = snap.active?.error;
-      toast(err ? `优选完成但保留旧池：${err}` : `优选完成，${n} 个 IP 在位`);
-    } catch (e) {
-      toast(`优选失败：${e.message}`);
-    }
+    revalidateWasRunning = true;
+    renderRevalidateProgress({ running: true, phase: "暂停转发" });
+    stopRevalidatePoll();
+    revalidateTimer = setInterval(pollRevalidate, 2000);
   }
 
   /* ---------- 动作二甲：扶持登基（免体检直入位） ---------- */

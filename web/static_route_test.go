@@ -49,3 +49,17 @@ func TestStaticHandlerHomeLinksToSubscription(t *testing.T) {
 		t.Fatal("home page still embeds the subscription book")
 	}
 }
+
+// 换池拦截必须能显示在页面上：后端一直在算 poolBlock，前端此前从没读过它，
+// 「为什么没换线」只有钻接口才看得见。这条守的是「数据做了、出口没接上」——
+// 界面上什么都看不见，用户只会以为一切正常。
+func TestHomePageWiresPoolBlockFlag(t *testing.T) {
+	h := staticHandler()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body, _ := io.ReadAll(rec.Body)
+	if !strings.Contains(string(body), `id="poolBlockFlag"`) {
+		t.Fatal("home page has no poolBlockFlag element to render the block reason into")
+	}
+}

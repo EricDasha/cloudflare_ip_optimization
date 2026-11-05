@@ -97,6 +97,10 @@ type app struct {
 	throneProbe        map[string]*throneProbeStat
 	throneLastProbe    time.Time
 	throneLastError    string
+	// revalidateMu 保护「在位成员实弹验证」的实时进度（立即优选的新流程）。
+	// 单独一把锁，不与探测账共用：进度是秒级高频写的，帐是每轮一次。
+	revalidateMu sync.Mutex
+	revalidate   revalidateState
 }
 
 func main() {
@@ -158,6 +162,9 @@ func main() {
 	mux.HandleFunc("/api/cfnat/proxy-probe", a.handleProxyProbe)
 	mux.HandleFunc("/api/cfnat/proxy-promote", a.handleProxyPromote)
 	mux.HandleFunc("/api/cfnat/proxy-candidates", a.handleProxyCandidates)
+	// 在位成员实弹验证：暂停转发 → 逐个验 → 剔除不合格 → 恢复。
+	// 「立即优选」按钮现在打这条，不再去外面捞新候选。
+	mux.HandleFunc("/api/cfnat/revalidate", a.handleRevalidate)
 	mux.HandleFunc("/api/cfnat/connections", a.handleCFnatConnections)
 	mux.HandleFunc("/api/cfnat/upstreams", a.handleCFnatUpstreams)
 	mux.HandleFunc("/api/cfnat/active/kick", a.handleActiveKick)

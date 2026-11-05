@@ -619,6 +619,61 @@ func sortedKeys(set map[string]struct{}) []string {
 	return out
 }
 
+// handleRevalidate 是「立即优选」按钮的新入口：暂停转发 → 验证在位成员 → 剔除垃圾 → 恢复。
+//
+// 为什么不复用 handleProxyCandidates：那个接口回答的是「外面有没有更好的」，
+// 它从不检查「现在占着位置的这些还通不通」。用户点这个按钮时的真实处境
+// 通常是「现在很卡」，要的是清理，不是扩张。
+//
+// 默认异步：一轮验证按 26 个域名、并发 3、单条十余秒算，最长要四分钟。
+// 让浏览器干等这么久，中间任何一层超时都会让用户以为点坏了——而实际上
+// 转发已经停了、验证还在跑。所以这里立刻返回 202，前端轮询进度。
+// 需要脚本化时带 ?wait=1 走同步，返回完整报告。
+func (a *app) handleRevalidate(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, a.revalidateDetail())
+		return
+	case http.MethodPost:
+	default:
+		http.Error(w, "GET or POST required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 先抢席位再起协程：抢不到就直接告诉调用方「已有一轮在跑」，
+	// 不能回 202 让前端以为开跑了。
+	if !a.beginRevalidate(a.revalidateTargetCount()) {
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]any{
+			"ok": false, "error": "已有一轮验证在进行中",
+			"state": a.revalidateStatus(),
+		})
+		return
+	}
+
+	// 不挂 r.Context()：客户端一断开就会把整轮验证连根取消，
+	// 而那时 cfnat 正停着。用 Background 让验证自己跑完再恢复转发。
+	if r.URL.Query().Get("wait") == "1" {
+		report, err := a.revalidateActivePool(context.Background())
+		body := map[string]any{"ok": err == nil, "report": report}
+		if err != nil {
+			body["error"] = err.Error()
+			writeJSONStatus(w, http.StatusServiceUnavailable, body)
+			return
+		}
+		writeJSON(w, body)
+		return
+	}
+
+	go func() {
+		if _, err := a.revalidateActivePool(context.Background()); err != nil {
+			log.Printf("revalidate: %v", err)
+		}
+	}()
+	writeJSONStatus(w, http.StatusAccepted, map[string]any{
+		"ok": true, "started": true, "state": a.revalidateStatus(),
+	})
+}
+
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 	pool := a.proxyActivePoolSnapshot()
 	writeJSON(w, map[string]any{
@@ -640,6 +695,9 @@ func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// domainFallback 非空表示当前转发域名处于降级状态：
 		// 质量闸本要拦下，为了不空池才放行。巡检据此判断「是不是靠兜底在撑」。
 		"domainFallback": a.domainFallbackSnapshot(),
+		// revalidate 是在位成员实弹验证的实时进度。前端点了「立即优选」之后
+		// 要靠它显示「正在验第几个」——否则最长四分钟的静默期看起来就是卡死。
+		"revalidate": a.revalidateStatus(),
 	})
 }
 
@@ -771,6 +829,15 @@ func writeJSON(w http.ResponseWriter, v any) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(v)
+}
+
+// writeJSONStatus 带状态码写 JSON。writeJSON 固定 200，而「已有一轮验证在跑」
+// 必须是 429——前端靠状态码区分「开跑了」和「没开跑」，都回 200 的话
+// 用户连点两次会以为点了两次，实际第二次什么也没发生。
+func writeJSONStatus(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func queryInt(r *http.Request, key string, def int) int {
