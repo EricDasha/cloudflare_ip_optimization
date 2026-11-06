@@ -74,6 +74,11 @@
   let domainFallback = [];   // /api/status.domainFallback：非空＝域名闸正在降级兜底
   let poolBlock = null;      // /api/status.poolBlock：最近一次「换池被拦」的结构化原因
   let qualityByIp = {};      // /api/status.qualityScheduler.records：最近一次探测成绩
+  let probeByIp = {};        // /api/status.activeProbe.members：在位验活（WS 握手）成绩
+  let activeProbeThreshold = 3;  // /api/status.activeProbe.failThreshold：连败几次请下台
+  let activeProbeSlowMs = 1500;  // /api/status.activeProbe.slowMs：握手超过它就判慢
+  let activeProbeSlowStrikeLimit = 2;  // 连续慢几轮才动手
+  let pinnedLost = [];       // /api/status.activeProbe.pinnedLost：原固定成员被摘的记录
   let vlessOn = false;       // /api/config.vlessProbe
   let coloPrefer = "";       // /api/config.poolColoPrefer
   let logLines = [];
@@ -131,6 +136,15 @@
       if (Array.isArray(recs)) {
         for (const rec of recs) if (rec && rec.ip) qualityByIp[rec.ip] = rec;
       }
+      // 在位验活是唯一「对生效池每个 IP 定时体检」的账本：质量调度器只测候选、
+      // 不碰在位成员，所以快照里 results 的延迟可能是几轮前的旧账。这一份才是
+      // 「它现在到底多慢」。不读它，页面上就没有任何东西能指出「这个成员在拖后腿」。
+      const members = st.activeProbe?.members;
+      probeByIp = members && typeof members === "object" ? members : {};
+      activeProbeThreshold = Number(st.activeProbe?.failThreshold) || 3;
+      activeProbeSlowMs = Number(st.activeProbe?.slowMs) || 1500;
+      activeProbeSlowStrikeLimit = Number(st.activeProbe?.slowStrikeLimit) || 2;
+      pinnedLost = Array.isArray(st.activeProbe?.pinnedLost) ? st.activeProbe.pinnedLost : [];
       // 别处（另一个标签页、脚本、定时任务）可能正在跑验证。页面刷新后
       // 必须接上这轮进度，否则按钮会一直显示可点，点下去收到 429 才明白。
       const rv = st.revalidate;
@@ -177,9 +191,9 @@
   }
 
   /* ---------- 通用行渲染（在位 + 候选共用） ---------- */
-  function buildRow({ addr, colo, label, connLive, connN, connUnit, scoreParts, actions, check }) {
+  function buildRow({ addr, colo, label, connLive, connN, connUnit, scoreParts, actions, check, flag }) {
     const row = document.createElement("div");
-    row.className = check && check.off ? "ip-row off" : "ip-row";
+    row.className = check && check.off ? "ip-row off" : flag?.tone === "live" ? "ip-row serving" : "ip-row";
     const main = document.createElement("div");
     main.className = "ip-main";
     if (check) {
@@ -197,6 +211,13 @@
       main.append(lab);
     }
     main.append(Object.assign(document.createElement("span"), { className: "ip-addr mono", textContent: addr }));
+    // 「在转」/「近用」不是装饰：粘性布局下只有很少几个成员真的承载流量，
+    // 其余全是待命的。不标出来，用户看到的是一排等价的行，分不清谁在干活。
+    if (flag) {
+      const f = Object.assign(document.createElement("span"), { className: `chip mono ${flag.tone}`, textContent: flag.text });
+      if (flag.title) f.title = flag.title;
+      main.append(f);
+    }
     if (colo) main.append(Object.assign(document.createElement("span"), { className: "chip mono", textContent: colo }));
     main.append(Object.assign(document.createElement("span"), { className: "src", textContent: label }));
     const conn = document.createElement("div");
@@ -350,6 +371,102 @@
       `地址本身可能没问题，只是防抖闸没放行。`;
   }
 
+  /* ---------- 「谁在转」：在效成员高亮的判据 ----------
+     用户的原话是「将在生效的 ip 特别标注出来」。这里要回答的不是「池里有谁」——
+     那一列本来就是池，全都「在位」——而是「此刻流量真的落在谁身上」。
+     两条证据合并成三档：
+       live   此刻 cfnat 有活着的出站连接（/proc 实况，最强证据）
+       recent 最近一段时间实际拨通过（cfnat 日志尾部，含刚断开的）
+       其余   在位但没在干活（待命 / 用户关掉 / 被判死）
+     粘性分发下通常只有设备数那么几个成员是 live，这正是用户想一眼看出来的事。 */
+  function memberTraffic() {
+    const live = new Map();
+    const clients = new Map();
+    for (const [ip, up] of Object.entries(upstreams)) {
+      if (!up?.inPool) continue;
+      const n = Number(up.connections) || 0;
+      if (n > 0) live.set(ip, n);
+    }
+    for (const c of forward?.clients || []) {
+      if (!c?.host) continue;
+      if (!clients.has(c.host)) clients.set(c.host, []);
+      clients.get(c.host).push(c.client || "?");
+    }
+    const recent = new Map();
+    for (const item of forward?.counts || []) {
+      if (item?.host) recent.set(item.host, Number(item.count) || 0);
+    }
+    return { live, recent, clients };
+  }
+
+  // 给一行挑徽标：优先「在转」，其次「近用」；都没有就不加，避免一派徽标把重点冲淡。
+  function trafficFlag(addr, traffic) {
+    const n = traffic.live.get(addr) || 0;
+    const who = traffic.clients.get(addr) || [];
+    if (n > 0) {
+      return {
+        tone: "live",
+        text: "在转",
+        title: `${n} 条出站连接正指向它` + (who.length ? `，来自 ${who.join("、")}` : ""),
+      };
+    }
+    const recent = traffic.recent.get(addr) || 0;
+    if (recent > 0) {
+      return {
+        tone: "recent",
+        text: "近用",
+        title: `最近窗口内拨通过 ${recent} 次，当前没有活连接` + (who.length ? `；来自 ${who.join("、")}` : ""),
+      };
+    }
+    return null;
+  }
+
+  // 慢的默认标准是后端 PROXY_ACTIVE_PROBE_SLOW_MS（默认 1500ms），由 /api/status
+  // 带下来。这里只用于标注，不参与任何决策——决策在后端，页面只负责说实话。
+
+  // 在位 IP 的成绩栏。顺序上「在位验活」优先：「体检」按钮读的是质量调度器，
+  // 而那个调度器只测候选、不碰在位成员，快照里的延迟可能是几轮前的旧账。
+  // 只有验活账本回答得了「它此刻到底多慢」。
+  //
+  // 三种状态必须分开说，因为它们会走向不同的结局：
+  //   连败     → 到阈值就换掉；
+  //   连续慢   → 到阈值换掉，但固定成员只提示不动手；
+  //   暂留     → 判死或判慢，却找不到合格替补，池子先不缩水，理由写在账上。
+  function memberScore(ip, result, pinned) {
+    const probe = probeByIp[ip];
+    const parts = [];
+    const fails = Number(probe?.consecutiveFailures) || 0;
+    const threshold = Number(activeProbeThreshold) || 3;
+    const slowMs = Number(activeProbeSlowMs) || 1500;
+    const slowLimit = Number(activeProbeSlowStrikeLimit) || 2;
+    if (probe?.held) {
+      parts.push(["暂留", probe.heldReason || "无合格替补", "warn"]);
+      if (probe.lastLatencyMs) parts.push([String(probe.lastLatencyMs), "ms", "bad"]);
+      return parts;
+    }
+    if (fails > 0) {
+      parts.push([`连败 ${fails}`, fails + 1 >= threshold ? "下轮请下台" : `满 ${threshold} 次下台`, "bad"]);
+      if (probe?.lastLatencyMs) parts.push([String(probe.lastLatencyMs), "ms", "bad"]);
+      return parts;
+    }
+    const strikes = Number(probe?.slowStrikes) || 0;
+    const latency = Number(probe?.lastLatencyMs) || Number(result?.dataLatency) || 0;
+    if (result?.downloadMbps) parts.push([result.downloadMbps.toFixed(1), "Mbps"]);
+    if (strikes > 0) {
+      const due = strikes + 1 >= slowLimit;
+      const verdict = pinned ? "固定成员不自动换" : due ? "下轮请下台" : `连续 ${slowLimit} 轮请下台`;
+      parts.push([`慢 ${strikes}`, verdict, "bad"]);
+      if (latency > 0) parts.push([String(latency), "ms", "bad"]);
+      return parts;
+    }
+    if (latency > 0) {
+      const tone = latency > slowMs ? "bad" : latency > slowMs / 2 ? "warn" : "";
+      parts.push([String(latency), "ms", tone]);
+    }
+    if (!parts.length) parts.push(["在位", "体检随时点"]);
+    return parts;
+  }
+
   function renderThrone() {
     if (!HOME_PAGE) return;   // 订阅页没有在位表，不必渲染
     const active = poolSnapshot?.active || {};
@@ -360,15 +477,27 @@
     const upstreamTotal = Object.values(upstreams)
       .filter((u) => u.inPool)
       .reduce((s, u) => s + (Number(u.connections) || 0), 0);
+    // 「谁真的在转」有两个证据源，口径不同、都有用：
+    //   liveConn  = 此刻 cfnat 到该 IP 有活着的出站连接（/proc 实况）；
+    //   recent    = 最近 2000 行 cfnat 日志里出现过该出口（近窗，包含刚断开的）。
+    // 只看连接数会让刚切走的目标瞬间「消失」，只看日志又会让早已死掉的留着亮。
+    const traffic = memberTraffic();
     $("tallyPool").textContent = ips.length;
     $("tallyDom").textContent = domains.length;
     $("tallyConn").textContent = upstreamTotal;
     $("coloLine").textContent = coloLineText(ips, results);
     const foot = $("throneFoot");
     if (foot) {
-      foot.textContent = stickyOn
-        ? "「测」= 重新体检（WS 延迟 + 可选 VLESS 测速）；踢后后台自动补位；设备粘性开：一台设备钉一个出口，设备之间错开。"
-        : "「测」= 重新体检（WS 延迟 + 可选 VLESS 测速）；踢后后台自动补位；设备粘性关：按连接轮转，同一设备的请求会散到不同出口。";
+      const legend = "「在转」= 此刻有出站连接指向它；「近用」= 最近拨通过、当前无活连接；「固定」= 排到转发最前。"
+        + "判慢/判死会自动换人，换不到合格替补时暂留原位并标「暂留」，不缩池。";
+      // 原固定成员被系统摘掉必须明说：页面上还标着「固定」而脚下已经没它，
+      // 等于让用户对着一份过期的配置做判断。
+      const lost = pinnedLost.length
+        ? "；已失效下线：" + pinnedLost.slice(0, 3).map((p) => p.member || p.Member).join("、")
+        : "";
+      foot.textContent = legend + lost + (stickyOn
+        ? "设备粘性开：一台设备钉一个出口，设备之间错开。"
+        : "设备粘性关：按连接轮转，同一设备的请求会散到不同出口。");
     }
     const disabled = new Set(active.disabled || []);
     const prioSet = new Set(active.priority || []);
@@ -376,11 +505,15 @@
     const enabledCount = [...ips, ...domains].filter((m) => !disabled.has(m)).length;
     $("throneLock").checked = !!active.lock;
     $("throneAll").checked = total > 0 && enabledCount === total;
+    // 「只转固定的」开着时，真正被转发的只有「既固定、又没被关掉」的那几个。
+    // 提示必须按这个交集算，否则显示 5 个固定成员、实际只转 3 个，又是一个
+    // 页面与转发不符的口子。
+    const pinnedOn = [...ips, ...domains].filter((m) => prioSet.has(m) && !disabled.has(m)).length;
     $("throneCtlHint").textContent = !total
       ? "皇位空悬。"
       : active.lock
-        ? `锁位中：只转发 ${enabledCount} 个已勾成员，其余 ${total - enabledCount} 个不参与。`
-        : `已勾 ${enabledCount} / ${total} 参与转发；扶持登基的自动置顶。`;
+        ? `只转固定的：当前只转发 ${pinnedOn} 个（固定且未关闭），其余 ${total - pinnedOn} 个不参与。`
+        : `已勾 ${enabledCount} / ${total} 参与转发；固定的成员排在转发最前。`;
 
     const box = $("throneRows");
     if (!box) return;
@@ -399,15 +532,13 @@
       const result = results.get(ip);
       const up = upstreams[ip];
       const connN = up?.inPool ? (Number(up.connections) || 0) : 0;
-      const scoreParts = [];
-      if (result?.downloadMbps) scoreParts.push([result.downloadMbps.toFixed(1), "Mbps"]);
-      if (result?.dataLatency) scoreParts.push([`${result.dataLatency}`, "ms"]);
-      if (!scoreParts.length) scoreParts.push(["在位", "体检随时点"]);
+      const scoreParts = memberScore(ip, result, prioSet.has(ip));
       const pinned = prioSet.has(ip);
       frag.append(buildRow({
         addr: ip,
+        flag: trafficFlag(ip, traffic),
         colo: result?.colo || "",
-        label: (pinned ? "置顶 · " : "") + (SRC_LABEL[byIp[ip]] || byIp[ip] || "已登基"),
+        label: (pinned ? "固定 · " : "") + (SRC_LABEL[byIp[ip]] || byIp[ip] || "已登基"),
         connLive: connN > 0,
         connN: String(connN),
         connUnit: "连接",
@@ -415,7 +546,7 @@
         scoreParts,
         actions: [
           { text: "测", title: "测 WS 延迟" + (vlessOn ? " + VLESS 速度" : ""), run: (btn) => probeIP(ip, btn) },
-          { text: pinned ? "降" : "顶", title: pinned ? "取消置顶" : "置顶：排到 -fixed 最前；再开锁位即只转置顶成员", run: () => pinMember(ip, !pinned) },
+          { text: pinned ? "取消固定" : "固定", title: pinned ? "取消固定：回到普通成员" : "固定：排到转发最前；再勾「只转固定的」即只转它", run: () => pinMember(ip, !pinned) },
           { text: "踢", title: "把这个 IP 踢出在位并立即生效", run: (btn) => kickIP(ip, btn) },
         ],
       }));
@@ -427,7 +558,15 @@
     for (const domain of order(domains)) {
       const lat = domainLat[domain];
       const scoreParts = [];
-      if (!lat) {
+      // 域名现在也在位验活（每轮 WS 握手），死/慢的结论比 30 分钟一轮的体检快得多。
+      // 两个账本一起看：验活管「此刻通不通」，体检管「这一段时间稳不稳」。
+      const probe = probeByIp[domain];
+      if (probe?.held) {
+        scoreParts.push(["暂留", probe.heldReason || "无合格替补", "warn"]);
+      } else if ((Number(probe?.consecutiveFailures) || 0) > 0) {
+        const threshold = Number(activeProbeThreshold) || 3;
+        scoreParts.push(["验活连败 " + probe.consecutiveFailures, `${threshold} 次下线进观察期`, "bad"]);
+      } else if (!lat) {
         scoreParts.push(["—", "探测中"]);
       } else if (lat.state === "dead") {
         scoreParts.push(["已死", lat.consecutiveFailures ? `连败${lat.consecutiveFailures}` : "", "bad"]);
@@ -456,15 +595,16 @@
       const pinned = prioSet.has(domain);
       frag.append(buildRow({
         addr: domain,
+        flag: trafficFlag(domain, traffic),
         colo: "DNS",
-        label: (pinned ? "置顶 · " : "") + "域名直连",
+        label: (pinned ? "固定 · " : "") + "域名直连",
         connLive: false,
         connN: "—",
         connUnit: "活解析",
         check: { group: "domain", off: disabled.has(domain) },
         scoreParts,
         actions: [
-          { text: pinned ? "降" : "顶", title: pinned ? "取消置顶" : "置顶：排到 -fixed 最前；再开锁位即只转置顶成员", run: () => pinMember(domain, !pinned) },
+          { text: pinned ? "取消固定" : "固定", title: pinned ? "取消固定：回到普通成员" : "固定：排到转发最前；再勾「只转固定的」即只转它", run: () => pinMember(domain, !pinned) },
           { text: "踢", title: "把该域名踢出转发池", run: (btn) => kickIP(domain, btn) },
         ],
       }));
@@ -552,16 +692,60 @@
   async function pinMember(addr, on) {
     const priority = (poolSnapshot?.active?.priority || []).filter((m) => m !== addr);
     if (on) priority.unshift(addr);
+    // 「固定」的承诺是「它开始转发」。若这个成员正被关闭着，只写 Priority 是
+    // 不够的：planFixedMembers 先看 Disabled，被关的成员永远不会进 -fixed。
+    // 用户会看到行上写着「固定」、连接数始终是 0。所以固定时顺手把它勾上。
+    if (on) {
+      const box = [...document.querySelectorAll(".memchk")].find((b) => b.dataset.addr === addr);
+      if (box) box.checked = true;
+    }
     invalidatePoll("pool");
     try {
       await api("/api/cfnat/active/select", {
         method: "POST",
         body: JSON.stringify({ ...currentSelection(), priority }),
       });
-      toast(on ? `${addr} 已置顶` : `${addr} 已取消置顶`);
+      toast(on ? `${addr} 已固定并参与转发` : `${addr} 已取消固定`);
       await Promise.allSettled([pullPool(), pullUpstreams()]);
     } catch (e) {
-      toast(`置顶失败：${e.message}`);
+      toast(`固定失败：${e.message}`);
+      await pullPool();   // 把界面拉回后端真实状态，别让失败留下一个假的勾
+    }
+  }
+
+  /* ---------- 固定转发：用户亲手指定 IP 或域名 ----------
+     两个入口回答同一个问题，但起点不同：
+       · 行上的「固定」——已经在这个池里，只是要它排最前、别被轮换稀释；
+       · 这里的输入框——不在池里，要它现在就在。
+     后者走「扶持登基」的通道：不体检、直接并入生效池并置顶。用户说「我要用这个」
+     时再追问「但它握手 1.2 秒，确定吗」是把责任往外推，不是把关。
+     已在位且已固定的成员幂等跳过，不会白重启一次转发。 */
+  async function pinTyped() {
+    const text = $("pinInput").value.trim();
+    if (!text) {
+      $("pinInput").focus();
+      toast("先填要固定的 IP 或域名");
+      return;
+    }
+    invalidatePoll("pool");
+    invalidatePoll("status");
+    invalidatePoll("upstreams");
+    try {
+      const data = await busy($("pinBtn"), "pinBtn", () =>
+        api("/api/cfnat/active/endorse", { method: "POST", body: JSON.stringify({ members: text }) }));
+      if (data.unchanged) {
+        toast(`${text} 已在位并已固定`);
+      } else {
+        const parts = [];
+        if (data.ips?.length) parts.push(`${data.ips.length} 个 IP`);
+        if (data.domains?.length) parts.push(`${data.domains.length} 个域名`);
+        const added = parts.length ? `新增 ${parts.join(" + ")}` : "已在位";
+        toast(`已固定：${added}，现在排到转发最前（共 ${data.ips_total} IP + ${data.domains_total} 域名在位）`);
+        $("pinInput").value = "";
+      }
+      await Promise.allSettled([pullPool(), pullUpstreams()]);
+    } catch (e) {
+      toast(`固定失败：${e.message}`);
     }
   }
 
@@ -1302,6 +1486,10 @@
   on("optimizeBtn", "click", optimize);
   on("supplyBtn", "click", supply);
   on("endorseBtn", "click", endorse);
+  on("pinBtn", "click", pinTyped);
+  on("pinInput", "keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); pinTyped(); }
+  });
   on("supplyInput", "input", updateSupplyHint);
   on("benchRefresh", "click", pullPool);
   on("logToggle", "click", () => { $("drawerLog").hidden = !$("drawerLog").hidden; if (!$("drawerLog").hidden) pullLogs(); });
@@ -1311,7 +1499,7 @@
     commitSelection(all ? "已全选参与转发" : "已全部取消勾选");
   });
   on("throneLock", "change", () =>
-    commitSelection($("throneLock").checked ? "锁位已开：只转扶持登基的" : "锁位已关：已勾成员恢复轮转"));
+    commitSelection($("throneLock").checked ? "只转固定的：已开启" : "只转固定的：已关闭，已勾成员恢复轮转"));
   on("logTarget", "change", pullLogs);
   on("logQuery", "input", renderLogs);
   on("subAddBtn", "click", subAddMaintainers);

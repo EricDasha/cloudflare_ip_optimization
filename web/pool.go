@@ -162,12 +162,29 @@ func planFixedMembers(pool proxyActivePool) ([]string, []string, error) {
 // admittedPoolDomains 把落盘生效池里的域名过一遍质量闸。
 // 返回新切片，不修改入参；被拦下的域名仍留在体检名单上（见 domainProbeTargets），
 // 所以它们的成绩一旦好转就会在下一轮换池时自动回池。
-func (a *app) admittedPoolDomains(domains []string) []string {
+//
+// guaranteed 是用户亲手固定的成员（Priority）。它们**不过闸**：用户在页面上
+// 明确指定「就用这个域名」时，系统再有意见也不该背着人把它删掉。这与
+// PROXY_DOMAIN_FORWARD 的语义一致——显式指定视为运营者担保。此前扶持登基
+// 收下的域名若体检为 dead/unstable，会被这里静默过滤，而接口回报仍是
+// 「已登基」，属于报喜不报忧。
+func (a *app) admittedPoolDomains(domains, guaranteed []string) []string {
 	if len(domains) == 0 {
 		return domains
 	}
+	pinned := make(map[string]bool, len(guaranteed))
+	for _, member := range guaranteed {
+		pinned[member] = true
+	}
 	admitted := make([]string, 0, len(domains))
 	for _, domain := range domains {
+		if pinned[domain] {
+			if !a.domainUsableForForwarding(domain) {
+				log.Printf("domain gate: %s 体检未通过，但被用户固定，按担保放行", domain)
+			}
+			admitted = append(admitted, domain)
+			continue
+		}
 		if a.domainUsableForForwarding(domain) {
 			admitted = append(admitted, domain)
 		}
@@ -180,7 +197,7 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 	// 落盘的生效池可能带着体检已判坏的域名（闸门上线前写入的历史遗留）。
 	// 启动、手动采用、立即优选都走这里，若不过闸，重启就是把坏域名重新塞回
 	// -fixed 的通道——闸门只在建池时生效、在重启时失效，等于没有。
-	pool.Domains = a.admittedPoolDomains(pool.Domains)
+	pool.Domains = a.admittedPoolDomains(pool.Domains, pool.Priority)
 	// 池成员 = 登基 IP + 优选域名（cfnat -fixed 原生收域名，拨号时活解析）。
 	// Disabled 成员不进 -fixed；Priority 成员排最前；Lock 时只留 Priority。
 	fixedMembers, priorityMembers, err := planFixedMembers(pool)

@@ -141,6 +141,21 @@ a.btn { display: inline-block; text-decoration: none; line-height: 1.4; }
   padding: 1px 6px; white-space: nowrap;
 }
 .src { font-size: 11px; color: var(--text-3); white-space: nowrap; }
+/* 「谁在转」的三档标记。全站唯一破例的语义色已在段分布用过；这里必须能在
+   一眼之内分清「正在承载流量」与「只是在位」，只用明暗做不到，故沿用同一套
+   高亮靠亮色、待命靠灰的规则，不引入新色相。
+   .live   = 有活连接，是当前真正在工作的成员；
+   .recent = 最近拨通过、当前没有活连接（粘性切换或设备断线后的余温）。 */
+.chip.live { color: #000; background: var(--bright); border-color: var(--bright); font-weight: 700; }
+.chip.recent { color: var(--text); border-color: var(--line-strong); background: var(--surface-2); }
+.ip-row.serving { background: rgb(255 255 255 / .03); box-shadow: inset 2px 0 0 var(--bright); }
+/* 固定转发输入行：与供给区的 textarea + 按钮同构，但更窄——它只收一两个成员。 */
+.pin-row { display: grid; grid-template-columns: 1fr auto; gap: var(--s2); margin-top: var(--s3); }
+.pin-row input {
+  background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius);
+  padding: 7px 10px; font-family: var(--font-mono); font-size: 12px; color: var(--text);
+}
+.pin-row input::placeholder { color: var(--text-3); }
 .ip-conn { display: flex; align-items: baseline; gap: var(--s1); min-width: 86px; justify-content: flex-end; }
 .ip-conn .n {
   font-family: var(--font-mono); font-variant-numeric: tabular-nums;

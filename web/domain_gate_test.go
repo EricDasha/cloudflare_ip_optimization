@@ -174,10 +174,40 @@ func TestAdmittedPoolDomainsFiltersPersistedPool(t *testing.T) {
 	a.domainQuality["good.example.com"] = freshRecord(domainStateHealthy)
 	a.domainQuality["bad.example.com"] = freshRecord(domainStateDead)
 
-	got := a.admittedPoolDomains([]string{"good.example.com", "bad.example.com", "unknown.example.com"})
+	got := a.admittedPoolDomains([]string{"good.example.com", "bad.example.com", "unknown.example.com"}, nil)
 	want := []string{"good.example.com", "unknown.example.com"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("admittedPoolDomains() = %v, want %v", got, want)
+	}
+}
+
+// 用户亲手固定的域名不得被质量闸静默删掉。
+//
+// 现实路径：用户在页面上把某个域名固定下来（走扶持登基），该域名恰好体检判坏；
+// 若闸门照删，接口回报「已登基」、页面显示「已固定」，而 cfnat 的 -fixed 里
+// 根本没有它。这属于报喜不报忧，比明着拒绝更糟。
+func TestAdmittedPoolDomainsKeepsUserPinned(t *testing.T) {
+	a := newProbeTestApp(t)
+	a.domainQuality["pinned.example.com"] = freshRecord(domainStateDead)
+	a.domainQuality["other.example.com"] = freshRecord(domainStateDead)
+
+	got := a.admittedPoolDomains(
+		[]string{"pinned.example.com", "other.example.com"},
+		[]string{"pinned.example.com"},
+	)
+	if !reflect.DeepEqual(got, []string{"pinned.example.com"}) {
+		t.Fatalf("admittedPoolDomains() = %v, want only the pinned domain", got)
+	}
+}
+
+// 固定的是 IP 时，guaranteed 里出现它不应影响域名闸的判定（两条轨道互不干扰）。
+func TestAdmittedPoolDomainsIgnoresPinnedIP(t *testing.T) {
+	a := newProbeTestApp(t)
+	a.domainQuality["bad.example.com"] = freshRecord(domainStateDead)
+
+	got := a.admittedPoolDomains([]string{"bad.example.com"}, []string{"104.16.1.1"})
+	if len(got) != 0 {
+		t.Fatalf("admittedPoolDomains() = %v, want empty", got)
 	}
 }
 

@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark">
 <link rel="icon" href="data:,">
 <title>皇位厅 · 优选台</title>
-<link rel="stylesheet" href="/styles.css?v=20261106a">
+<link rel="stylesheet" href="/styles.css?v=20261106c">
 </head>
 <body>
 
@@ -41,9 +41,14 @@
     <div class="degraded" id="poolBlockFlag" hidden></div>
     <div class="throne-ctl">
       <label class="toggle"><input id="throneAll" type="checkbox">全选转发</label>
-      <label class="toggle"><input id="throneLock" type="checkbox">只转扶持登基的</label>
+      <label class="toggle"><input id="throneLock" type="checkbox">只转固定的</label>
       <span class="foot" id="throneCtlHint">勾选决定谁承载流量；取消勾选＝仍在位但不转发。</span>
     </div>
+    <div class="pin-row">
+      <input id="pinInput" type="text" placeholder="固定转发：IP 或域名，例如 104.16.123.96 / best.example.com" aria-label="固定转发目标">
+      <button class="btn primary" id="pinBtn" type="button">固定</button>
+    </div>
+    <p class="hintline" id="pinHint">「固定」= 加入在位并置顶，立刻参与转发；已在位的会从关闭状态拉回。勾上「只转固定的」后，其余成员一律不转。</p>
     <div id="throneRows"></div>
     <p class="foot" id="throneFoot">「测」= 重新体检（WS 延迟 + 可选 VLESS 测速）；踢后后台自动补位。</p>
   </section>
@@ -114,6 +119,6 @@
 
 <footer class="foot">皇位厅 · 三层漏斗 + 设备粘性 · <span id="footClock">--</span></footer>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
-<script src="/app.js?v=20261106a"></script>
+<script src="/app.js?v=20261106c"></script>
 </body>
 </html>

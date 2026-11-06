@@ -84,6 +84,13 @@ const (
 	domainSuccessFloor = 0.6
 	// domainDeadFailures 连续失败达几次判死。
 	domainDeadFailures = 3
+	// domainQuarantine 域名「下线观察期」。
+	//
+	// 在位验活判死的域名会被剔出 -fixed，但 reconcilePoolDomains 每轮体检后都会
+	// 按 poolDomainMembers() 把域名集合整个重算一遍——没有这道闸，被判死的域名
+	// 会在下一轮被原样加回来，剔除等于白做。观察期内禁止自动回池，到期自动放行
+	// 再考一次；再死再关。与质量闸不同，它不依赖体检账本，而是验活的直接结论。
+	domainQuarantine = 30 * time.Minute
 	// domainRecoveryStreak 连续成功达几次即认定「已经恢复」，并丢弃之前的旧账。
 	//
 	// 2026-10-21 生产事故：上游链路中断约 3 小时，账本把这 12 个域名全打成
@@ -128,18 +135,18 @@ type domainProbeSample struct {
 // domainQuality 单个优选域名的稳定性账。
 // 与 qualityRecord（IP 用）分开存：域名不带端口、按 DNS 活解析，生命周期与 IP 不同。
 type domainQuality struct {
-	Domain              string              `json:"domain"`
-	Samples             []domainProbeSample `json:"samples,omitempty"`
-	SuccessRate         float64             `json:"successRate"`
-	AverageMbps         float64             `json:"averageMbps"`
-	P50Mbps             float64             `json:"p50Mbps"`
-	P95Mbps             float64             `json:"p95Mbps"`
-	JitterRatio         float64             `json:"jitterRatio"`
-	ConsecutiveFailures int                 `json:"consecutiveFailures"`
-	ConsecutiveSuccesses int                `json:"consecutiveSuccesses,omitempty"`
-	LastProbeAt         time.Time           `json:"lastProbeAt,omitempty"`
-	LastOKAt            time.Time           `json:"lastOkAt,omitempty"`
-	State               string              `json:"state"`
+	Domain               string              `json:"domain"`
+	Samples              []domainProbeSample `json:"samples,omitempty"`
+	SuccessRate          float64             `json:"successRate"`
+	AverageMbps          float64             `json:"averageMbps"`
+	P50Mbps              float64             `json:"p50Mbps"`
+	P95Mbps              float64             `json:"p95Mbps"`
+	JitterRatio          float64             `json:"jitterRatio"`
+	ConsecutiveFailures  int                 `json:"consecutiveFailures"`
+	ConsecutiveSuccesses int                 `json:"consecutiveSuccesses,omitempty"`
+	LastProbeAt          time.Time           `json:"lastProbeAt,omitempty"`
+	LastOKAt             time.Time           `json:"lastOkAt,omitempty"`
+	State                string              `json:"state"`
 }
 
 type domainQualityStore struct {
@@ -552,6 +559,37 @@ func (a *app) runDomainLatencyProbeLoop() {
 func (a *app) reconcilePoolDomains() {
 	current := a.proxyActivePoolSnapshot()
 	want := a.poolDomainMembers()
+	// 用户固定的域名必须留在池里。
+	//
+	// poolDomainMembers() 只认「显式配置 + 自动候选 + 已启用优选域名」这三个来源，
+	// 而用户在页面上固定一个域名走的是扶持登基通道，它只写进 active.Domains。
+	// 这个函数每轮体检后都会把 Domains 整个重算一遍，于是用户固定的域名会在
+	// 下一轮（默认 30 分钟后）被静默抹掉——页面上还显示着「已固定」，转发却
+	// 已经不用它了。这属于报喜不报忧，必须在源头堵住。
+	for _, member := range current.Priority {
+		if net.ParseIP(member) != nil || !validCandidateHostname(member) {
+			continue
+		}
+		if !containsString(want, member) {
+			want = append(want, member)
+		}
+	}
+	if sameStringSet(current.Domains, want) {
+		return
+	}
+	// 观察期内的域名不许自动回池：验活刚判死它，下一轮体检重算就把它加回来，
+	// 等于白剔一次。PROXY_DOMAIN_FORWARD 显式配置是运营者担保，不受此限。
+	explicit := envForwardDomains("PROXY_DOMAIN_FORWARD")
+	now := time.Now()
+	admitted := make([]string, 0, len(want))
+	for _, domain := range want {
+		if !containsString(explicit, domain) && a.domainQuarantined(domain, now) {
+			log.Printf("domain pool reconcile: %s 在观察期内，暂不回池", domain)
+			continue
+		}
+		admitted = append(admitted, domain)
+	}
+	want = admitted
 	if sameStringSet(current.Domains, want) {
 		return
 	}
@@ -564,6 +602,34 @@ func (a *app) reconcilePoolDomains() {
 	}
 	log.Printf("domain pool reconciled: %d -> %d domains (%s)",
 		len(current.Domains), len(want), strings.Join(want, ","))
+}
+
+// quarantineDomain 把域名的自动回池时间推迟到 until。已在观察期内则取更晚的那个。
+func (a *app) quarantineDomain(domain string, until time.Time) {
+	a.domainQuarantineMu.Lock()
+	defer a.domainQuarantineMu.Unlock()
+	if a.domainQuarantine == nil {
+		a.domainQuarantine = make(map[string]time.Time)
+	}
+	if current, ok := a.domainQuarantine[domain]; ok && current.After(until) {
+		until = current
+	}
+	a.domainQuarantine[domain] = until
+}
+
+// domainQuarantined 报告域名是否仍在观察期内；过期条目顺手清掉。
+func (a *app) domainQuarantined(domain string, now time.Time) bool {
+	a.domainQuarantineMu.Lock()
+	defer a.domainQuarantineMu.Unlock()
+	until, ok := a.domainQuarantine[domain]
+	if !ok {
+		return false
+	}
+	if !now.Before(until) {
+		delete(a.domainQuarantine, domain)
+		return false
+	}
+	return true
 }
 
 // domainLatencySnapshot 返回域名延迟快照的深拷贝。

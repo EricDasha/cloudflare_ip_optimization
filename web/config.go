@@ -105,6 +105,19 @@ func poolEntryMaxLatencyMs() int64 {
 	return ms
 }
 
+// throneProbeSlowMs 是「在位成员判慢」的阈值：握手通了，但耗时超过它就算慢。
+//
+// 为什么不复用进池那条 800ms：进池是「别把慢的放进来」，代价为零，卡得越紧越好；
+// 请下台要重启一次 cfnat、断一次现有连接，必须留滞回余量。实测好 IP 的 WS 约
+// 190ms，坏的 1650/1809ms，1500ms 落在中间的空档里，两边都不容易误伤。
+func throneProbeSlowMs() int64 {
+	ms := int64(envInt("PROXY_ACTIVE_PROBE_SLOW_MS", 1500))
+	if ms < 300 || ms > 5000 {
+		ms = 1500
+	}
+	return ms
+}
+
 // poolSwitchCooldown 全局换池冷却：任何自动换池路径（scheduler/auto-apply）
 // 两次换池之间至少间隔该时长，防止“人挤人”互相顶池。
 // 用户手动采用不受冷却限制。

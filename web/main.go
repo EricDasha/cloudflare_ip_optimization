@@ -71,13 +71,13 @@ type app struct {
 	optimizerLastError string
 	// 订阅器状态：「收」与「考」是两条独立管线，各自一把锁、各自一套时间戳，
 	// 免得一个卡住时看不出卡在哪一段；配置另用一把锁，改配置不该等考试。
-	subMu        sync.RWMutex
-	subInv       subscriptionInventory
-	subHarvestMu sync.Mutex
-	subProbeMu   sync.Mutex
-	subCfgMu     sync.Mutex
-	subSettings  subscriptionSettings
-	subSweepMu   sync.Mutex
+	subMu              sync.RWMutex
+	subInv             subscriptionInventory
+	subHarvestMu       sync.Mutex
+	subProbeMu         sync.Mutex
+	subCfgMu           sync.Mutex
+	subSettings        subscriptionSettings
+	subSweepMu         sync.Mutex
 	quality            *qualitySchedulerRuntime
 	preferredMu        sync.Mutex
 	preferredProbeMu   sync.Mutex
@@ -97,6 +97,14 @@ type app struct {
 	throneProbe        map[string]*throneProbeStat
 	throneLastProbe    time.Time
 	throneLastError    string
+	// thronePinLoss 记录「原固定成员因判死被解除固定并下线」，供页面提示。
+	// 只保留最近几条：这是给人看的告示，不是审计全账。
+	thronePinLoss []throneLostPin
+	// domainQuarantine 是索引期域名黑名单：验活判死的域名在一段时间内不得
+	// 自动回池，否则下一轮 reconcile 会立刻把它加回来，等于白剔一次。
+	// 到期自动失效，不靠人工重置（2026-10-22 教训：闸门拦得太狠会拦死服务）。
+	domainQuarantineMu sync.Mutex
+	domainQuarantine   map[string]time.Time
 	// revalidateMu 保护「在位成员实弹验证」的实时进度（立即优选的新流程）。
 	// 单独一把锁，不与探测账共用：进度是秒级高频写的，帐是每轮一次。
 	revalidateMu sync.Mutex
@@ -122,6 +130,7 @@ func main() {
 		activeHealth:     make(map[string]*activeHealthStat),
 		sourceHealth:     make(map[string]*sourceHealthStat),
 		throneProbe:      make(map[string]*throneProbeStat),
+		domainQuarantine: make(map[string]time.Time),
 		domainLatency:    make(map[string]domainLatency),
 		domainQuality:    make(map[string]*domainQuality),
 	}
