@@ -13,11 +13,13 @@
 /data/
 *.log
 *.csv
+# cfnat 日志快照（本地调试时生成，含池成员与出口，不入库）
+/logs.json
+/locations.json
 /ip.txt
 /cfnat.txt
 /ips-v4.txt
 /ips-v6.txt
-/locations.json
 /index.html
 
 # Editor and mechanical backup files
