@@ -106,6 +106,35 @@ func TestPlanThroneActionDeadBeatsSlow(t *testing.T) {
 	}
 }
 
+// 慢只处置 IP：域名判慢不换。域名没有「就地换人」这条路，而一轮整体变慢
+// 就能把域名池削掉一层——这不是我们想要的。
+func TestPlanThroneActionSlowSkipsDomains(t *testing.T) {
+	members := []string{"1.1.1.1", "www.example.com"}
+	stats := map[string]*throneProbeStat{
+		"1.1.1.1":         slowStat(3, 1650),
+		"www.example.com": slowStat(3, 1700),
+	}
+	dead, slow := planThroneAction(members, noPins(), stats, 3, 2)
+	if len(dead) != 0 {
+		t.Fatalf("dead = %v, want empty", dead)
+	}
+	if !reflect.DeepEqual(slow, []string{"1.1.1.1"}) {
+		t.Fatalf("slow = %v, want only the IP", slow)
+	}
+}
+
+// 域名判死仍然照剔：慢可以放过，连不上不能放过。
+func TestPlanThroneActionDeadIncludesDomains(t *testing.T) {
+	stats := map[string]*throneProbeStat{"www.example.com": stat(3)}
+	dead, slow := planThroneAction([]string{"www.example.com", "1.1.1.1"}, noPins(), stats, 3, 2)
+	if !reflect.DeepEqual(dead, []string{"www.example.com"}) {
+		t.Fatalf("dead = %v, want [www.example.com]", dead)
+	}
+	if len(slow) != 0 {
+		t.Fatalf("slow = %v, want empty", slow)
+	}
+}
+
 // 用户固定的成员：判慢不动（运营者的担保），判死照剔（死了留着也没用）。
 func TestPlanThroneActionPinnedMemberProtectedFromSlowOnly(t *testing.T) {
 	pinned := map[string]bool{"1.1.1.1": true, "2.2.2.2": true}

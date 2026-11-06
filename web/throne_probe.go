@@ -131,6 +131,9 @@ func throneMemberState(st *throneProbeStat, failThreshold, slowLimit int) string
 //   - slow：握手通但连续慢达阈值，优先换掉，换不掉就暂留；
 //   - pinned 里的成员不列入 slow——固定是运营者的担保，慢由他自己决定，
 //     系统不该背着他把成员换掉。判死仍然列入 dead（死了留着也没用）。
+//   - **慢只处置 IP**。域名没有「就地换人」这条路：换域名等于换入口身份，是另一
+//     回事；而域名的 DNS 本来就会自己换边缘，一次慢多半是瞬时的。对域名只保留
+//     「死了下线」这一条硬判据，否则一轮整体变慢就能把域名池削掉一层。
 //
 // 铁律「绝不踢空」：全部判死时保留失败数最少的一个（并列取原序先者），
 // 否则一次上游全灭就会把 -fixed 清成空串，cfnat 起不来，用户看到的是彻底断网
@@ -147,7 +150,7 @@ func planThroneAction(members []string, pinned map[string]bool, stats map[string
 		case throneStateDead:
 			dead = append(dead, member)
 		case throneStateSlow:
-			if pinned[member] {
+			if pinned[member] || net.ParseIP(member) == nil {
 				continue
 			}
 			slow = append(slow, member)
