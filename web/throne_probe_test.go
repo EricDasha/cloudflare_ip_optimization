@@ -315,6 +315,31 @@ func TestDropDeferredKeepsDomains(t *testing.T) {
 	}
 }
 
+// 快速复检只排给「会有人动手」的成员：慢 IP 排，慢域名不排。
+// 域名判慢没有处置通道，给它排复检等于每 2 分钟白摸一次，还把主节拍拽到高频档。
+func TestRecordThroneProbeResultsRecheckSkipsSlowDomains(t *testing.T) {
+	t.Setenv("PROXY_ACTIVE_PROBE_SLOW_MS", "1500")
+	a := &app{throneProbe: map[string]*throneProbeStat{}}
+	now := time.Now()
+	a.recordThroneProbeResults([]proxyScanResult{
+		{IP: "1.1.1.1", Latency: 1800},
+		{IP: "www.example.com", Latency: 1800},
+	}, now)
+	if st := a.throneProbe["1.1.1.1"]; st == nil || st.RecheckAt.IsZero() {
+		t.Fatalf("slow IP must get a fast recheck, got %+v", st)
+	}
+	if st := a.throneProbe["www.example.com"]; st == nil || !st.RecheckAt.IsZero() {
+		t.Fatalf("slow domain must not get a fast recheck, got %+v", st)
+	}
+	// 域名连败仍要排：死了是真要处置的。
+	a.recordThroneProbeResults([]proxyScanResult{
+		{IP: "www.example.com", Error: "context deadline exceeded"},
+	}, now)
+	if st := a.throneProbe["www.example.com"]; st.RecheckAt.IsZero() {
+		t.Fatalf("failed domain must get a fast recheck, got %+v", st)
+	}
+}
+
 // 域名观察期：期内挡住，过期自动放行（不靠人工重置）。
 func TestDomainQuarantineExpiresAutomatically(t *testing.T) {
 	now := time.Now()

@@ -340,8 +340,14 @@ func (a *app) recordThroneProbeResults(results []proxyScanResult, now time.Time)
 		}
 		// 快速复检只排给「已出现异常、但还没到动手阈值」的成员。
 		// 到了阈值的由本轮处置负责；处置不了的（无替补）会被 reap 清掉标记。
-		if throneMemberState(st, failThreshold, throneProbeSlowStrikeLimit) == throneStateOK &&
-			(st.ConsecutiveFailures > 0 || st.SlowStrikes > 0) {
+		//
+		// 域名只按死活处置，判慢不会有人动手——给慢域名排快速复检等于每 2 分钟
+		// 白摸一次、白把主节拍拽到高频档。所以域名只在连败时才排。
+		suspect := st.ConsecutiveFailures > 0
+		if net.ParseIP(r.IP) != nil {
+			suspect = suspect || st.SlowStrikes > 0
+		}
+		if suspect && throneMemberState(st, failThreshold, throneProbeSlowStrikeLimit) == throneStateOK {
 			st.RecheckAt = now.Add(throneProbeFastRecheck)
 		} else {
 			st.RecheckAt = time.Time{}
