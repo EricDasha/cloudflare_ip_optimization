@@ -369,7 +369,24 @@ func (a *app) reapThroneMembers(current proxyActivePool, now time.Time) {
 		}
 	}
 	// 域名没有「就地换人」这一说：域名死了就是下线进观察期，不找替身。
-	replacements := a.findThroneReplacements(ipVictims, current)
+	replacements, scanned := a.findThroneReplacements(ipVictims, current)
+	var deferred []string
+	if len(ipVictims) > 0 && !scanned {
+		// 「没考成」不等于「没替补」。这一轮扫描锁被别人占着（全量重挑、手动扫描
+		// 都可能占着几十秒到几分钟），我们根本没去看候选池。若按「暂留」记账，
+		// 会给用户一个错误结论，还会把复检标记清掉，让判死的成员按 10 分钟节拍
+		// 干等——线上 14:25 那次就是这样。资源没轮到，就排快速复检，2 分钟后再来。
+		//
+		// 但域名不受影响：它下线不找替身，没必要跟着 IP 一起等。把 IP 从本轮
+		// 受害者里摘出去，剩下的域名照常处置。
+		log.Printf("throne probe: replacement scan unavailable, deferring %v", ipVictims)
+		a.scheduleThroneRecheck(ipVictims, now)
+		deferred = ipVictims
+		victims = dropDeferred(victims, deferred)
+		if len(victims) == 0 {
+			return
+		}
+	}
 
 	// 换池需独占换池锁；被占就本轮作罢（账已记下，下轮再剔，绝不误杀）。
 	if !lockTimeout(&a.cfnatCtlMu, 10*time.Second) {
@@ -386,6 +403,10 @@ func (a *app) reapThroneMembers(current proxyActivePool, now time.Time) {
 	fresh := a.proxyActivePoolSnapshot()
 	dead, slow = a.throneActionPlan(fresh)
 	victims = append(append([]string(nil), dead...), slow...)
+	if len(deferred) > 0 {
+		// 本轮没考成替补的 IP 不参与处置：它们没有结论，只是没轮到。
+		victims = dropDeferred(victims, deferred)
+	}
 	if len(victims) == 0 {
 		return
 	}
@@ -492,6 +513,20 @@ func (a *app) reapThroneMembers(current proxyActivePool, now time.Time) {
 		removed, swapped, held, len(next.IPs), len(next.Domains))
 }
 
+// dropDeferred 从候选集合里去掉「本轮暂缓处置」的成员，保持原有顺序。
+func dropDeferred(members, deferred []string) []string {
+	if len(deferred) == 0 || len(members) == 0 {
+		return members
+	}
+	kept := make([]string, 0, len(members))
+	for _, member := range members {
+		if !containsString(deferred, member) {
+			kept = append(kept, member)
+		}
+	}
+	return kept
+}
+
 // throneActionPlan 按当前账本算出本轮该处置的成员。
 func (a *app) throneActionPlan(current proxyActivePool) (dead, slow []string) {
 	pinned := make(map[string]bool, len(current.Priority))
@@ -555,18 +590,26 @@ func (a *app) markThroneHeld(members []string, now time.Time) {
 //
 // 只收 WS 通、且延迟低于「进池上限」（默认 800ms）的候选——换人的目的就是换掉
 // 慢的和死的，塞一个同样慢的进来毫无意义。考不出来就返回空，调用方据此暂留。
-func (a *app) findThroneReplacements(victims []string, current proxyActivePool) map[string]string {
+//
+// 第二个返回值表示「这次到底考没考」：
+//   - true  = 看过候选池了，返回空就是结论——候选池里确实没有合格替补；
+//   - false = 扫描锁被别人占着，根本没看。这是「没轮到」，不是「没有」，
+//     调用方必须区别对待：排快速复检，而不是记成暂留。
+//
+// 配置缺失（Host/Path 空）算 true：那是配置问题，不是资源竞争，排复检只会
+// 让系统每 2 分钟白摸一次。
+func (a *app) findThroneReplacements(victims []string, current proxyActivePool) (map[string]string, bool) {
 	if len(victims) == 0 {
-		return nil
+		return nil, true
 	}
 	cfg := defaultProxyAutoConfig()
 	if cfg.Host == "" || cfg.Path == "" {
-		return nil
+		return nil, true
 	}
 	// 替补考试是网络活，必须在拿换池锁之前完成（锁序见函数头注释）。
 	if !lockTimeout(&a.proxyScanMu, 30*time.Second) {
 		log.Printf("throne probe: replacement scan skipped, proxy scan busy")
-		return nil
+		return nil, false
 	}
 	defer a.proxyScanMu.Unlock()
 	snapshot := a.proxyCandidateSnapshot()
@@ -586,7 +629,7 @@ func (a *app) findThroneReplacements(victims []string, current proxyActivePool) 
 		pending = append(pending, ip)
 	}
 	if len(pending) == 0 {
-		return nil
+		return nil, true
 	}
 	ceiling := poolEntryMaxLatencyMs()
 	scanCfg := cfg
@@ -608,7 +651,7 @@ func (a *app) findThroneReplacements(victims []string, current proxyActivePool) 
 	}
 	if len(fast) == 0 {
 		log.Printf("throne probe: %d candidates scanned, none under the %dms entry ceiling", len(pending), ceiling)
-		return nil
+		return nil, true
 	}
 	fast = orderPassedByColoPreference(fast, results, poolColoPreferenceSet())
 	fast = orderPassedBySegmentHealth(fast, results)
@@ -616,7 +659,7 @@ func (a *app) findThroneReplacements(victims []string, current proxyActivePool) 
 	if len(unresolved) > 0 {
 		log.Printf("throne probe: no qualified replacement for %v (%d candidates passed the gate)", unresolved, len(fast))
 	}
-	return picked
+	return picked, true
 }
 
 func (a *app) setThroneProbeError(message string) {

@@ -302,6 +302,19 @@ func TestMarkThroneHeldClearsRecheck(t *testing.T) {
 	}
 }
 
+// 「本轮没考成替补」的 IP 不参与处置：没有结论不等于有结论。
+// 只有域名照常走——它下线不找替身，没必要陪着 IP 一起等。
+func TestDropDeferredKeepsDomains(t *testing.T) {
+	victims := []string{"1.1.1.1", "2.2.2.2", "www.example.com"}
+	got := dropDeferred(victims, []string{"1.1.1.1", "2.2.2.2"})
+	if !reflect.DeepEqual(got, []string{"www.example.com"}) {
+		t.Fatalf("dropDeferred = %v, want [www.example.com]", got)
+	}
+	if len(dropDeferred(victims, nil)) != 3 {
+		t.Fatalf("empty deferred must not change the list")
+	}
+}
+
 // 域名观察期：期内挡住，过期自动放行（不靠人工重置）。
 func TestDomainQuarantineExpiresAutomatically(t *testing.T) {
 	now := time.Now()
