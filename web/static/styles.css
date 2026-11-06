@@ -101,6 +101,14 @@ a.btn { display: inline-block; text-decoration: none; line-height: 1.4; }
 }
 .cololine b { color: var(--text); font-weight: 700; }
 
+/* 在途转发目标按设备分行：一行一台，读起来是「谁走哪个出口」，
+   而不是一串需要自己在脑子里配对的分布统计。 */
+#forwardLine { display: block; }
+#forwardLine .fwd-row { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+#forwardLine .fwd-row + .fwd-row { margin-top: 2px; }
+#forwardLine .fwd-host { color: var(--bright); }
+#forwardLine .fwd-note { color: var(--text-3); font-style: normal; font-size: 11px; }
+
 /* ---------- 在位行 ---------- */
 .throne-ctl {
   display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap;

@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log"
 	"math/rand"
@@ -38,15 +37,31 @@ var (
 	randomGenerator    = rand.New(rand.NewSource(time.Now().UnixNano()))
 )
 
+// maxClientAssignments 设备钉位表的上限。
+//
+// 家用局域网只有几台设备，这个上限唯一的用途是防止「服务被暴露到公网后被
+// 当成粘性表塞满内存」。超过即整体作废重来——在那种场景下，粘性本身也没有意义。
+const maxClientAssignments = 512
+
 // IPManager 用于安全管理 IP 地址状态
 type IPManager struct {
 	mu            sync.Mutex
 	ipAddresses   []string
 	dispatchIndex int
+	// assignments 把「客户端主机」钉到一个具体出口，实现一台设备一个上游。
+	//
+	// 存目标字符串而不是下标：换池时下标会整体挪位，按字符串保留能让出口仍在
+	// 新池里的设备维持原映射，只有它真的被剔除了才重新分配。否则一次补位就会
+	// 让局域网里所有设备同时换线，正在看的视频全部断流。
+	assignments map[string]string
+	// assignCursor 是分配新设备时的起始扫描位置，与 dispatchIndex 分开。
+	// 两种分发方式互斥（-sticky 决定），但混在一次会干扰单测钉住的「粘性
+	// 不推进轮转指针」这条约束，也会在两套逻辑并存时产生难以解释的偏移。
+	assignCursor int
 }
 
 func NewIPManager() *IPManager {
-	return &IPManager{}
+	return &IPManager{assignments: map[string]string{}}
 }
 
 func (m *IPManager) SetIPAddresses(ips []string) {
@@ -54,6 +69,20 @@ func (m *IPManager) SetIPAddresses(ips []string) {
 	defer m.mu.Unlock()
 	m.ipAddresses = ips
 	m.dispatchIndex = 0
+	m.assignCursor = 0
+	if m.assignments == nil {
+		m.assignments = map[string]string{}
+		return
+	}
+	alive := make(map[string]struct{}, len(ips))
+	for _, ip := range ips {
+		alive[ip] = struct{}{}
+	}
+	for client, target := range m.assignments {
+		if _, ok := alive[target]; !ok {
+			delete(m.assignments, client)
+		}
+	}
 }
 
 func (m *IPManager) SetPriorityIPs(ips []string) {
@@ -82,9 +111,93 @@ func (m *IPManager) nextTargets(port, count int) []string {
 	return generateTargets(ips, port)
 }
 
-// nextTargetsForClient 按客户端来源做粘性分发：同一台设备的所有连接
-// 哈希到同一上游 IP（count>1 时其后目标按序排列，即拨号失败的回退顺序）。
-// clientHost 为空时退化为严格轮转。池成员变更后映射随代重排，属预期。
+// assignLocked 给一台设备分配一个独占的上游，返回它在 ipAddresses 中的下标。
+//
+// 为什么不用哈希：哈希只能保证「同一台设备每次落到同一个位置」，保证不了
+// 「不同设备落到不同位置」。两台设备撞到同一个上游时，页面上看起来就是
+// 「负载均衡没生效」，实际确实没生效——一个出口分给了两台设备，另一个闲置。
+//
+// 这里改成按到达顺序排队占位：新设备优先拿当前没人用的出口，全被占满才回头
+// 复用。N 台设备配 N 个出口时，一定是各占一个，这才是用户要的「均衡」。
+func (m *IPManager) assignLocked(clientHost string) int {
+	n := len(m.ipAddresses)
+	if n == 0 {
+		return -1
+	}
+	if m.assignments == nil {
+		m.assignments = map[string]string{}
+	}
+	// 表满只可能出现在「服务被暴露到公网」的场景；此时粘性已无意义，整体作废。
+	if len(m.assignments) >= maxClientAssignments {
+		m.assignments = map[string]string{}
+	}
+	// 已有钉位：出口还在池里就继续用。这是换池时设备不跳线的关键——
+	// 补进来一个新成员不应该让所有正在看视频的设备同时换线。
+	if target, ok := m.assignments[clientHost]; ok {
+		for i, ip := range m.ipAddresses {
+			if ip == target {
+				return i
+			}
+		}
+		delete(m.assignments, clientHost)
+	}
+	used := make(map[string]struct{}, len(m.assignments))
+	for _, target := range m.assignments {
+		used[target] = struct{}{}
+	}
+	pick := -1
+	for offset := 0; offset < n; offset++ {
+		idx := (m.assignCursor + offset) % n
+		if _, taken := used[m.ipAddresses[idx]]; taken {
+			continue
+		}
+		pick = idx
+		break
+	}
+	if pick < 0 {
+		// 设备比出口多，只能轮流复用；此时至少保证相邻设备不挤在同一个出口。
+		pick = m.assignCursor % n
+	}
+	m.assignments[clientHost] = m.ipAddresses[pick]
+	m.assignCursor = (pick + 1) % n
+	return pick
+}
+
+// repinClient 把一台设备的钉位改到一个刚刚拨通的出口上。
+//
+// 用途：钉住的出口坏了但还留在池里（拨号超时、连接被拒），这条连接会按回退
+// 顺序落到下一个成员上。若不改钉位，该设备的下一条连接又会回去撞同一堵墙，
+// 表现为「这台设备一直卡，别的设备正常」。拨通的那个才是实证。
+func (m *IPManager) repinClient(clientHost, target string) {
+	if clientHost == "" || target == "" {
+		return
+	}
+	if host, _, err := net.SplitHostPort(target); err == nil {
+		target = host
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.assignments == nil {
+		m.assignments = map[string]string{}
+	}
+	// 只钉在自家池成员上：兜底目标也走同一个拨号函数，把设备钉到池外
+	// 成员上会让下一次分配立刻判它失效、白折腾一遍。
+	known := false
+	for _, ip := range m.ipAddresses {
+		if ip == target {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return
+	}
+	m.assignments[clientHost] = target
+}
+
+// nextTargetsForClient 按客户端来源分发：每台设备独占一个上游 IP
+// （count>1 时其后目标按序排列，即拨号失败的回退顺序）。
+// clientHost 为空时退化为严格轮转。
 func (m *IPManager) nextTargetsForClient(clientHost string, port, count int) []string {
 	if clientHost == "" {
 		return m.nextTargets(port, count)
@@ -97,9 +210,10 @@ func (m *IPManager) nextTargetsForClient(clientHost string, port, count int) []s
 	if count > len(m.ipAddresses) {
 		count = len(m.ipAddresses)
 	}
-	hash := fnv.New32a()
-	_, _ = hash.Write([]byte(clientHost))
-	start := int(hash.Sum32() % uint32(len(m.ipAddresses)))
+	start := m.assignLocked(clientHost)
+	if start < 0 {
+		return nil
+	}
 	ips := make([]string, count)
 	for i := range ips {
 		ips[i] = m.ipAddresses[(start+i)%len(m.ipAddresses)]
@@ -139,7 +253,7 @@ func main() {
 	num := flag.Int("num", 1, "单连接拨号失败时按顺序尝试的目标数量")
 	port := flag.Int("port", 443, "转发的目标端口")
 	random := flag.Bool("random", true, "是否随机生成IP，如果为false，则从CIDR中拆分出所有IP")
-	sticky := flag.Bool("sticky", true, "设备粘性：同一客户端 IP 的所有连接固定走同一上游（拨号失败才顺延）")
+	sticky := flag.Bool("sticky", true, "设备粘性：同一客户端 IP 恒定走同一上游，且不同设备尽量各占一个出口（拨号失败才顺延）")
 	maxThreads := flag.Int("task", 100, "并发请求最大协程数")
 	useTLS := flag.Bool("tls", true, "是否为 TLS 端口")
 
@@ -336,7 +450,7 @@ func main() {
 			log.Printf("客户端来源: %s 连接建立，当前活跃连接数: %d", clientAddr, atomic.LoadInt32(&activeConnections))
 			// 多目标参数仅作为“失败时按顺序回退”，不再并发竞速，
 			// 从而保证一次前端逻辑连接只产生一个真实上游会话。
-			// 粘性模式：同设备所有连接哈希到同一上游；拨号失败按序回退不变。
+			// 粘性模式：每台设备独占一个上游；拨号失败按序回退不变。
 			clientHost, _, _ := net.SplitHostPort(clientAddr)
 			var primary []string
 			if *sticky {
@@ -348,7 +462,12 @@ func main() {
 			if fallbackManager != nil {
 				fallback = fallbackManager.nextTargets(*port, 1)
 			}
-			go handleConnection(conn, append(primary, fallback...), time.Duration(*Delay)*time.Millisecond)
+			// 只有粘性模式下才纠正钉位：轮转模式本来就不该有「设备记忆」。
+			manager := ipManager
+			if !*sticky {
+				manager = nil
+			}
+			go handleConnection(conn, manager, clientHost, append(primary, fallback...), time.Duration(*Delay)*time.Millisecond)
 		}
 	}
 }
@@ -777,12 +896,27 @@ func checkValidIP(ip string, port int, useTLS bool, domain string, code int) boo
 }
 
 // 处理客户端连接；仅在拨号失败时按顺序尝试下一个地址。
-func handleConnection(conn net.Conn, forwardAddrs []string, delay time.Duration) {
+// manager/clientHost 用于钉位纠正：钉住的出口拨不通、回退到别的成员并拨通时，
+// 把该设备的钉位改到真正拨通的那个，别让它下一条连接再去撞同一堵墙。
+func handleConnection(conn net.Conn, manager *IPManager, clientHost string, forwardAddrs []string, delay time.Duration) {
 	dialer := &net.Dialer{Timeout: delay}
-	handleConnectionWithDial(conn, forwardAddrs, dialer.DialContext)
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		upstream, err := dialer.DialContext(ctx, network, addr)
+		if err == nil && manager != nil {
+			manager.repinClient(clientHost, addr)
+		}
+		return upstream, err
+	}
+	handleConnectionWithDial(conn, forwardAddrs, dial)
 }
 
+// handleConnectionWithDial 处理一条客户端连接：按顺序拨号，首个成功即用。
+//
+// 日志里带客户端地址是有意为之：控制台的「设备名册」靠这一行把「哪台设备
+// 现在走哪个出口」对上号。cfnat 是四层哑管道，/proc 里只看到两个互不相干的
+// socket，唯一能把它们连起来的证据就是这里打出来的这条记录。
 func handleConnectionWithDial(conn net.Conn, forwardAddrs []string, dial func(context.Context, string, string) (net.Conn, error)) {
+	clientHost, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	defer func() {
 		clientAddr := conn.RemoteAddr().String()
 		atomic.AddInt32(&activeConnections, -1)
@@ -803,7 +937,7 @@ func handleConnectionWithDial(conn net.Conn, forwardAddrs []string, dial func(co
 			log.Printf("连接到 %s 失败: %v", target, err)
 			continue
 		}
-		log.Printf("选择转发连接: 地址: %s，拨号耗时: %d ms", target, time.Since(started).Milliseconds())
+		log.Printf("选择转发连接: 客户端 %s，地址: %s，拨号耗时: %d ms", clientHost, target, time.Since(started).Milliseconds())
 		pipeConnections(conn, upstream)
 		return
 	}

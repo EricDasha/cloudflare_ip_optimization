@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark">
 <link rel="icon" href="data:,">
 <title>皇位厅 · 优选台</title>
-<link rel="stylesheet" href="/styles.css?v=20261105d">
+<link rel="stylesheet" href="/styles.css?v=20261106a">
 </head>
 <body>
 
@@ -104,16 +104,16 @@
   <section class="card" id="drawerLan" aria-label="设备名册">
     <p class="overline" id="lanHead">陆 · 设备名册</p>
     <div class="table-wrap"><table>
-      <thead><tr><th>局域网设备</th><th class="mono">连接</th><th>TCP 状态</th></tr></thead>
-      <tbody id="lanBody"><tr><td colspan="3" class="inline-status">尚未查询</td></tr></tbody>
+      <thead><tr><th>局域网设备</th><th class="mono">连接</th><th>TCP 状态</th><th>转发目标</th></tr></thead>
+      <tbody id="lanBody"><tr><td colspan="4" class="inline-status">尚未查询</td></tr></tbody>
     </table></div>
-    <p class="foot">cfnat 是四层哑管道：TLS 加密后读不到 UA/Host，设备识别以局域网 IP 为准。</p>
+    <p class="foot">cfnat 是四层哑管道：TLS 加密后读不到 UA/Host，设备识别以局域网 IP 为准；「转发目标」取该设备最近一次实际拨通的出口。</p>
   </section>
 
 </main>
 
 <footer class="foot">皇位厅 · 三层漏斗 + 设备粘性 · <span id="footClock">--</span></footer>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
-<script src="/app.js?v=20261105d"></script>
+<script src="/app.js?v=20261106a"></script>
 </body>
 </html>

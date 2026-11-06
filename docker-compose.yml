@@ -34,9 +34,11 @@ services:
       CFNAT_NUM: "${CFNAT_NUM:-3}"   # 拨号失败后的顺序回退深度（不是并发数）
       CFNAT_PORT: "443"
       CFNAT_RANDOM: "true"
-      CFNAT_STICKY: "${CFNAT_STICKY:-false}"   # true=同设备恒走同一上游；false=按连接轮转铺开全部成员
-      # 生产实况（2026-10-23）：线上为 false。按连接轮转把负载铺开全部成员，
-      # 避免设备粘性把流量锁死在某个已劣化的上游上。默认改 false 与线上一致。
+      CFNAT_STICKY: "${CFNAT_STICKY:-true}"   # true=一台设备钉一个出口（设备间错开）；false=按连接轮转铺开全部成员
+      # 2026-11-06 改默认 true。原默认 false 的后果是「同一台设备每条连接都换出口」：
+      # 视频会断流、Cookie 会话来回漂，看起来就是「负载均衡没生效」。粘性的正确
+      # 语义是「设备之间分散、设备自己稳定」，cfnat 的钉位表按到达顺序分配，
+      # 出口数 ≥ 设备数时每台设备独占一个，不再靠哈希碰运气。
       CFNAT_TASK: "100"
       CFNAT_TLS: "true"
       CFNAT_CODE: "200"

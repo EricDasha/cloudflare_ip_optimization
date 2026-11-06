@@ -75,6 +75,85 @@ func TestIPManagerStickyDifferentClientsSpread(t *testing.T) {
 	}
 }
 
+// 均衡的判据不是「两台设备没有撞车」，而是「出口数 ≥ 设备数时，每台设备独占一个」。
+// 旧实现用哈希取模，撞车概率不低；撞上就是一台设备把负载全吃了，另一台闲置。
+func TestIPManagerStickyDevicesGetDistinctUpstreams(t *testing.T) {
+	m := NewIPManager()
+	m.SetIPAddresses([]string{"192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4"})
+
+	devices := []string{"192.168.1.11", "192.168.1.12", "192.168.1.13", "192.168.1.14"}
+	seen := map[string]string{}
+	for _, client := range devices {
+		seen[client] = m.nextTargetsForClient(client, 443, 1)[0]
+	}
+	distinct := map[string]struct{}{}
+	for _, target := range seen {
+		distinct[target] = struct{}{}
+	}
+	if len(distinct) != len(devices) {
+		t.Fatalf("4 devices on 4 exits did not each get one: %v", seen)
+	}
+	// 再来一遍（同设备重连）必须还是原出口，否则「均衡」变成了「乱跳」。
+	for _, client := range devices {
+		if got := m.nextTargetsForClient(client, 443, 1)[0]; got != seen[client] {
+			t.Fatalf("client %s jumped from %s to %s", client, seen[client], got)
+		}
+	}
+}
+
+// 设备多于出口：只能复用，但不得把某台设备随机丢来丢去。
+func TestIPManagerStickyMoreDevicesThanUpstreams(t *testing.T) {
+	m := NewIPManager()
+	m.SetIPAddresses([]string{"192.0.2.1", "192.0.2.2"})
+	for i := 0; i < 6; i++ {
+		client := string(rune('a' + i))
+		first := m.nextTargetsForClient(client, 443, 1)[0]
+		again := m.nextTargetsForClient(client, 443, 1)[0]
+		if first != again {
+			t.Fatalf("client %s unstable: %s -> %s", client, first, again)
+		}
+	}
+}
+
+// 换池不得让在位设备跳线：出口还在新池里就沿用，只有被剔除了才重分。
+func TestIPManagerStickyKeepsPinAcrossPoolChange(t *testing.T) {
+	m := NewIPManager()
+	m.SetIPAddresses([]string{"192.0.2.1", "192.0.2.2", "192.0.2.3"})
+	pinned := m.nextTargetsForClient("192.168.1.11", 443, 1)[0]
+
+	// 池子里加一个新成员（踢人补位的常态），原来的出口仍然在。
+	m.SetIPAddresses([]string{"192.0.2.9", "192.0.2.1", "192.0.2.2", "192.0.2.3"})
+	if got := m.nextTargetsForClient("192.168.1.11", 443, 1)[0]; got != pinned {
+		t.Fatalf("pool growth moved a live device: %s -> %s", pinned, got)
+	}
+
+	// 出口被剔除，才允许重分。
+	m.SetIPAddresses([]string{"192.0.2.9", "192.0.2.2", "192.0.2.3"})
+	if got := m.nextTargetsForClient("192.168.1.11", 443, 1)[0]; got == pinned {
+		t.Fatalf("removed upstream %s is still assigned", pinned)
+	}
+}
+
+// 钉住的出口拨不通、回退到别的成员并拨通时，钉位要跟着改。
+// 不改的话该设备下一条连接又去撞同一堵墙，表现为「这台设备一直卡」。
+func TestIPManagerRepinAfterFallback(t *testing.T) {
+	m := NewIPManager()
+	m.SetIPAddresses([]string{"192.0.2.1", "192.0.2.2"})
+	first := m.nextTargetsForClient("192.168.1.11", 443, 2)
+	if len(first) != 2 {
+		t.Fatalf("expected 2 targets, got %v", first)
+	}
+	m.repinClient("192.168.1.11", first[1])
+	if got := m.nextTargetsForClient("192.168.1.11", 443, 1)[0]; got != first[1] {
+		t.Fatalf("repin ignored: %v, want %s", got, first[1])
+	}
+	// 池外目标（如 fallback 域名）不参与钉位，避免把设备钉到会立刻失效的地方。
+	m.repinClient("192.168.1.11", "outside.example:443")
+	if got := m.nextTargetsForClient("192.168.1.11", 443, 1)[0]; got != first[1] {
+		t.Fatalf("out-of-pool repin took effect: %v", got)
+	}
+}
+
 func TestIPManagerStickyFallbackOrderKept(t *testing.T) {
 	m := NewIPManager()
 	m.SetIPAddresses([]string{"192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4"})

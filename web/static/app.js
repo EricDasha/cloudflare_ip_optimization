@@ -67,6 +67,7 @@
   let upstreams = {};        // ip -> {connections, states, inPool}
   let domainLat = {};        // 优选域名 -> {ms, ok, at}
   let forward = null;        // /api/status.forward 在途转发实况
+  let lanSnapshot = null;    // /api/cfnat/connections 设备名册（在途连接数）
   let stickyOn = true;       // /api/config.cfnat.sticky 设备粘性
   let sourceHealth = {};     // /api/status.sources 健康账
   let poolSegments = {};     // /api/status.poolSegments：当前池的 CF 段分布
@@ -117,6 +118,10 @@
       }
       forward = st.forward || null;
       renderForward();
+      // 设备行的出口来自 forward.clients（日志），连接数来自设备名册。
+      // 两边都在刷新，拿到任何一边都要重画一次，否则新上线的设备要等到
+      // 下一次全量 status 轮询才出现。
+      if (lanSnapshot) renderLan(lanSnapshot);
       poolSegments = st.poolSegments || {};
       domainFallback = Array.isArray(st.domainFallback) ? st.domainFallback : [];
       poolBlock = st.poolBlock || null;
@@ -166,6 +171,7 @@
     try {
       const snap = await api("/api/cfnat/connections");
       if (!isCurrentPoll("lan", version)) return;
+      lanSnapshot = snap;
       renderLan(snap);
     } catch (_) { /* 心跳容错 */ }
   }
@@ -225,10 +231,34 @@
     return row;
   }
 
-  /* ---------- 渲染：在途转发目标（cfnat 日志实况） ---------- */
+  /* ---------- 渲染：在途转发目标（cfnat 日志实况） ----------
+     一设备一行，形如「192.168.1.11 转发目标 47.242.15.101」。
+     用户要回答的问题是「我这台设备现在走哪个出口」，全池分布那一行回答不了。
+     没有客户端字段（旧版 cfnat 日志）时退回旧的整体分布，不显示空表。 */
   function renderForward() {
     const el = $("forwardLine");
     if (!el) return;
+    el.replaceChildren();
+    const clients = forward?.clients || [];
+    if (clients.length) {
+      for (const c of clients) {
+        const row = document.createElement("span");
+        row.className = "fwd-row";
+        row.append(Object.assign(document.createElement("b"), { className: "mono", textContent: c.client || "?" }));
+        row.append(document.createTextNode(" 转发目标 "));
+        row.append(Object.assign(document.createElement("span"), { className: "mono fwd-host", textContent: c.host || "–" }));
+        // 出口不止一个，说明这台设备走到过回退成员上。不是错误，但值得看见。
+        const alt = (c.counts || []).length;
+        if (alt > 1) {
+          row.append(Object.assign(document.createElement("em"), {
+            className: "fwd-note",
+            textContent: `（近 ${c.total} 次走过 ${alt} 个出口）`,
+          }));
+        }
+        el.append(row);
+      }
+      return;
+    }
     if (!forward || !forward.host) {
       el.textContent = "在途转发目标 –（等待首条转发日志）";
       return;
@@ -337,8 +367,8 @@
     const foot = $("throneFoot");
     if (foot) {
       foot.textContent = stickyOn
-        ? "「测」= 重新体检（WS 延迟 + 可选 VLESS 测速）；踢后后台自动补位；设备粘性开：同设备恒定走同一上游。"
-        : "「测」= 重新体检（WS 延迟 + 可选 VLESS 测速）；踢后后台自动补位；设备粘性关：按连接轮转铺开全部成员。";
+        ? "「测」= 重新体检（WS 延迟 + 可选 VLESS 测速）；踢后后台自动补位；设备粘性开：一台设备钉一个出口，设备之间错开。"
+        : "「测」= 重新体检（WS 延迟 + 可选 VLESS 测速）；踢后后台自动补位；设备粘性关：按连接轮转，同一设备的请求会散到不同出口。";
     }
     const disabled = new Set(active.disabled || []);
     const prioSet = new Set(active.priority || []);
@@ -650,17 +680,28 @@
       .replace("https://cf.junzhen.qzz.io/", "junzhen·");
   }
 
-  /* ---------- 渲染：设备名册（伍） ---------- */
+  /* ---------- 渲染：设备名册（陆） ----------
+     每台设备多一列「转发目标」：从 cfnat 日志的 IP→出口映射里取。
+     这是把两张互不相干的表（/proc 的连接数、日志里的拨号目标）按客户端
+     IP 拼起来——四层转发没有别的办法知道这件事。 */
+  function clientTargetMap() {
+    const map = {};
+    for (const c of forward?.clients || []) {
+      if (c && c.client) map[c.client] = c;
+    }
+    return map;
+  }
   function renderLan(snap) {
     const body = $("lanBody");
     if (!body) return;
     const sources = snap?.sources || [];
     body.replaceChildren();
     if (has("lanHead")) $("lanHead").textContent = `陆 · 设备名册 · ${sources.length} 台`;
+    const targets = clientTargetMap();
     if (!sources.length) {
       const tr = document.createElement("tr");
       const td = document.createElement("td");
-      td.colSpan = 3;
+      td.colSpan = 4;
       if (snap?.error) {
         td.textContent = `读取失败：${snap.error}`;
       } else {
@@ -674,11 +715,27 @@
     for (const s of sources) {
       const tr = document.createElement("tr");
       const states = Object.entries(s.states || {}).map(([k, v]) => `${k} × ${v}`).join(" · ");
-      const cells = [[s.ip || "--", "mono"], [String(s.connections ?? 0), "mono hl"], [states || "--", ""]];
-      for (const [value, cls] of cells) {
+      // 没有该设备的拨号日志（例如刚好还没建立过新连接）就写「–」，
+      // 不要拿别的设备的目标来凑数。
+      const hit = targets[s.ip];
+      let target = "–";
+      let targetTitle = "";
+      if (hit) {
+        target = hit.host || "–";
+        const dist = (hit.counts || []).map((c) => `${c.host}×${c.count}`).join(" · ");
+        if (dist) targetTitle = `近 ${hit.total} 次：${dist}`;
+      }
+      const cells = [
+        [s.ip || "--", "mono", ""],
+        [String(s.connections ?? 0), "mono hl", ""],
+        [states || "--", "", ""],
+        [target, "mono", targetTitle],
+      ];
+      for (const [value, cls, title] of cells) {
         const td = document.createElement("td");
         td.textContent = value;
         if (cls) td.className = cls;
+        if (title) td.title = title;
         tr.append(td);
       }
       frag.append(tr);
