@@ -138,6 +138,49 @@ func TestRecordDomainProbeSuppressesDeadWhenProbeBroken(t *testing.T) {
 	if view := a.domainLatencySnapshot()["a.example.com"]; view.OK {
 		t.Fatal("view.OK = true, want false (last round was unreachable)")
 	}
+	// 同一批样本也要被算作「测速通路可疑」：Stage=speed 且 TCP 通、测速全零。
+	st := a.speedPathStatus()
+	if !st.Suspect || st.ZeroRounds != speedPathWarnRounds || st.TCPOK != 3 || st.SpeedOK != 0 {
+		t.Fatalf("speedPath = %+v, want suspect with zeroRounds=%d tcpOk=3 speedOk=0", st, speedPathWarnRounds)
+	}
+}
+
+// 模板不可用降级成 tcp-only 时，本轮根本没碰测速端点，不能算进 TCPOK，
+// 否则三轮后会把故障指到上游端点头上。
+func TestSpeedPathIgnoresTCPOnlyRounds(t *testing.T) {
+	a := newProbeTestApp(t)
+	samples := map[string]domainProbeSample{
+		"a.example.com": {OK: true, Stage: "tcp-only", TCPMs: 30},
+		"b.example.com": {OK: true, Stage: "tcp-only", TCPMs: 40},
+	}
+	for i := 0; i < speedPathWarnRounds+2; i++ {
+		a.recordDomainProbeResults(samples)
+	}
+	st := a.speedPathStatus()
+	if st.Suspect || st.ZeroRounds != 0 || st.TCPOK != 0 || st.SpeedOK != 0 {
+		t.Fatalf("tcp-only 轮不应判端点可疑，实际 %+v", st)
+	}
+}
+
+// 整轮无成绩时，失败样本不进入稳定性账：否则端点坏三轮，
+// 好域名的成功率会被拖到门槛以下，告警还没响域名先被踢出转发。
+func TestRecordDomainProbeKeepsSuccessRateOnBrokenRounds(t *testing.T) {
+	a := newProbeTestApp(t)
+	samples := map[string]domainProbeSample{
+		"a.example.com": {OK: false, Stage: "speed", TCPMs: 30, Error: "boom"},
+		"b.example.com": {OK: false, Stage: "speed", TCPMs: 35, Error: "boom"},
+	}
+	for i := 0; i < 6; i++ {
+		a.recordDomainProbeResults(samples)
+	}
+	for domain, rec := range a.domainQuality {
+		if len(rec.Samples) != 0 {
+			t.Fatalf("%s samples = %d, want 0 (broken rounds must not enter the ledger)", domain, len(rec.Samples))
+		}
+		if rec.State == domainStateUnstable || rec.State == domainStateDead {
+			t.Fatalf("%s state = %s, want untouched", domain, rec.State)
+		}
+	}
 }
 
 func TestRecordDomainProbeCountsFailuresWhenPeerSucceeds(t *testing.T) {

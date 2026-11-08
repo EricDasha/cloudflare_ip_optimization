@@ -409,6 +409,76 @@ func (a *app) probeOneDomain(ctx context.Context, domain string, timeout time.Du
 	return view, sample
 }
 
+// speedPathWarnRounds 连续多少轮「TCP 可达、测速全零」就判定测速通路可疑。
+//
+// 这不是新机制，只是把 recordDomainProbeResults 里已经存在的那道保险
+// （整轮零成绩不记连败）从「悄悄跳过」升级为「能被看见」：以前端点挂了，
+// 系统默默不再更新速度，页面上一切正常；现在会明确报出「测速通路坏了」。
+const speedPathWarnRounds = 3
+
+// speedPathStat 是测速通路自检账：记的是「测速这件事本身还能不能做」，
+// 不是某个域名的好坏。数据来自每轮体检的实际结果，不做额外探测——
+// 端点只在隧道里可达与否，脱离隧道单独 curl 得出的「可用」是假象。
+type speedPathStat struct {
+	LastRound time.Time `json:"lastRound,omitempty"`
+	// Domains 是本轮体检的域名数；SpeedOK 是真正测出速度的数量。
+	Domains int `json:"domains"`
+	SpeedOK int `json:"speedOk"`
+	// TCPOK 是「本轮真正走到测速阶段」的数量：只有 Stage=speed 才计。
+	// 用它区分「域名都连不上」与「能连上但测速通路跑不动」——
+	// 只有后者才说明测速端点或本地探针坏了；模板降级（tcp-only）不算。
+	TCPOK int `json:"tcpOk"`
+	// ZeroRounds 是连续「TCPOK>0 且 SpeedOK==0」的轮数；中间有一轮
+	// TCP 全灭或未进测速阶段，计数归零，保证「连续 N 轮」说法成立。
+	ZeroRounds int       `json:"zeroRounds"`
+	LastOK     time.Time `json:"lastOk,omitempty"`
+	Suspect    bool      `json:"suspect"`
+	// Reason 只在 Suspect 为真时非空，直接给人看。
+	Reason string `json:"reason,omitempty"`
+}
+
+func (a *app) recordSpeedPathRound(now time.Time, domains, speedOK, tcpOK int) {
+	a.speedPathMu.Lock()
+	defer a.speedPathMu.Unlock()
+	s := &a.speedPath
+	s.LastRound = now
+	s.Domains = domains
+	s.SpeedOK = speedOK
+	s.TCPOK = tcpOK
+	if speedOK > 0 {
+		s.LastOK = now
+		s.ZeroRounds = 0
+		if s.Suspect {
+			log.Printf("domain speed path recovered: %d/%d domains produced speed samples", speedOK, domains)
+		}
+		s.Suspect = false
+		s.Reason = ""
+		return
+	}
+	if tcpOK == 0 {
+		// 本轮要么域名全不可达，要么模板降级根本没进测速阶段。
+		// 这时的零成绩不能算到端点头上；同时清零连续计数，
+		// 否则跨一轮断档后再累计，页面上的「连续 N 轮」就是失实的。
+		s.ZeroRounds = 0
+		return
+	}
+	s.ZeroRounds++
+	if s.ZeroRounds >= speedPathWarnRounds {
+		if !s.Suspect {
+			log.Printf("domain speed path suspect: %d consecutive rounds TCP-reachable but zero speed samples (endpoint %s)", s.ZeroRounds, domainSpeedProbeURL(domainSpeedDefaultBytes))
+		}
+		s.Suspect = true
+		// 每轮重写，避免停在阈值那一轮的数字上。
+		s.Reason = "连续 " + strconv.Itoa(s.ZeroRounds) + " 轮 TCP 可达但测速全零：测速端点或隧道疑似失效"
+	}
+}
+
+func (a *app) speedPathStatus() speedPathStat {
+	a.speedPathMu.Lock()
+	defer a.speedPathMu.Unlock()
+	return a.speedPath
+}
+
 // recordDomainProbeResults 把本轮样本记入稳定性账，重算统计与状态，并回填 UI 视图。
 //
 // 一道刻意的保险：只有当本轮至少有一个域名测速成功时，失败才计入连败。
@@ -419,12 +489,24 @@ func (a *app) probeOneDomain(ctx context.Context, domain string, timeout time.Du
 func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) {
 	now := time.Now()
 	speedSuccess := 0
+	tcpReachable := 0
 	for _, sample := range samples {
 		if sample.OK && sample.Stage == "speed" {
 			speedSuccess++
 		}
+		// 只有 Stage 为 speed 才说明「本轮真的尝试过测速且域名可达」。
+		// tcp-only 是模板不可用时的降级样本，此时根本没走到测速端点，
+		// 计进来会让「端点坏了」在模板故障时误报。
+		if sample.Stage == "speed" {
+			tcpReachable++
+		}
 	}
+	a.recordSpeedPathRound(now, len(samples), speedSuccess, tcpReachable)
 	probeHealthy := speedSuccess > 0
+	// 「域名能连上、但没有一个测出速度」才是测速通路本身的可疑形态。
+	// 若连 TCP 都不通，不能把责任推给端点，仍按旧口径记失败，
+	// 否则域名真的整组死掉时反而永远清不掉。
+	probePathBroken := !probeHealthy && tcpReachable > 0
 	if !probeHealthy && len(samples) > 0 {
 		log.Printf("domain probe: no domain produced a speed sample this round (%d domains), failures not counted toward dead", len(samples))
 	}
@@ -436,9 +518,16 @@ func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) {
 			rec = &domainQuality{Domain: domain}
 			a.domainQuality[domain] = rec
 		}
-		rec.Samples = append(rec.Samples, sample)
-		if len(rec.Samples) > domainQualitySampleCap {
-			rec.Samples = rec.Samples[len(rec.Samples)-domainQualitySampleCap:]
+		// 整轮无成绩（probeHealthy=false）时，失败的样本连账都不入。
+		// 只挡住 ConsecutiveFailures 不够：SuccessRate 是按时段样本算的，
+		// 端点坏三轮就会把好域名拖成 unstable，随后被移出转发——
+		// 测速端点坏了，反倒把域名池清空。
+		entered := sample.OK || !probePathBroken
+		if entered {
+			rec.Samples = append(rec.Samples, sample)
+			if len(rec.Samples) > domainQualitySampleCap {
+				rec.Samples = rec.Samples[len(rec.Samples)-domainQualitySampleCap:]
+			}
 		}
 		rec.LastProbeAt = now
 		if sample.OK {
@@ -449,7 +538,9 @@ func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) {
 			rec.ConsecutiveFailures++
 			rec.ConsecutiveSuccesses = 0
 		}
-		rec.recalculate()
+		if entered {
+			rec.recalculate()
+		}
 	}
 	// 已移出池的域名不再占据成绩册。
 	for domain := range a.domainQuality {

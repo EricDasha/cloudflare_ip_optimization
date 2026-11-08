@@ -137,6 +137,168 @@ func (a *app) sourceHealthSnapshot() map[string]*sourceHealthStat {
 	return out
 }
 
+// ---------------------------------------------------------------------------
+// 渠道汇总（优选台饼图与渠道排行）
+// ---------------------------------------------------------------------------
+
+// sourceChannelStat 是「渠道视角」的供给汇总：把逐源健康账按四层渠道归并，
+// 再叠加当前在位成员与在位验活成绩。
+//
+// 为什么要另做一层：逐源表（/api/status.sources）能看出「哪个 URL 挂了」，
+// 但看不出「哪一层最近在真正供血」——同一层里十个源，九个空转、一个供了
+// 全部 IP，逐源表上两者都是一行。渠道汇总回答的是后一个问题。
+type sourceChannelStat struct {
+	Channel string `json:"channel"`
+	Label   string `json:"label"`
+	// Sources 是该渠道下的具体来源数（URL / 维护者 / 逻辑层各算一个）。
+	Sources int `json:"sources"`
+	// Candidates 是当前候选池里属于该渠道的 IP 数。不用健康账里的累计 IP 数：
+	// 那个数每轮只增不减，跑一天就是五位数，看不出「现在手里有多少牌」。
+	Candidates int `json:"candidates"`
+	// InPool 是当前真正在位的成员数；Alive/Slow/Failing 是它们的验活分档。
+	InPool  int `json:"inPool"`
+	Alive   int `json:"alive"`
+	Slow    int `json:"slow"`
+	Failing int `json:"failing"`
+	// Fetches/Successes/SuccessRate 是抓取层面的可用率，与 IP 质量无关。
+	Fetches     int       `json:"fetches"`
+	Successes   int       `json:"successes"`
+	SuccessRate float64   `json:"successRate"`
+	Backoff     int       `json:"backoff"`
+	LastSuccess time.Time `json:"lastSuccess,omitempty"`
+	LastError   string    `json:"lastError,omitempty"`
+	// Score 是给人排序用的 0~100 综合活性分：
+	// 七成看「在位成员里有多少还在通过验活」，三成看「抓取成功率」。
+	// 权重写死是刻意的——这是展示指标，不参与任何调度决策。
+	Score float64 `json:"score"`
+
+	// lastErrorAt 是 LastError 的写入时点，仅用于渠道内比较新旧，不序列化。
+	lastErrorAt time.Time
+}
+
+// sourceChannelOrder 决定页面上的渠道顺序，与 proxyCandidateSourceOrder 对齐。
+var sourceChannelOrder = []struct{ Key, Label string }{
+	{"user", "手动"},
+	{"cfdata", "CFdata"},
+	{"subscription", "订阅"},
+	{"bestcf", "BestCF"},
+}
+
+// sourceChannelOf 把健康账的键归到渠道。键的构造散落在各抓取点：
+// user:env / cfdata:<文件> / sub:<维护者> / subscription:pool / bestcf 的原始 URL。
+// 认不出的键返回空串，调用方跳过——宁可少算，也不把未知来源硬塞进 bestcf。
+func sourceChannelOf(key string) string {
+	switch {
+	case strings.HasPrefix(key, "user:"):
+		return "user"
+	case strings.HasPrefix(key, "cfdata:"):
+		return "cfdata"
+	case strings.HasPrefix(key, "sub:"), strings.HasPrefix(key, "subscription:"):
+		return "subscription"
+	case strings.HasPrefix(key, "https://"), strings.HasPrefix(key, "http://"):
+		return "bestcf"
+	}
+	return ""
+}
+
+// sourceChannelSummary 汇总四层渠道的供给与活性。只读三份现有账本，不新增状态：
+// 逐源健康账、候选快照的 IP→来源映射、在位验活账。
+func (a *app) sourceChannelSummary() []sourceChannelStat {
+	out := make([]sourceChannelStat, len(sourceChannelOrder))
+	byKey := make(map[string]*sourceChannelStat, len(out))
+	for i, meta := range sourceChannelOrder {
+		out[i] = sourceChannelStat{Channel: meta.Key, Label: meta.Label}
+		byKey[meta.Key] = &out[i]
+	}
+
+	now := time.Now()
+	for key, stat := range a.sourceHealthSnapshot() {
+		ch := byKey[sourceChannelOf(key)]
+		if ch == nil {
+			continue
+		}
+		ch.Sources++
+		ch.Fetches += stat.Fetches
+		ch.Successes += stat.Successes
+		if stat.LastSuccess.After(ch.LastSuccess) {
+			ch.LastSuccess = stat.LastSuccess
+		}
+		// 只保留最近一败的报错，避免把一个早已恢复的源的小毛病挂在渠道头上。
+		if stat.LastError != "" && stat.LastFailed.After(ch.lastErrorAt) {
+			ch.LastError = stat.LastError
+			ch.lastErrorAt = stat.LastFailed
+		}
+		if now.Before(stat.BackoffUntil) {
+			ch.Backoff++
+		}
+	}
+
+	pool := a.proxyActivePoolSnapshot()
+	snapshot := a.proxyCandidateSnapshot()
+	sourceByIP := snapshot.SourceByIP
+	for _, ip := range snapshot.IPs {
+		if ch := byKey[sourceByIP[ip]]; ch != nil {
+			ch.Candidates++
+		}
+	}
+	a.throneProbeMu.Lock()
+	probe := make(map[string]throneProbeStat, len(a.throneProbe))
+	for name, st := range a.throneProbe {
+		if st != nil {
+			probe[name] = *st
+		}
+	}
+	a.throneProbeMu.Unlock()
+	failThreshold := throneProbeFailThreshold()
+
+	// 只统计 IP：优选域名没有来源账，且全部来自 bestcf 域名表，混进来会让
+	// 环形图恒被 BestCF 占掉大半，反而看不出「IP 供给哪一层在供血」。
+	// 域名随驾数由前端单列一行说明。
+	members := pool.IPs
+	for _, member := range members {
+		// 以入池时记下的来源为准；旧版本落盘的池还没有这份映射，
+		// 再退回当前候选快照，最后才按手动处理。
+		channel := pool.MemberChannels[member]
+		if channel == "" {
+			channel = sourceByIP[member]
+		}
+		if channel == "" {
+			channel = "user"
+		}
+		ch := byKey[channel]
+		if ch == nil {
+			continue
+		}
+		ch.InPool++
+		st, seen := probe[member]
+		switch {
+		case !seen:
+			// 刚入池还没轮到验活：未知不等于坏，按存活计，避免新成员被冤枉。
+			ch.Alive++
+		case st.ConsecutiveFailures >= failThreshold:
+			ch.Failing++
+		case st.SlowStrikes > 0:
+			ch.Slow++
+		default:
+			ch.Alive++
+		}
+	}
+
+	for i := range out {
+		ch := &out[i]
+		if ch.Fetches > 0 {
+			ch.SuccessRate = float64(ch.Successes) / float64(ch.Fetches)
+		}
+		aliveRate := 0.0
+		if ch.InPool > 0 {
+			aliveRate = float64(ch.Alive) / float64(ch.InPool)
+		}
+		ch.Score = 100 * (0.7*aliveRate + 0.3*ch.SuccessRate)
+		ch.Score = float64(int(ch.Score*10+0.5)) / 10
+	}
+	return out
+}
+
 type proxyCandidateSnapshot struct {
 	UpdatedAt        time.Time         `json:"updatedAt,omitempty"`
 	NextRefresh      time.Time         `json:"nextRefresh,omitempty"`
@@ -213,6 +375,17 @@ var proxyCandidateSources = map[string]proxyCandidateSource{
 			"https://raw.githubusercontent.com/gshtwy/CF-DNS-Clone/main/wetest-cloudflare-v4.txt", // 14/14
 			"https://raw.githubusercontent.com/hubbylei/bestcf/main/bestcf.txt",                   // 10/10
 			"https://raw.githubusercontent.com/ahang39/router/main/all.txt",                       // 7/7
+			// 2026-11-08 取自 cfnb（MIT）的 ADDITIONAL_SOURCES。两表都是
+			// `IP:端口#国家码` 聚合表，体量比上面任何一源都大，故排在最后：
+			// 合流是 round-robin，每源每圈只出一个 IP，排后不会挤掉小源，
+			// 小源耗尽后它们仍能持续供数。
+			// NAS 实测（单源直连）：301 KB / 3.6 s、122 KB / 1.6 s，均无重定向，
+			// 低于 512 KiB 正文上限。
+			// 各抽样 6 个 IP 走 WS 101：6/12 可用（FRA/NRT/LAX，528–844 ms），
+			// 命中率约 50%，明显低于 GitHub raw 那批 94%~100%——
+			// 它只作兜底与多样性补充，绝不前置。
+			"https://zip.cm.edu.kg/all.txt",          // 抽样 3/6 可用
+			"https://countrymerge.pages.dev/all.txt", // 抽样 3/6 可用
 		},
 	},
 }

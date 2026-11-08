@@ -70,6 +70,8 @@
   let lanSnapshot = null;    // /api/cfnat/connections 设备名册（在途连接数）
   let stickyOn = true;       // /api/config.cfnat.sticky 设备粘性
   let sourceHealth = {};     // /api/status.sources 健康账
+  let sourceChannels = [];   // /api/status.sourceChannels 四层渠道汇总
+  let speedPath = null;      // /api/status.speedPath 测速通路自检
   let poolSegments = {};     // /api/status.poolSegments：当前池的 CF 段分布
   let domainFallback = [];   // /api/status.domainFallback：非空＝域名闸正在降级兜底
   let poolBlock = null;      // /api/status.poolBlock：最近一次「换池被拦」的结构化原因
@@ -119,6 +121,8 @@
       }
       if (st.sources && typeof st.sources === "object") {
         sourceHealth = st.sources;
+        sourceChannels = Array.isArray(st.sourceChannels) ? st.sourceChannels : [];
+        speedPath = st.speedPath || null;
         renderHealth();
       }
       forward = st.forward || null;
@@ -803,7 +807,140 @@
   }
 
   /* ---------- 渲染：供给心跳（贰）——只留活源 ---------- */
+  // 渠道色阶（灰阶）：颜色跟着渠道走，不跟排名走，刷新后同一层永远同一色。
+  const CHAN_INK = { user: "#ffffff", cfdata: "#c9cad2", subscription: "#8f9099", bestcf: "#5b5c64" };
+  function renderChannelChart() {
+    const svg = $("chanDonut");
+    const legend = $("chanLegend");
+    if (!svg || !legend) return;
+    const rows = Array.isArray(sourceChannels) ? sourceChannels : [];
+    const total = rows.reduce((n, row) => n + (Number(row.inPool) || 0), 0);
+    const doms = Array.isArray(poolSnapshot?.active?.domains) ? poolSnapshot.active.domains.length : 0;
+    // 状态每 3 秒轮询一次，数据没变就别重建 SVG——否则正在悬停的扇区会被替换掉。
+    const sig = JSON.stringify(rows) + "|" + doms + "|" + JSON.stringify(speedPath || null);
+    if (svg.dataset.sig === sig) return;
+    svg.dataset.sig = sig;
+    const NS = "http://www.w3.org/2000/svg";
+    const cx = 60, cy = 60, r = 44, C = 2 * Math.PI * r;
+    svg.replaceChildren();
+    // 底环：即使一个成员都没有，也让人看出这是个环而不是加载失败。
+    const base = document.createElementNS(NS, "circle");
+    base.setAttribute("cx", cx); base.setAttribute("cy", cy); base.setAttribute("r", r);
+    base.setAttribute("fill", "none");
+    base.setAttribute("stroke", "rgb(255 255 255 / .10)");
+    base.setAttribute("stroke-width", "16");
+    svg.append(base);
+    let acc = 0;
+    for (const row of rows) {
+      const n = Number(row.inPool) || 0;
+      if (n <= 0 || total <= 0) continue;
+      const frac = n / total;
+      // 2px 的表面缝：相邻扇区不粘在一起，灰阶相邻时才分得清。
+      const gap = Math.min(C * frac * 0.4, 3);
+      const seg = document.createElementNS(NS, "circle");
+      seg.setAttribute("cx", cx); seg.setAttribute("cy", cy); seg.setAttribute("r", r);
+      seg.setAttribute("fill", "none");
+      seg.setAttribute("stroke", CHAN_INK[row.channel] || "#8f9099");
+      seg.setAttribute("stroke-width", "16");
+      seg.setAttribute("stroke-dasharray", `${Math.max(0.5, C * frac - gap)} ${C}`);
+      seg.setAttribute("stroke-dashoffset", String(-acc));
+      seg.setAttribute("transform", "rotate(-90 60 60)");
+      seg.setAttribute("class", "chan-seg");
+      const title = document.createElementNS(NS, "title");
+      title.textContent = `${row.label}：在位 ${n} 席（${Math.round(frac * 100)}%），候选 ${row.candidates || 0}，活性 ${row.alive}/${row.inPool}`;
+      seg.append(title);
+      svg.append(seg);
+      acc += C * frac;
+    }
+    const big = document.createElementNS(NS, "text");
+    big.setAttribute("x", cx); big.setAttribute("y", cy + 2);
+    big.setAttribute("text-anchor", "middle");
+    big.setAttribute("class", "chan-total mono");
+    big.textContent = String(total);
+    svg.append(big);
+    const cap = document.createElementNS(NS, "text");
+    cap.setAttribute("x", cx); cap.setAttribute("y", cy + 16);
+    cap.setAttribute("text-anchor", "middle");
+    cap.setAttribute("class", "chan-cap");
+    cap.textContent = "在位";
+    svg.append(cap);
+
+    legend.replaceChildren();
+    // 图例按活性分排序：谁最近跑得好，一眼看到；色块仍按渠道固定取色。
+    const ranked = rows.slice().sort((a, b) => (Number(b.score) || 0) - (Number(a.score) || 0));
+    const topChannel = ranked.length ? ranked[0].channel : "";
+    for (const row of ranked) {
+      const li = document.createElement("li");
+      const dot = document.createElement("span");
+      dot.className = "chan-dot";
+      dot.style.background = CHAN_INK[row.channel] || "#8f9099";
+      const name = document.createElement("span");
+      name.className = "chan-name";
+      name.textContent = row.label + (row.channel === topChannel && (Number(row.score) || 0) > 0 ? " · 最佳" : "");
+      const num = document.createElement("span");
+      num.className = "chan-num mono";
+      num.textContent = String(row.inPool || 0);
+      const sub = document.createElement("span");
+      sub.className = "chan-sub mono";
+      const share = total > 0 ? Math.round(((Number(row.inPool) || 0) / total) * 100) : 0;
+      const detail = [`${share}%`, `候 ${row.candidates || 0}`, `活 ${row.alive || 0}`];
+      if (row.slow) detail.push(`慢 ${row.slow}`);
+      if (row.failing) detail.push(`败 ${row.failing}`);
+      if (row.backoff) detail.push(`退避 ${row.backoff}`);
+      sub.textContent = detail.join(" · ") + ` · 抓成 ${Math.round((Number(row.successRate) || 0) * 100)}%`;
+      const meter = document.createElement("span");
+      meter.className = "chan-meter";
+      const fill = document.createElement("i");
+      fill.style.width = `${Math.max(0, Math.min(100, Number(row.score) || 0))}%`;
+      meter.append(fill);
+      const score = document.createElement("span");
+      score.className = "chan-score mono";
+      score.textContent = String(Math.round(Number(row.score) || 0));
+      li.append(dot, name, num, sub, meter, score);
+      if (row.lastError) li.title = `${row.channel} 最近一次失败：${row.lastError}`;
+      legend.append(li);
+    }
+
+    const dn = $("chanDomains");
+    if (dn) {
+      dn.hidden = doms === 0;
+      dn.textContent = `另 ${doms} 个优选域名随驾，不占 IP 席位`;
+    }
+
+    const note = $("speedNote");
+    if (note) {
+      const sp = speedPath || {};
+      const zero = Number(sp.speedOk) || 0;
+      const tested = Number(sp.domains) || 0;
+      const tcp = Number(sp.tcpOk) || 0;
+      // 零时间的 JSON 是 "0001-01-01T00:00:00Z"，不能用真值判断。
+      const started = sp.lastRound && !String(sp.lastRound).startsWith("0001");
+      let text = "";
+      let warn = false;
+      if (!started) {
+        note.hidden = true;
+        return;
+      } else if (sp.suspect) {
+        warn = true;
+        text = "测速通路可疑 · " + (sp.reason || "端点或隧道失效");
+      } else if (tested === 0) {
+        text = "测速通路 · 本轮无域名可测";
+      } else if (tcp === 0) {
+        text = `测速通路 · 域名全部 TCP 不通（${tested} 个），未计入`;
+      } else if (zero === 0) {
+        warn = true;
+        text = `测速本轮零成绩 · ${tcp}/${tested} 可达 · 连续 ${Number(sp.zeroRounds) || 0} 轮`;
+      } else {
+        text = `测速通路正常 · ${fmtAgo(sp.lastRound)} · ${zero}/${tested} 出成绩`;
+      }
+      note.hidden = false;
+      note.classList.toggle("warn", warn);
+      note.textContent = text;
+    }
+  }
+
   function renderHealth() {
+    renderChannelChart();
     const box = $("beacons");
     if (!box) return;
     const byIp = poolSnapshot?.sourceByIp || {};

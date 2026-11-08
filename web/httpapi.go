@@ -713,7 +713,13 @@ func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"qualityScheduler":    a.qualitySnapshot(),
 		"activeProbe":         a.activeProbeStatus(),
 		"sources":             a.sourceHealthSnapshot(),
-		"forward":             a.forwardTargetStats(2000),
+		// sourceChannels 是逐源账的渠道汇总（四层各一行），优选台饼图与
+		// 渠道排行只读这一份；归类规则留在后端，前端不再各自猜。
+		"sourceChannels": a.sourceChannelSummary(),
+		// speedPath 是测速通路自检：端点/隧道还能不能测出速度。域名成绩
+		// 全零但 TCP 可达时，问题通常在这里，而不是十二个域名同时变差。
+		"speedPath": a.speedPathStatus(),
+		"forward":   a.forwardTargetStats(2000),
 		// poolSegments 是当前池的 CF 段分布。段数 < 2 意味着抗单点能力弱，
 		// 2026-10-22 事故就是池里只有一个段，该段一挂全灭。
 		"poolSegments": poolSegmentStats(pool.IPs),

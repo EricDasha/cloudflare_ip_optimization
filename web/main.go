@@ -92,14 +92,19 @@ type app struct {
 	domainLatencyMu    sync.Mutex
 	domainLatency      map[string]domainLatency
 	domainLatencyLast  time.Time
-	domainQualityMu    sync.Mutex
-	domainQuality      map[string]*domainQuality
-	sourceHealthMu     sync.Mutex
-	sourceHealth       map[string]*sourceHealthStat
-	throneProbeMu      sync.Mutex
-	throneProbe        map[string]*throneProbeStat
-	throneLastProbe    time.Time
-	throneLastError    string
+	// speedPathMu / speedPath 记录「测速这件事本身」还能不能做。
+	// 与域名成绩账分开：成绩是每个域名的，通路是整条隧道+端点的，
+	// 混在一起会出现「十二个域名同时变差」这种无法归因的结论。
+	speedPathMu     sync.Mutex
+	speedPath       speedPathStat
+	domainQualityMu sync.Mutex
+	domainQuality   map[string]*domainQuality
+	sourceHealthMu  sync.Mutex
+	sourceHealth    map[string]*sourceHealthStat
+	throneProbeMu   sync.Mutex
+	throneProbe     map[string]*throneProbeStat
+	throneLastProbe time.Time
+	throneLastError string
 	// thronePinLoss 记录「原固定成员因判死被解除固定并下线」，供页面提示。
 	// 只保留最近几条：这是给人看的告示，不是审计全账。
 	thronePinLoss []throneLostPin

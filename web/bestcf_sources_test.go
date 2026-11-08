@@ -95,9 +95,16 @@ func TestBestcfSourceRegisteredAndEnabled(t *testing.T) {
 		t.Fatal("bestcf source not in defaultProxyCandidateSourceIDs")
 	}
 	for _, rawURL := range source.URLs {
+		// 白名单是刻意的：社区表里混进第三方 VPS 冒充 CF 边缘的例子太多
+		// （见 candidates.go 里 2026-10-22 的剔除清单）。新增源必须逐个核准，
+		// 不能靠「域名看起来像」放行。
+		// 2026-11-08 新增：zip.cm.edu.kg / countrymerge.pages.dev，
+		// 取自 cfnb（MIT），已在 NAS 实测可达且抽样 WS 命中 6/12。
 		if !strings.HasPrefix(rawURL, "https://bestcf.pages.dev/") &&
 			!strings.HasPrefix(rawURL, "https://raw.githubusercontent.com/") &&
-			!strings.HasPrefix(rawURL, "https://cf.") {
+			!strings.HasPrefix(rawURL, "https://cf.") &&
+			!strings.HasPrefix(rawURL, "https://zip.cm.edu.kg/") &&
+			!strings.HasPrefix(rawURL, "https://countrymerge.pages.dev/") {
 			t.Fatalf("bestcf URL outside allowlist origin: %s", rawURL)
 		}
 	}

@@ -26,6 +26,10 @@ type proxyActivePool struct {
 	// 加时间戳后，粘滞字段终于能自证新旧。
 	ErrorAt time.Time `json:"errorAt,omitempty"`
 
+	// MemberChannels 记录每个在位 IP 入池时的来源渠道（user/cfdata/subscription/bestcf）。
+	// 候选快照每 6 小时整体换一份，且健康池会长期保留旧成员，所以「当前候选名单里
+	// 有没有它」不能反推历史来源——不落这份映射，旧成员会被整批记成「手动」。
+	MemberChannels map[string]string `json:"memberChannels,omitempty"`
 	// Disabled 是用户显式关闭的成员（IP 或域名）：仍在位、仍可体检，但不进
 	// cfnat -fixed，绝不参与转发。为空即「全开」。
 	Disabled []string `json:"disabled,omitempty"`
@@ -84,7 +88,49 @@ func (a *app) proxyActivePoolSnapshot() proxyActivePool {
 	pool.IPs = append([]string(nil), pool.IPs...)
 	pool.Domains = append([]string(nil), pool.Domains...)
 	pool.Results = append([]proxyScanResult(nil), pool.Results...)
+	if pool.MemberChannels != nil {
+		channels := make(map[string]string, len(pool.MemberChannels))
+		for ip, channel := range pool.MemberChannels {
+			channels[ip] = channel
+		}
+		pool.MemberChannels = channels
+	}
 	return pool
+}
+
+// reconcileMemberChannels 维护「在位成员 → 入池来源」映射。
+//
+// 以入池时为准：已在映射里的成员不改写（哪怕当前候选名单把他算给了别人）；
+// 新成员先查本轮候选快照，查不到就只能是手动扶持/手动固定，记 user。
+// 只在 applyPoolLocked 这一个提交点调用，所有换池入口天然共用。
+func (a *app) reconcileMemberChannels(pool, current proxyActivePool) map[string]string {
+	if len(pool.IPs) == 0 {
+		return nil
+	}
+	snapshot := a.proxyCandidateSnapshot().SourceByIP
+	// 旧版本落盘的池没有 MemberChannels，用上次扫描留下的 SourceRank 补一次：
+	// 它比「当前候选名单」更接近入池时的真相。
+	legacyRank := make(map[string]int, len(current.Results))
+	for _, result := range current.Results {
+		legacyRank[result.IP] = result.SourceRank
+	}
+	out := make(map[string]string, len(pool.IPs))
+	for _, ip := range pool.IPs {
+		if channel := current.MemberChannels[ip]; channel != "" {
+			out[ip] = channel
+			continue
+		}
+		if rank, ok := legacyRank[ip]; ok && rank >= 0 && rank < len(proxyCandidateSourceOrder) {
+			out[ip] = proxyCandidateSourceOrder[rank]
+			continue
+		}
+		if channel := snapshot[ip]; channel != "" {
+			out[ip] = channel
+			continue
+		}
+		out[ip] = "user"
+	}
+	return out
 }
 func (a *app) importedPreferredDomains() []string {
 	// 从 v2rayn 导出的常见优选域名固定列表，用于候选池与兜底
@@ -107,6 +153,9 @@ func lockTimeout(mu *sync.Mutex, d time.Duration) bool {
 }
 
 func (a *app) applyProxyPool(pool, current proxyActivePool) error {
+	// 来源映射在取 cfnat 锁之前结算：这里只读候选快照，不去碰候选锁与
+	// cfnat 锁的交叉顺序。
+	pool.MemberChannels = a.reconcileMemberChannels(pool, current)
 	a.cfnatCtlMu.Lock()
 	defer a.cfnatCtlMu.Unlock()
 	return a.applyPoolLocked(pool, current)

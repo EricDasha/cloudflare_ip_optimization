@@ -193,6 +193,43 @@ textarea::placeholder { color: var(--text-3); }
 .beacon { display: flex; align-items: baseline; gap: var(--s2); font-size: 12px; color: var(--text-2); }
 .beacon b { font-family: var(--font-mono); font-size: 15px; color: var(--bright); font-weight: 700; }
 
+/* ---------- 渠道汇总（在位份额环 + 活性排行） ----------
+   全站黑白灰，不能靠颜色区分扇区。这里用固定灰阶 + 2px 表面缝 + 图例直标，
+   身份永远在文字里，色块只做辅助；相邻扇区的亮度差也留足了。 */
+.chan {
+  display: grid; grid-template-columns: 132px 1fr; gap: var(--s4);
+  align-items: center; margin-top: var(--s3); padding-top: var(--s4);
+  border-top: 1px solid var(--line);
+}
+.chan-figure { position: relative; width: 132px; }
+#chanDonut { display: block; width: 132px; height: 132px; }
+.chan-seg { transition: opacity var(--t-fast) var(--ease); }
+.chan-seg:hover { opacity: .7; }
+.chan-total { fill: var(--bright); font-family: var(--font-mono); font-size: 24px; font-weight: 700; }
+.chan-cap { fill: var(--text-3); font-size: 9px; letter-spacing: .14em; }
+.chan-side { min-width: 0; }
+.chan-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3); }
+.chan-head .path-label { margin: 0; }
+.chan-head .foot { padding: 0; text-align: right; }
+.chan-legend { list-style: none; margin: var(--s2) 0 0; padding: 0; display: grid; }
+.chan-legend li {
+  display: grid; grid-template-columns: 10px 6.5em minmax(2.4em, auto) 1fr minmax(44px, 24%) 2.6em;
+  align-items: center; gap: var(--s2);
+  padding: 5px 4px; border-bottom: 1px solid var(--line);
+  font-size: 12px; color: var(--text-2);
+}
+.chan-legend li:last-child { border-bottom: 0; }
+.chan-dot { width: 10px; height: 10px; border-radius: 2px; }
+.chan-name { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chan-num { font-size: 14px; font-weight: 700; color: var(--bright); }
+.chan-sub { color: var(--text-3); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chan-meter { display: block; height: 4px; background: rgb(255 255 255 / .12); border-radius: 2px; overflow: hidden; }
+.chan-meter i { display: block; height: 100%; background: var(--text-2); border-radius: 2px; }
+.chan-score { text-align: right; color: var(--text); }
+.chan-note { margin: var(--s2) 0 0; font-size: 11px; color: var(--text-3); }
+.chan-note.warn { color: var(--bright); border-left: 2px solid var(--bright); padding-left: var(--s2); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
 /* ---------- 健康小表 / 设备表 ---------- */
 .table-wrap { overflow-x: auto; margin-top: var(--s3); }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -249,6 +286,15 @@ select, input[type="search"] {
   .rowbtn .btn { padding: 8px 16px; }   /* 拇指区：行内动作触击面提到 ~36px */
   .supply-row { grid-template-columns: 1fr; }
   .supply-row .btn { justify-self: end; }
+  /* 渠道环在窄屏改为上下排：环居中，图例占满宽度；进度条让位给文字。 */
+  .chan { grid-template-columns: 1fr; justify-items: center; }
+  .chan-side { width: 100%; }
+  /* 两行式：第一行点位/渠道/在位/评分，第二行明细整行铺开。
+     明细原本 nowrap，窄屏会把整张卡片顶出屏幕。 */
+  .chan-legend li { grid-template-columns: 10px 1fr auto; row-gap: 3px; }
+  .chan-sub { grid-column: 1 / -1; grid-row: 2; white-space: normal; overflow-wrap: anywhere; }
+  /* 窄屏去掉进度条与分数：只剩数字「3 100」读不出含义，"最佳"标签已承担排序提示。 */
+  .chan-meter, .chan-score { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .ip-conn.live .n { animation: none; }
