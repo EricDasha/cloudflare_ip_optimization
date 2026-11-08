@@ -56,6 +56,9 @@ type app struct {
 	activePool       proxyActivePool
 	poolGuardMu      sync.Mutex
 	lastPoolSwitchAt time.Time
+	// lastAutoSwitchAt 是「自动换池真的执行过」的锚点，冷却闸只认它。
+	// lastPoolSwitchAt 仍记录所有池变更（剔人、扶持、手动采用），只供展示。
+	lastAutoSwitchAt time.Time
 	// poolBlock 记录最近一次「换池闸拒绝」的结构化原因，供 /api/status 直读。
 	// 与 proxyActivePool.Error（自由文本、粘滞）互补：这个字段带时间、带来源、
 	// 带下次放行时间，巡检不必再从中文句子里抠时间戳。
@@ -526,7 +529,7 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 		return
 	}
 	a.quality.commitSwitch(decision, now)
-	a.markPoolSwitched(now)
+	a.markAutoSwitch(now)
 }
 
 func (a *app) refreshAndApplyProxyPool(ctx context.Context) {

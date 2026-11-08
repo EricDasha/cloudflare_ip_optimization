@@ -164,7 +164,7 @@ func (a *app) handleActiveEndorse(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "扶持登基换池失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	a.markPoolSwitched(now)
+	a.markAutoSwitch(now)
 	log.Printf("active pool endorsed (no exam): +%d IPs +%d domains, pool now %d IPs +%d domains",
 		len(addedIPs), len(addedDomains), len(pool.IPs), len(pool.Domains))
 	writeJSON(w, map[string]any{

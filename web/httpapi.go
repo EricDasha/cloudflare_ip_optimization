@@ -307,15 +307,37 @@ func (a *app) handleProxyScanApply(w http.ResponseWriter, r *http.Request) {
 	// 社区候选源已停用：手动扫描只解析用户输入的 IP 与订阅内容。
 	// resolved, _, _ := resolveProxySources(r.Context(), cfg.Sources, cfg.Limit-len(ips))
 	// for _, ip := range resolved { addIP(ip) }
-	results := scanProxyIPs(r.Context(), ips, cfg)
-	passed := make([]string, 0)
+	// 考生供给和「入池闸」必须同一口径：WS 101 能升级 + 握手延迟在进池上限内。
+	//
+	// 旧实现只做 TCP/TLS，凡是 TLS 握手能通的都算「考过」。生产实测
+	// 2026-11-08 06:40：手动供 35 个，7 分钟内 24 个被在位验活判死——它们
+	// 连 WS 都敲不开，却因为「TLS 通了」拿到了座位。同一段代码还把 TLS
+	// 延迟上限默认成 300ms，反而把握手 1.1 秒但 WS 正常的好 IP 挡在门外
+	// （现场 35 个健康 IP 里有 4 个会被这条错闸误杀）。
+	gate := defaultProxyAutoConfig()
+	gate.Host = cfg.Host
+	gate.Port = cfg.Port
+	if cfg.Concurrency < gate.Concurrency {
+		gate.Concurrency = cfg.Concurrency
+	}
+	gate.MaxLatency = int(poolEntryMaxLatencyMs())
+	results := scanProxyWebSockets(r.Context(), ips, gate)
+	passed := make([]string, 0, len(results))
 	for _, result := range results {
-		if result.Error == "" {
+		if result.Error == "" && result.Latency <= int64(gate.MaxLatency) {
 			passed = append(passed, result.IP)
 		}
 	}
+	// 池大小封顶：请求里的 limit 是「最多扫多少」，不是「池该有多大」。
+	// 按片区轮转取前 PoolSize 个，避免一次粘贴把池子撑成 35 个、还全挤在
+	// 同一两段里。
+	if poolSize := defaultProxyAutoConfig().PoolSize; poolSize > 0 && len(passed) > poolSize {
+		before := len(passed)
+		passed = spreadBySegment(passed, poolSize)
+		log.Printf("manual supply: %d WS passes capped to pool size %d", before, len(passed))
+	}
 	if len(passed) == 0 && len(domains) == 0 {
-		http.Error(w, "未通过任何 IP", http.StatusBadRequest)
+		http.Error(w, "未通过任何 IP（需 WS 101 且握手延迟低于入池上限）", http.StatusBadRequest)
 		return
 	}
 	current := a.proxyActivePoolSnapshot()
@@ -333,17 +355,24 @@ func (a *app) handleProxyScanApply(w http.ResponseWriter, r *http.Request) {
 			mergedDomains = append(mergedDomains, domain)
 		}
 	}
+	passed, mergedDomains = carryPinnedIntoRebuild(passed, mergedDomains, current)
 	if sameIPSet(current.IPs, passed) && sameStringSet(current.Domains, mergedDomains) {
 		log.Printf("manual apply skipped: pool unchanged (%d IPs, %d domains)", len(passed), len(mergedDomains))
 		writeJSON(w, map[string]any{"ok": true, "applied": 0, "unchanged": true})
 		return
 	}
-	pool := proxyActivePool{UpdatedAt: now, Host: current.Host, Path: current.Path, IPs: passed, Domains: mergedDomains, Results: results}
+	pool := proxyActivePool{
+		UpdatedAt: now, Host: current.Host, Path: current.Path,
+		IPs: passed, Domains: mergedDomains, Results: results,
+		Priority: append([]string(nil), current.Priority...),
+		Disabled: append([]string(nil), current.Disabled...),
+		Lock:     current.Lock,
+	}
 	if err := a.applyProxyPool(pool, current); err != nil {
 		http.Error(w, "换池失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	a.markPoolSwitched(now)
+	a.markAutoSwitch(now)
 	log.Printf("manual supply applied: %d IPs + %d domains", len(passed), len(domains))
 	writeJSON(w, map[string]any{"ok": true, "applied": len(passed), "domains": len(domains)})
 }

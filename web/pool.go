@@ -159,6 +159,26 @@ func planFixedMembers(pool proxyActivePool) ([]string, []string, error) {
 	return fixed, priority, nil
 }
 
+// carryPinnedIntoRebuild 把用户置顶的成员带进「全量重挑」后的新池。
+//
+// 自动换池只负责换掉不合格的成员，不能顺手把用户点名要的 IP/域名冲掉。
+// 只保留现池里仍存在的置顶成员：它们若已死，在位验活会按同一套规则剔除，
+// 这里不复活、也不延长寿命。
+func carryPinnedIntoRebuild(ips, domains []string, current proxyActivePool) ([]string, []string) {
+	for _, member := range current.Priority {
+		if net.ParseIP(member) != nil {
+			if containsString(current.IPs, member) && !containsString(ips, member) {
+				ips = append(ips, member)
+			}
+			continue
+		}
+		if containsString(current.Domains, member) && !containsString(domains, member) {
+			domains = append(domains, member)
+		}
+	}
+	return ips, domains
+}
+
 // admittedPoolDomains 把落盘生效池里的域名过一遍质量闸。
 // 返回新切片，不修改入参；被拦下的域名仍留在体检名单上（见 domainProbeTargets），
 // 所以它们的成绩一旦好转就会在下一轮换池时自动回池。
@@ -378,13 +398,34 @@ func (a *app) seedPoolGuardFromActive() {
 	}
 	a.poolGuardMu.Lock()
 	a.lastPoolSwitchAt = pool.UpdatedAt
+	a.lastAutoSwitchAt = pool.UpdatedAt
 	a.poolGuardMu.Unlock()
 }
 
+// markPoolSwitched 记录「池子变了」的时间，只供状态展示与人工审计。
+// 它在位验活剔人、用户扶持、手动采用都会走——这些都不是「自动换池」，
+// 不能拿来当冷却锚点（见 markAutoSwitch）。
 func (a *app) markPoolSwitched(now time.Time) {
 	a.poolGuardMu.Lock()
 	a.lastPoolSwitchAt = now
 	// 换池成功即清除上一次的拦截原因：留着会让前端把历史拦截当成当前状态。
+	a.poolBlock, a.poolBlockAt, a.poolBlockBy = poolSwitchVerdict{}, time.Time{}, ""
+	a.poolGuardMu.Unlock()
+}
+
+// markAutoSwitch 记录「自动换池真的执行了」的时间，冷却闸只认这个锚点。
+//
+// 为什么必须和 markPoolSwitched 分开：冷却防的是「自动换池互相顶池」，
+// 不是「维修动作」。旧实现所有路径共用一个时间戳，生产实测 6 小时里
+// 在位验活剔人 10 次、用户手动供给 4 次，每次都把 30 分钟冷却重新拨满，
+// 自动换池被挡回 21 次、0 次成功——系统退化成「只能靠人工粘 IP」。
+//
+// 用户显式动作（手动供给、扶持登基）也调这里：刚点完就被后台顶掉同样糟糕，
+// 给用户的选择留一个冷却窗口。
+func (a *app) markAutoSwitch(now time.Time) {
+	a.poolGuardMu.Lock()
+	a.lastPoolSwitchAt = now
+	a.lastAutoSwitchAt = now
 	a.poolBlock, a.poolBlockAt, a.poolBlockBy = poolSwitchVerdict{}, time.Time{}, ""
 	a.poolGuardMu.Unlock()
 }
@@ -430,7 +471,8 @@ func (a *app) poolBlockStatus() map[string]any {
 //
 // 返回 poolSwitchVerdict 而非 bool：调用方要能把「为什么没换」写进 /api/status，
 // 只打容器日志等于静默吞单（生产 17:41/17:53 两次"优选完成"假捷报即此）。
-// 放行后调用方必须 markPoolSwitched。
+// 自动路径放行后必须 markAutoSwitch；维修动作（剔人/扶持/踢人）只记 markPoolSwitched，
+// 不重拨自动冷却的时钟。
 func (a *app) allowPoolSwitch(now time.Time, reason string) poolSwitchVerdict {
 	current := a.proxyActivePoolSnapshot()
 	minPool := defaultProxyAutoConfig().MinPool
@@ -446,13 +488,18 @@ func (a *app) allowPoolSwitch(now time.Time, reason string) poolSwitchVerdict {
 	cooldown := poolSwitchCooldown()
 	a.poolGuardMu.Lock()
 	last := a.lastPoolSwitchAt
-	a.poolGuardMu.Unlock()
-	if !understaffed && !last.IsZero() && now.Sub(last) < cooldown {
-		log.Printf("pool switch blocked by cooldown (%s ago < %s): %s", now.Sub(last).Round(time.Second), cooldown, reason)
-		return poolSwitchVerdict{Reason: "cooldown", NextAllowedAt: last.Add(cooldown)}
+	autoLast := a.lastAutoSwitchAt
+	if autoLast.IsZero() {
+		// 兼容旧账本：没有自动锚点时退回到任意池变更的时间，宁可多等一轮。
+		autoLast = last
 	}
-	if understaffed && !last.IsZero() && now.Sub(last) < cooldown {
-		log.Printf("pool switch cooldown waived for understaffed pool (%d<%d IPs, %s ago < %s): %s", len(current.IPs), minPool, now.Sub(last).Round(time.Second), cooldown, reason)
+	a.poolGuardMu.Unlock()
+	if !understaffed && !autoLast.IsZero() && now.Sub(autoLast) < cooldown {
+		log.Printf("pool switch blocked by cooldown (%s ago < %s): %s", now.Sub(autoLast).Round(time.Second), cooldown, reason)
+		return poolSwitchVerdict{Reason: "cooldown", NextAllowedAt: autoLast.Add(cooldown)}
+	}
+	if understaffed && !autoLast.IsZero() && now.Sub(autoLast) < cooldown {
+		log.Printf("pool switch cooldown waived for understaffed pool (%d<%d IPs, %s ago < %s): %s", len(current.IPs), minPool, now.Sub(autoLast).Round(time.Second), cooldown, reason)
 	}
 	if understaffed {
 		return poolSwitchVerdict{Allowed: true, Reason: "understaffed"}
@@ -491,17 +538,19 @@ func (a *app) activePoolHealthy(ips []string) bool {
 func (a *app) poolGuardStatus() map[string]any {
 	a.poolGuardMu.Lock()
 	last := a.lastPoolSwitchAt
+	autoLast := a.lastAutoSwitchAt
 	a.poolGuardMu.Unlock()
 	cooldown := poolSwitchCooldown()
 	next := ""
-	if !last.IsZero() {
-		next = last.Add(cooldown).Format(time.RFC3339)
+	if !autoLast.IsZero() {
+		next = autoLast.Add(cooldown).Format(time.RFC3339)
 	}
 	return map[string]any{
-		"cooldownMinutes": int(cooldown.Minutes()),
-		"lastSwitchAt":    last,
-		"nextAllowedAt":   next,
-		"healthWindowMin": int(activeHealthWindow().Minutes()),
+		"cooldownMinutes":  int(cooldown.Minutes()),
+		"lastSwitchAt":     last,
+		"lastAutoSwitchAt": autoLast,
+		"nextAllowedAt":    next,
+		"healthWindowMin":  int(activeHealthWindow().Minutes()),
 	}
 }
 

@@ -234,6 +234,30 @@ func spreadBySegment(ips []string, poolSize int) []string {
 	return out
 }
 
+// admitPassedUnderCeiling 把已通过终审的名单按「入池延迟上限」再裁一遍。
+// 顺序不变；results 里找不到成绩的成员保守保留（调用方给的 passed 本就来自 results）。
+//
+// 为什么要单独抽出来：手动供给、踢人补位、在位替补、自动全量重挑是四条入口，
+// 旧实现只有前三条查 800ms，自动换池按 5000ms 放行——闸门各说各话，慢 IP
+// 总能从最宽的那条缝里进来。
+func admitPassedUnderCeiling(passed []string, results []proxyScanResult, ceiling int64) []string {
+	if ceiling <= 0 || len(passed) == 0 {
+		return passed
+	}
+	latency := make(map[string]int64, len(results))
+	for _, result := range results {
+		latency[result.IP] = result.Latency
+	}
+	out := make([]string, 0, len(passed))
+	for _, ip := range passed {
+		if ms, ok := latency[ip]; ok && ms > ceiling {
+			continue
+		}
+		out = append(out, ip)
+	}
+	return out
+}
+
 // degradedFromWSResults 从 WS 扫描结果里挑出「WS 101 已通过、但没进 VLESS
 // 终审通过名单」的候选，用于池子将要空掉时的降级兜底。
 //
@@ -364,6 +388,17 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 		passed = orderPassedBySegmentHealth(passed, results)
 		passed = spreadBySegment(passed, cfg.PoolSize)
 	}
+	// 入池延迟上限对「全量重挑」同样适用。旧实现只有踢人补位和在位替补查
+	// 800ms，自动换池却按 PROXY_AUTO_MAX_LATENCY（现场 5000ms）放行，于是
+	// 1.5~2.5 秒的 IP 也能以「WS_PASS」进池，粘性设备随即卡死。所有换池
+	// 入口必须同一口径，否则闸门等于各自解释。
+	if ceiling := poolEntryMaxLatencyMs(); len(passed) > 0 {
+		before := len(passed)
+		passed = admitPassedUnderCeiling(passed, results, ceiling)
+		if dropped := before - len(passed); dropped > 0 {
+			log.Printf("auto apply rejected %d candidates over the %dms entry ceiling", dropped, ceiling)
+		}
+	}
 	// 考试结果的有效性就地复验：进池的必须是公网 IPv4 且属于 CF 边缘段。
 	// 不用「候选快照有没有变」作判据——候选池是轮转采样队列，每轮重新排序，
 	// 拿它的抖动去否定一个端到端验过的结论属于本末倒置（详见 filterPoolAdmissibleIPs）。
@@ -398,9 +433,20 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 		}
 	}
 	current := a.proxyActivePoolSnapshot()
+	// 锁位模式是用户亲手点名「只转发这些」，自动重挑无权改动。
+	if current.Lock {
+		log.Printf("proxy auto apply skipped: pool lock enabled, user-pinned members only")
+		return
+	}
 	domains := a.poolDomainMembers()
+	passed, domains = carryPinnedIntoRebuild(passed, domains, current)
 	now := time.Now()
-	pool := proxyActivePool{UpdatedAt: now, Host: cfg.Host, Path: cfg.Path, IPs: passed, Domains: domains, Results: results}
+	pool := proxyActivePool{
+		UpdatedAt: now, Host: cfg.Host, Path: cfg.Path,
+		IPs: passed, Domains: domains, Results: results,
+		Priority: append([]string(nil), current.Priority...),
+		Disabled: append([]string(nil), current.Disabled...),
+	}
 	if sameIPSet(current.IPs, passed) && sameStringSet(current.Domains, domains) {
 		if err := a.saveProxyActivePool(pool); err != nil {
 			log.Printf("save reverified proxy active pool: %v", err)
@@ -432,7 +478,7 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 		a.setProxyPoolError("自动换池失败，保留旧池: "+err.Error(), results)
 		return
 	}
-	a.markPoolSwitched(now)
+	a.markAutoSwitch(now)
 }
 
 func scanProxyWebSockets(parent context.Context, ips []string, cfg proxyAutoConfig) []proxyScanResult {
