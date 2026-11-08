@@ -50,6 +50,26 @@ func TestStaticHandlerHomeLinksToSubscription(t *testing.T) {
 	}
 }
 
+// 2026-11-05 的教训：把「立即优选」按钮改成「在位体检」时，整条全量重挑
+// 能力被无声拔掉，界面上看不出少了什么。这条守住两个入口同时存在，
+// 且按钮文字就是它的语义——改文案的人必须先想清楚是不是又换掉了行为。
+func TestHomePageKeepsBothPoolActions(t *testing.T) {
+	h := staticHandler()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body, _ := io.ReadAll(rec.Body)
+	html := string(body)
+	for _, want := range []string{
+		`id="testBtn"`, `<span id="testLabel">当前测试</span>`,
+		`id="optimizeBtn"`, `<span id="optimizeLabel">立即优选</span>`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("home page missing %q", want)
+		}
+	}
+}
+
 // 换池拦截必须能显示在页面上：后端一直在算 poolBlock，前端此前从没读过它，
 // 「为什么没换线」只有钻接口才看得见。这条守的是「数据做了、出口没接上」——
 // 界面上什么都看不见，用户只会以为一切正常。

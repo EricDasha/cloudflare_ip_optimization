@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark">
 <link rel="icon" href="data:,">
 <title>皇位厅 · 优选台</title>
-<link rel="stylesheet" href="/styles.css?v=20261108b">
+<link rel="stylesheet" href="/styles.css?v=20261108c">
 </head>
 <body>
 
@@ -21,7 +21,13 @@
     <a class="btn mini" id="subNav" href="/subscription">订阅</a>
     <button class="btn mini" id="logToggle" type="button">日志</button>
   </div>
-  <button class="btn primary" id="optimizeBtn" type="button"><span id="optimizeLabel">立即优选</span></button>
+  <!-- 两个动作必须分开：一个验在位，一个去外面挑。
+       2026-11-05 把「立即优选」整个换成在位体检，等于把「找更好的」这根
+       能力无声拔掉；现在各自留一个入口，按钮文字就是它的语义。 -->
+  <div class="top-actions">
+    <button class="btn" id="testBtn" type="button"><span id="testLabel">当前测试</span></button>
+    <button class="btn primary" id="optimizeBtn" type="button"><span id="optimizeLabel">立即优选</span></button>
+  </div>
 </header>
 
 <main class="stage">
@@ -134,6 +140,6 @@
 
 <footer class="foot">皇位厅 · 三层漏斗 + 设备粘性 · <span id="footClock">--</span></footer>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
-<script src="/app.js?v=20261108b"></script>
+<script src="/app.js?v=20261108c"></script>
 </body>
 </html>

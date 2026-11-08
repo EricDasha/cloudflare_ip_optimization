@@ -53,6 +53,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .st.ok { color: var(--bright); }
 .st.idle { color: var(--text-3); }
 .clock { font-family: var(--font-mono); color: var(--text-3); font-size: 12px; }
+/* 顶栏动作组：当前测试（次要）与立即优选（主要）并排。
+   两个动作语义不同，不能合并成一个按钮——合并过一次，结果把「找更好的」
+   那根能力整个弄丢了。 */
+.top-actions { display: flex; align-items: center; gap: var(--s2); }
 
 /* ---------- 按钮 ---------- */
 .btn {
@@ -276,7 +280,8 @@ select, input[type="search"] {
   /* 窄屏顶栏两行网格：品牌+主按钮居上，状态+抽屉居下 */
   .topbar { display: grid; grid-template-columns: 1fr auto; row-gap: var(--s2); }
   .brand { grid-column: 1; grid-row: 1; }
-  #optimizeBtn { grid-column: 2; grid-row: 1; }
+  .top-actions { grid-column: 2; grid-row: 1; justify-self: end; }
+  .top-actions .btn { padding: 6px 10px; }
   .top-status { grid-column: 1; grid-row: 2; }
   .drawerbar { grid-column: 2; grid-row: 2; justify-self: end; }
   .stage { padding: var(--s3) var(--s3) var(--s5); }

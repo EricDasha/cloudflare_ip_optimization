@@ -42,7 +42,7 @@ func (a *app) handleProxyCandidates(w http.ResponseWriter, r *http.Request) {
 			// 否则精筛阶段的每个拨号都瞬间返回 i/o timeout（看起来像全网断线）。
 			// 也不复用 r.Context()——客户端一断开就会把整轮考试连根取消。
 			applyCtx, cancel := newAutoApplyContext()
-			a.autoApplyProxyPool(applyCtx)
+			a.autoApplyProxyPool(applyCtx, false)
 			cancel()
 		}
 		writeSnapshot()
@@ -561,6 +561,16 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
+	// 与全量重挑/补位互斥：它们只持 proxyScanMu 跑几分钟考试，最后才拿
+	// cfnatCtlMu 落池。这期间若放行踢人，漏斗用的是开考前复制的候选快照，
+	// 被踢的 IP 会照样通过考试、在落池时被写回来——用户的操作被静默撤销。
+	// 用 TryLock 立即拒绝而非排队：踢人点下去要立刻有结果，排在几分钟的
+	// 考试后面比报错更难理解。锁序仍是 proxyScanMu → cfnatCtlMu。
+	if !a.proxyScanMu.TryLock() {
+		http.Error(w, "优选或补位正在运行，等它结束再踢", http.StatusConflict)
+		return
+	}
+	defer a.proxyScanMu.Unlock()
 	// 只拿换池锁（cfnatCtlMu），锁序全局规范 refresh → proxyScan → cfnatCtl，
 	// 绝不交叉持锁。等待而非立即拒绝——用户操作不排队吃闭门羹。
 	if !lockTimeout(&a.cfnatCtlMu, 15*time.Second) {
@@ -648,11 +658,11 @@ func sortedKeys(set map[string]struct{}) []string {
 	return out
 }
 
-// handleRevalidate 是「立即优选」按钮的新入口：暂停转发 → 验证在位成员 → 剔除垃圾 → 恢复。
+// handleRevalidate 是「当前测试」按钮的入口：暂停转发 → 验证在位成员 → 剔除垃圾 → 恢复。
 //
-// 为什么不复用 handleProxyCandidates：那个接口回答的是「外面有没有更好的」，
-// 它从不检查「现在占着位置的这些还通不通」。用户点这个按钮时的真实处境
-// 通常是「现在很卡」，要的是清理，不是扩张。
+// 与 handleOptimize 分工明确：这个回答「现在占着位置的还通不通」，
+// 那个回答「外面有没有更好的」。2026-11-05 曾把「立即优选」整个换成这条，
+// 结果「去外面找更好的」能力被无声扔掉；现在两个动作各留各的入口。
 //
 // 默认异步：一轮验证按 26 个域名、并发 3、单条十余秒算，最长要四分钟。
 // 让浏览器干等这么久，中间任何一层超时都会让用户以为点坏了——而实际上
@@ -670,12 +680,21 @@ func (a *app) handleRevalidate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 先抢席位再起协程：抢不到就直接告诉调用方「已有一轮在跑」，
-	// 不能回 202 让前端以为开跑了。
-	if !a.beginRevalidate(a.revalidateTargetCount()) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]any{
-			"ok": false, "error": "已有一轮验证在进行中",
-			"state": a.revalidateStatus(),
-		})
+	// 不能回 202 让前端以为开跑了。claim 把「另一个动作是否在跑」一起
+	// 原子判断，避免两个请求同时通过检查。
+	ok, conflict := a.claimRevalidate(a.revalidateTargetCount())
+	if !ok {
+		if conflict == "optimize" {
+			writeJSONStatus(w, http.StatusConflict, map[string]any{
+				"ok": false, "error": "立即优选正在运行，等它结束再测试",
+				"state": a.revalidateStatus(),
+			})
+		} else {
+			writeJSONStatus(w, http.StatusTooManyRequests, map[string]any{
+				"ok": false, "error": "已有一轮验证在进行中",
+				"state": a.revalidateStatus(),
+			})
+		}
 		return
 	}
 
@@ -700,6 +719,67 @@ func (a *app) handleRevalidate(w http.ResponseWriter, r *http.Request) {
 	}()
 	writeJSONStatus(w, http.StatusAccepted, map[string]any{
 		"ok": true, "started": true, "state": a.revalidateStatus(),
+	})
+}
+
+// handleOptimize 是「立即优选」按钮的入口：刷新候选 → 三层漏斗 → 换池。
+//
+// 与 handleRevalidate 分工明确：那个回答「现在占着位置的还通不通」，
+// 这个回答「外面有没有更好的」。两者都要占探测预算、都要动 cfnat，
+// 所以入口互斥——同时跑只会互相把对方的探针拖成超时。
+//
+// 和体检一样走异步：刷新 90s 上限 + 初筛/精筛/终审，整体可能跑几分钟，
+// 让浏览器干等只会让用户以为点坏了。立刻回 202，前端轮询 GET 同一路径。
+func (a *app) handleOptimize(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, a.optimizeDetail())
+		return
+	case http.MethodPost:
+	default:
+		http.Error(w, "GET or POST required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 先抢席位再起协程：抢不到就直接告诉调用方「已有一轮在跑」，
+	// 不能回 202 让前端以为开跑了。语义同 handleRevalidate。
+	ok, conflict := a.claimOptimize()
+	if !ok {
+		if conflict == "revalidate" {
+			writeJSONStatus(w, http.StatusConflict, map[string]any{
+				"ok": false, "error": "当前测试正在运行，等它结束再优选",
+				"state": a.optimizeStatus(),
+			})
+		} else {
+			writeJSONStatus(w, http.StatusTooManyRequests, map[string]any{
+				"ok": false, "error": "已有一轮立即优选在进行中",
+				"state": a.optimizeStatus(),
+			})
+		}
+		return
+	}
+
+	// 不挂 r.Context()：客户端一断开就会把整轮漏斗连根取消，
+	// 而那时可能已经换了一半的池。用 Background 让它自己跑完。
+	if r.URL.Query().Get("wait") == "1" {
+		report := a.runOptimize(context.Background())
+		// ok 必须包含 Applied：一次「跑完了但什么也没落地」的同步调用若报 200，
+		// 按状态码判断的脚本会把它当成成功。异步路径不适用——202 只表示已开跑。
+		ok := report.Error == "" && report.Blocked == "" && report.Applied
+		body := map[string]any{"ok": ok, "report": report}
+		if !ok {
+			writeJSONStatus(w, http.StatusServiceUnavailable, body)
+			return
+		}
+		writeJSON(w, body)
+		return
+	}
+
+	go func() {
+		a.runOptimize(context.Background())
+	}()
+	writeJSONStatus(w, http.StatusAccepted, map[string]any{
+		"ok": true, "started": true, "state": a.optimizeStatus(),
 	})
 }
 
@@ -730,9 +810,13 @@ func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// domainFallback 非空表示当前转发域名处于降级状态：
 		// 质量闸本要拦下，为了不空池才放行。巡检据此判断「是不是靠兜底在撑」。
 		"domainFallback": a.domainFallbackSnapshot(),
-		// revalidate 是在位成员实弹验证的实时进度。前端点了「立即优选」之后
-		// 要靠它显示「正在验第几个」——否则最长四分钟的静默期看起来就是卡死。
+		// revalidate 是「当前测试」的实时进度。前端点按钮之后要靠它显示
+		// 「正在验第几个」——否则最长四分钟的静默期看起来就是卡死。
 		"revalidate": a.revalidateStatus(),
+		// optimize 是「立即优选」的实时进度（刷新候选 → 漏斗考试）。
+		// 与 revalidate 并列而不是合并：两个动作可以分别被别的标签页触发，
+		// 页面刷新后要能同时接上各自的状态。
+		"optimize": a.optimizeStatus(),
 	})
 }
 

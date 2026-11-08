@@ -288,7 +288,20 @@ func degradedFromWSResults(results []proxyScanResult, existing []string, want in
 	return out
 }
 
-func (a *app) autoApplyProxyPool(parent context.Context) {
+// autoApplyProxyPool 跑一轮全量重挑并换池。
+//
+// manual 为真表示用户显式点了「立即优选」：缴费的是用户自己的耐心，
+// 因此不受后台防抖约束——既不查 30 分钟冷却，也不查「现池还健康就别动」
+// 的健康闸。手动供给与扶持登基早就是这个口径，全量重挑没理由例外。
+//
+// PROXY_AUTO_APPLY 仍然必须启用：它决定这套代理考试参数与终审流程是否可用，
+// 与「谁触发」无关。runOptimize 入口已就该开关给出明确报错，这里保留同一
+// 判断作防御，避免将来新增调用方绕过入口。
+//
+// 返回值 applied 表示「本轮真的把池写下去了」（换池或同集合复核落盘）。
+// 调用方不能用 UpdatedAt 变化来判断：在位探针可能在漏斗跑的几分钟里剔人，
+// 那样会把探针的动作算成优选的战果，甚至把失败报成成功。
+func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied bool) {
 	// 手动「立即优选」会经此路径：排队等待正在跑的考试，而不是拒绝。
 	if !lockTimeout(&a.proxyScanMu, 60*time.Second) {
 		log.Printf("proxy auto apply skipped: another proxy scan still running after 60s")
@@ -297,15 +310,19 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 	}
 	defer a.proxyScanMu.Unlock()
 	cfg := defaultProxyAutoConfig()
-	if !cfg.Enabled || cfg.Host == "" || cfg.Path == "" {
+	if cfg.Host == "" || cfg.Path == "" {
+		a.setProxyPoolError("PROXY_AUTO_HOST/PATH 未配置，无法优选", nil)
+		return
+	}
+	if !cfg.Enabled {
 		return
 	}
 	if strings.ContainsAny(cfg.Host, "/\\") || !strings.HasPrefix(cfg.Path, "/") {
-		log.Printf("proxy auto apply disabled: invalid host/path")
+		a.setProxyPoolError("PROXY_AUTO_HOST/PATH 格式非法，无法优选", nil)
 		return
 	}
 	if cfg.Port < 1 || cfg.Port > 65535 || cfg.Concurrency < 1 || cfg.Concurrency > 100 || cfg.MaxLatency < 1 || cfg.MaxLatency > 30000 || cfg.PoolSize < 1 || cfg.PoolSize > 50 || cfg.MinPool < 1 || cfg.MinPool > cfg.PoolSize {
-		log.Printf("proxy auto apply disabled: invalid configuration")
+		a.setProxyPoolError("候选/漏斗参数超出允许范围，无法优选", nil)
 		return
 	}
 	var vlessTemplate map[string]any
@@ -434,7 +451,13 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 	}
 	current := a.proxyActivePoolSnapshot()
 	// 锁位模式是用户亲手点名「只转发这些」，自动重挑无权改动。
+	// 手动优选期间用户仍可能临时打开锁（开跑前的预检来得及，提交前这一刻
+	// 却未必），所以这里也要留下原因；后台周期任务则不写，避免每轮都把
+	// 「池已锁定」刷成最新错误、盖掉真正的故障信息。
 	if current.Lock {
+		if manual {
+			a.setProxyPoolError("生效池已锁定（只转固定的），本轮未改动；先解锁再优选", nil)
+		}
 		log.Printf("proxy auto apply skipped: pool lock enabled, user-pinned members only")
 		return
 	}
@@ -449,20 +472,22 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 	}
 	if sameIPSet(current.IPs, passed) && sameStringSet(current.Domains, domains) {
 		if err := a.saveProxyActivePool(pool); err != nil {
-			log.Printf("save reverified proxy active pool: %v", err)
+			a.setProxyPoolError("保存复验后的池失败: "+err.Error(), nil)
 			return
 		}
 		a.activeMu.Lock()
 		a.activePool = pool
 		a.activeMu.Unlock()
 		log.Printf("proxy active pool reverified: %d IPs", len(passed))
-		return
+		return true
 	}
-	// 全量终审换池同样受全局冷却保护，避免与 scheduler 互相顶池。
-	// （残员豁免：池缩到最小数之下时 allowPoolSwitch 放行补员，见函数注释。）
-	// 拦截必须写回 pool.Error——用户点的立即优选若被拦，前端靠它报信；
-	// 只打容器日志等于静默吞单（生产 17:41/17:53 两次"优选完成"假捷报即此）。
-	verdict := a.allowPoolSwitch(now, "auto-apply")
+	// 自动全量终审与 scheduler 共用全局冷却，避免互相顶池；手动点
+	// 「立即优选」是明确指令，按手动口径放行，不受冷却与健康闸约束。
+	// 池子若一字未变，上面已经提前返回，不会为了放行白白重拨 cfnat。
+	verdict := poolSwitchVerdict{Allowed: true, Reason: "manual"}
+	if !manual {
+		verdict = a.allowPoolSwitch(now, "auto-apply")
+	}
 	if !verdict.Allowed {
 		a.recordPoolBlock(verdict, "auto-apply", now)
 		var reason string
@@ -476,9 +501,10 @@ func (a *app) autoApplyProxyPool(parent context.Context) {
 	}
 	if err := a.applyProxyPool(pool, current); err != nil {
 		a.setProxyPoolError("自动换池失败，保留旧池: "+err.Error(), results)
-		return
+		return false
 	}
 	a.markAutoSwitch(now)
+	return true
 }
 
 func scanProxyWebSockets(parent context.Context, ips []string, cfg proxyAutoConfig) []proxyScanResult {

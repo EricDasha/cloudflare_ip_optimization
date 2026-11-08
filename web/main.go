@@ -113,10 +113,19 @@ type app struct {
 	// 到期自动失效，不靠人工重置（2026-10-22 教训：闸门拦得太狠会拦死服务）。
 	domainQuarantineMu sync.Mutex
 	domainQuarantine   map[string]time.Time
-	// revalidateMu 保护「在位成员实弹验证」的实时进度（立即优选的新流程）。
+	// actionMu 把「另一个动作是否在跑」的检查与「抢自己席位」合成一步。
+	// revalidateMu / optimizeMu 只护各自的进度，分开是对的；但若入口先读
+	// 对方状态、再抢自己席位，两个并发请求可以同时通过检查，然后一起跑。
+	actionMu sync.Mutex
+	// revalidateMu 保护「当前测试」的实时进度（暂停转发 → 验在位 → 剔坏）。
 	// 单独一把锁，不与探测账共用：进度是秒级高频写的，帐是每轮一次。
 	revalidateMu sync.Mutex
 	revalidate   revalidateState
+	// optimizeMu 保护「立即优选」的实时进度（刷新候选 → 三层漏斗 → 换池）。
+	// 与 revalidate 分开：两个动作语义不同、可分别观测，但入口互斥，
+	// 不允许同时跑——它们会争同一份探测预算与 cfnat 控制权。
+	optimizeMu sync.Mutex
+	optimize   optimizeState
 }
 
 func main() {
@@ -180,8 +189,11 @@ func main() {
 	mux.HandleFunc("/api/cfnat/proxy-promote", a.handleProxyPromote)
 	mux.HandleFunc("/api/cfnat/proxy-candidates", a.handleProxyCandidates)
 	// 在位成员实弹验证：暂停转发 → 逐个验 → 剔除不合格 → 恢复。
-	// 「立即优选」按钮现在打这条，不再去外面捞新候选。
+	// 「当前测试」按钮打这条。
 	mux.HandleFunc("/api/cfnat/revalidate", a.handleRevalidate)
+	// 全量重挑：刷新候选 → 三层漏斗 → 换池。「立即优选」按钮打这条。
+	// 2026-11-05 改成体检时把这条能力整根拔掉了，现在补回来并与体检分家。
+	mux.HandleFunc("/api/cfnat/optimize", a.handleOptimize)
 	mux.HandleFunc("/api/cfnat/connections", a.handleCFnatConnections)
 	mux.HandleFunc("/api/cfnat/upstreams", a.handleCFnatUpstreams)
 	mux.HandleFunc("/api/cfnat/active/kick", a.handleActiveKick)
@@ -202,6 +214,9 @@ func main() {
 	mux.HandleFunc("/api/logs", a.handleLogs)
 	mux.HandleFunc("/api/files", a.handleFiles)
 	mux.HandleFunc("/api/file/", a.handleFileDownload)
+	// 调试接口只在 -tags debugapi 的测试构建里注册；普通构建是空实现，
+	// 连编译都不参与。/api/debug/ 在生产二进制里不存在。
+	registerDebugRoutes(mux, a)
 	mux.Handle("/", staticHandler())
 
 	addr := env("WEB_ADDR", "0.0.0.0:8080")
@@ -322,7 +337,7 @@ func (a *app) refreshCandidatesAfterCFdata() {
 		}
 		if ok {
 			applyCtx, cancelApply := newAutoApplyContext()
-			a.autoApplyProxyPool(applyCtx)
+			a.autoApplyProxyPool(applyCtx, false)
 			cancelApply()
 		}
 		log.Printf("post-cfdata candidate refresh done: ok=%v", ok)
@@ -549,7 +564,7 @@ func (a *app) refreshAndApplyProxyPool(ctx context.Context) {
 		// 漏斗另开预算：刷新会把调用方 ctx 的 deadline 吃光（见 autoApplyBudget）。
 		applyCtx, cancel := newAutoApplyContext()
 		defer cancel()
-		a.autoApplyProxyPool(applyCtx)
+		a.autoApplyProxyPool(applyCtx, false)
 	}
 }
 

@@ -159,6 +159,15 @@
       } else if (!revalidateTimer) {
         renderRevalidateProgress(rv);
       }
+      // 立即优选同理：两个动作各有自己的进度，不能只接其中一个。
+      const opt = st.optimize;
+      if (opt && opt.running) {
+        renderOptimizeProgress(opt);
+        optimizeWasRunning = true;
+        if (!optimizeTimer) optimizeTimer = setInterval(pollOptimize, 2000);
+      } else if (!optimizeTimer) {
+        renderOptimizeProgress(opt);
+      }
     } catch (_) { /* 心跳容错 */ }
   }
   async function pullPool() {
@@ -1064,34 +1073,61 @@
     body.append(frag);
   }
 
-  /* ---------- 动作一：立即优选（暂停 → 验证在位 → 剔除垃圾 → 恢复） ----------
-     语义变了：以前点它是「去外面捞一批更好的候选」，现在是「把现在占着位置的
-     这些逐个拉到真实数据面上验一遍，不合格的当场剔除」。用户点这个按钮时的
-     真实处境通常是「现在很卡，清理一下」，而不是「去扩张」。
+  /* ---------- 顶栏两个动作：当前测试 / 立即优选 ----------
+     语义必须分开，别再合并：
+     - 当前测试：暂停转发 → 验在位成员 → 剔坏 → 恢复。回答「现在这些还通不通」。
+     - 立即优选：刷新候选 → 三层漏斗 → 按质量换池。回答「外面有没有更好的」。
 
-     一轮验证最长四分钟（域名要跑 VLESS 下载），后端立刻返回 202，这里轮询
-     进度。同步干等的话，中间任何一层超时都会让用户以为点坏了——而那时转发
-     其实已经停了、验证还在跑，正好是最不该被误判的时刻。 */
+     2026-11-05 曾把「立即优选」整个换成在位体检，结果是「去外面挑更好的」
+     这根能力被无声拔掉，界面上连入口都没有。现在两条各留各的按钮。
+
+     两者都可能跑几分钟（体检要跑域名下载，优选要刷新+三层漏斗），后端
+     立刻 202，这里轮询各自进度；互斥由后端把关（409/429）。 */
   let revalidateTimer = null;
   let revalidateWasRunning = false;
+  let optimizeTimer = null;
+  let optimizeWasRunning = false;
+  let revalidateRunning = false;
+  let optimizeRunning = false;
+  let revalidatePhase = "";
+  let optimizePhase = "";
+
+  // 一个动作在跑时，另一个按钮一并锁上：两者争同一份探测预算与 cfnat
+  // 控制权，让用户点了再收 409，不如一开始就点不动。
+  function syncActionButtons() {
+    const testBtn = $("testBtn"), optBtn = $("optimizeBtn");
+    const testLabel = $("testLabel"), optLabel = $("optimizeLabel");
+    if (testBtn) {
+      testBtn.disabled = revalidateRunning || optimizeRunning;
+      testBtn.classList.toggle("busy", revalidateRunning);
+    }
+    if (optBtn) {
+      optBtn.disabled = revalidateRunning || optimizeRunning;
+      optBtn.classList.toggle("busy", optimizeRunning);
+    }
+    if (testLabel) testLabel.textContent = revalidateRunning ? (revalidatePhase || "测试中") : "当前测试";
+    if (optLabel) optLabel.textContent = optimizeRunning ? (optimizePhase || "优选中") : "立即优选";
+  }
 
   const stopRevalidatePoll = () => {
     if (revalidateTimer) { clearInterval(revalidateTimer); revalidateTimer = null; }
   };
+  const stopOptimizePoll = () => {
+    if (optimizeTimer) { clearInterval(optimizeTimer); optimizeTimer = null; }
+  };
 
   function renderRevalidateProgress(st) {
-    const btn = $("optimizeBtn");
-    if (!btn) return;
-    const label = $("optimizeLabel");
-    if (!st || !st.running) {
-      btn.disabled = false;
-      btn.classList.remove("busy");
-      if (label) label.textContent = "立即优选";
-      return;
-    }
-    btn.disabled = true;
-    btn.classList.add("busy");
-    if (label) label.textContent = `${st.phase || "验证中"}${st.total ? ` ${st.tested}/${st.total}` : ""}`;
+    revalidateRunning = !!(st && st.running);
+    revalidatePhase = revalidateRunning
+      ? `${st.phase || "验证中"}${st.total ? ` ${st.tested}/${st.total}` : ""}`
+      : "";
+    syncActionButtons();
+  }
+
+  function renderOptimizeProgress(st) {
+    optimizeRunning = !!(st && st.running);
+    optimizePhase = optimizeRunning ? (st.phase || "优选中") : "";
+    syncActionButtons();
   }
 
   function revalidateToast(rep) {
@@ -1102,6 +1138,19 @@
     const head = removed.slice(0, 3).join("、");
     const more = removed.length > 3 ? ` 等 ${removed.length} 个` : "";
     return `验证完成：剔除 ${removed.length} 个（${head}${more}），保留 ${rep.passed} 个`;
+  }
+
+  function optimizeToast(rep) {
+    if (!rep) return "优选结束，但没有拿到报告";
+    const pool = `${rep.beforeIps || 0}→${rep.afterIps || 0} 个 IP`;
+    if (rep.error) return `优选失败：${rep.error}`;
+    if (rep.blocked) return `优选跑完但换池被拦：${rep.blocked}`;
+    if (!rep.applied) return `优选未落地：${rep.note || "没有可应用的变更"}`;
+    if (!rep.changed) return `优选完成：现有池仍是最优（${rep.afterIps || 0} 个 IP）`;
+    // 刷新失败/被占用时结果来自旧候选，成功提示里也要带上，别让「候选已刷新」
+    // 的默认说辞盖过「这一轮其实用的旧名单」。
+    const tail = rep.refreshed ? " · 候选已刷新" : (rep.note ? ` · ${rep.note}` : "");
+    return `优选完成：池 ${pool}${tail}`;
   }
 
   async function pollRevalidate() {
@@ -1119,8 +1168,21 @@
     toast(revalidateToast(st.last));
   }
 
-  async function optimize() {
-    const btn = $("optimizeBtn");
+  async function pollOptimize() {
+    let st;
+    try { st = await api("/api/cfnat/optimize"); } catch (_) { return; }
+    const wasRunning = optimizeWasRunning;
+    renderOptimizeProgress(st);
+    if (st.running) { optimizeWasRunning = true; return; }
+    stopOptimizePoll();
+    optimizeWasRunning = false;
+    if (!wasRunning) return;
+    await Promise.allSettled([pullPool(), pullStatus(), pullUpstreams()]);
+    toast(optimizeToast(st.last));
+  }
+
+  async function testCurrent() {
+    const btn = $("testBtn");
     if (btn.disabled) return;
     let res;
     try {
@@ -1130,12 +1192,13 @@
         body: "{}",
       });
     } catch (e) {
-      toast(`验证未能启动：${e.message}`);
+      toast(`测试未能启动：${e.message}`);
       return;
     }
-    if (res.status === 429) { toast("已有一轮验证在进行中，等它跑完"); return; }
+    if (res.status === 409) { toast("立即优选正在跑，等它结束"); return; }
+    if (res.status === 429) { toast("已有一轮测试在进行中，等它跑完"); return; }
     if (!res.ok) {
-      toast(`验证未能启动：${(await res.text()).trim() || `HTTP ${res.status}`}`);
+      toast(`测试未能启动：${(await res.text()).trim() || `HTTP ${res.status}`}`);
       return;
     }
     // 后端已经开跑了。先锁按钮，避免这 2 秒的空窗里被连点第二次。
@@ -1146,6 +1209,35 @@
     renderRevalidateProgress({ running: true, phase: "暂停转发" });
     stopRevalidatePoll();
     revalidateTimer = setInterval(pollRevalidate, 2000);
+  }
+
+  async function runOptimize() {
+    const btn = $("optimizeBtn");
+    if (btn.disabled) return;
+    let res;
+    try {
+      res = await fetch("/api/cfnat/optimize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+    } catch (e) {
+      toast(`优选未能启动：${e.message}`);
+      return;
+    }
+    if (res.status === 409) { toast("当前测试正在跑，等它结束"); return; }
+    if (res.status === 429) { toast("已有一轮立即优选在进行中，等它跑完"); return; }
+    if (!res.ok) {
+      toast(`优选未能启动：${(await res.text()).trim() || `HTTP ${res.status}`}`);
+      return;
+    }
+    invalidatePoll("pool");
+    invalidatePoll("status");
+    invalidatePoll("upstreams");
+    optimizeWasRunning = true;
+    renderOptimizeProgress({ running: true, phase: "刷新候选" });
+    stopOptimizePoll();
+    optimizeTimer = setInterval(pollOptimize, 2000);
   }
 
   /* ---------- 动作二甲：扶持登基（免体检直入位） ---------- */
@@ -1620,7 +1712,8 @@
      两页共用这份脚本，各自只绑定本页存在的元素。
      以前这里全是裸 $("x").addEventListener(...)：订阅区一拆出去，
      主页就会在某个 null 上抛 TypeError，整份脚本连时钟都不再走。 */
-  on("optimizeBtn", "click", optimize);
+  on("testBtn", "click", testCurrent);
+  on("optimizeBtn", "click", runOptimize);
   on("supplyBtn", "click", supply);
   on("endorseBtn", "click", endorse);
   on("pinBtn", "click", pinTyped);
