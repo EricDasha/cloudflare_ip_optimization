@@ -118,6 +118,52 @@ func throneProbeSlowMs() int64 {
 	return ms
 }
 
+// ============================================================================
+// 关闭成员体检（Disabled Bench）
+// ============================================================================
+//
+// 用户关闭一个成员，本身就是一条质量信号：多半是「用着卡」。关闭之后它不再
+// 转发，正好是零成本的体检窗口——测握手延迟与下载速度，不行就扔，体质差但
+// 还能用的拿去和后面的替补比，比不过就换掉。这套参数只服务这一件事。
+
+const (
+	disabledBenchDefaultIntervalSeconds = 900  // 15 分钟一轮
+	disabledBenchMinIntervalSeconds     = 300  // 5 分钟
+	disabledBenchMaxIntervalSeconds     = 3600 // 60 分钟
+	// disabledBenchBatch 每轮最多体检几个关闭成员。每个 IP 可能要起一次
+	// sing-box 做下载测速（最长 20s），一次全测会把单轮拖到几分钟。
+	disabledBenchBatch = 3
+	// disabledBenchFailThreshold 连续几轮失败才扔。单轮内还会对握手失败
+	// 立即复测一次，所以这里 2 轮≈两轮体检，而不是「一次抖动就判死」。
+	disabledBenchFailThreshold = 2
+	// disabledBenchCandidateBatch 找替补时最多先摸几个候选的 WS。
+	disabledBenchCandidateBatch = 6
+	// disabledBenchMaxSpeedProbes 找替补时最多给几个候选做下载测速。
+	disabledBenchMaxSpeedProbes = 3
+)
+
+func disabledBenchEnabled() bool {
+	return envBool("PROXY_DISABLED_BENCH_ENABLED", true)
+}
+
+func disabledBenchInterval() time.Duration {
+	seconds := envInt("PROXY_DISABLED_BENCH_INTERVAL_SECONDS", disabledBenchDefaultIntervalSeconds)
+	if seconds < disabledBenchMinIntervalSeconds || seconds > disabledBenchMaxIntervalSeconds {
+		seconds = disabledBenchDefaultIntervalSeconds
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// disabledBenchMinMbps 是「体质差」的下限：下载速度低于它就算弱成员，
+// 需要和替补比一比。默认 3 Mbps 与 PROXY_VLESS_MIN_DOWNLOAD_MBPS 同口径。
+func disabledBenchMinMbps() float64 {
+	mbps := envFloat("PROXY_DISABLED_BENCH_MIN_MBPS", 3)
+	if mbps < 0 || mbps > 10000 {
+		mbps = 3
+	}
+	return mbps
+}
+
 // poolSwitchCooldown 全局换池冷却：任何自动换池路径（scheduler/auto-apply）
 // 两次换池之间至少间隔该时长，防止“人挤人”互相顶池。
 // 用户手动采用不受冷却限制。

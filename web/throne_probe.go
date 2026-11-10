@@ -258,7 +258,13 @@ func (a *app) throneNextDelay() time.Duration {
 // 扫一遍既没必要，也会让高频节拍变成真实负载。
 func (a *app) probeThroneOnce(parent context.Context) {
 	current := a.proxyActivePoolSnapshot()
-	members := append(append([]string(nil), current.IPs...), current.Domains...)
+	// 只摸真正参与转发的成员。被用户关闭的成员不进 -fixed，它们由
+	// disabled_bench.go 单独体检（延迟 + 下载速度）并决定去留；让这条链
+	// 也去摸它们，会出现「用户关掉的成员被验活判慢、换上一个替补并开始
+	// 转发」——用户的操作被系统悄悄撤销。
+	members := forwardingMembers(current)
+	// 顺手把账本裁到当前转发集合：旧成员不该在页面上继续挂着历史成绩。
+	a.pruneThroneLedger(members)
 	if len(members) == 0 {
 		return
 	}
@@ -539,7 +545,7 @@ func (a *app) throneActionPlan(current proxyActivePool) (dead, slow []string) {
 	for _, member := range current.Priority {
 		pinned[member] = true
 	}
-	members := append(append([]string(nil), current.IPs...), current.Domains...)
+	members := forwardingMembers(current)
 	// PROXY_DOMAIN_FORWARD 显式配置是运营者担保：与质量闸同口径，系统不动它。
 	// 否则会出现「验活剔掉 → 下一轮重算加回 → 再剔掉」的拉锯，每 30 分钟
 	// 白重启一次 cfnat。担保失败由人负责，不由验证器负责。
@@ -666,6 +672,25 @@ func (a *app) findThroneReplacements(victims []string, current proxyActivePool) 
 		log.Printf("throne probe: no qualified replacement for %v (%d candidates passed the gate)", unresolved, len(fast))
 	}
 	return picked, true
+}
+
+// pruneThroneLedger 把验活账本收窄到当前转发成员。
+//
+// 账本以前只增不减：池子换过几十轮后，一百多条历史记录一直挂着，页面显示
+// 一堆早就不在池里的 IP，throneNextDelay 还可能被历史成员的复检标记拖进
+// 高频档。每轮按当前转发集合裁剪一次，账本规模就与池规模同阶。
+func (a *app) pruneThroneLedger(keep []string) {
+	keepSet := make(map[string]bool, len(keep))
+	for _, member := range keep {
+		keepSet[member] = true
+	}
+	a.throneProbeMu.Lock()
+	for member := range a.throneProbe {
+		if !keepSet[member] {
+			delete(a.throneProbe, member)
+		}
+	}
+	a.throneProbeMu.Unlock()
 }
 
 func (a *app) setThroneProbeError(message string) {

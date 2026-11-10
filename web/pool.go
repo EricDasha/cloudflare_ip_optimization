@@ -208,6 +208,61 @@ func planFixedMembers(pool proxyActivePool) ([]string, []string, error) {
 	return fixed, priority, nil
 }
 
+// disabledMemberSet 返回用户显式关闭的成员集合。空集合表示全开。
+func disabledMemberSet(pool proxyActivePool) map[string]bool {
+	if len(pool.Disabled) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(pool.Disabled))
+	for _, member := range pool.Disabled {
+		set[member] = true
+	}
+	return set
+}
+
+// forwardingIPs 返回真正参与转发的 IP（剔除用户关闭的成员）。
+//
+// 为什么单列一个函数：换池闸、健康判定、救援判死以前都直接读 pool.IPs，
+// 而被关闭的成员虽然还在池里，却根本不进 cfnat -fixed。拿它们去算
+// 「整组是不是全死了」「池子健不健康」「人手够不够」，得出的结论与用户
+// 实际感受到的转发质量无关：
+//   - 一个健康的关闭成员会把健康闸顶住，让本该换掉的坏线换不出去；
+//   - 一个死掉的关闭成员会参与「整组已死」判定，但救它没有任何意义。
+//
+// Lock（只转置顶）是用户主动设定的转发范围，语义上确实只转 Priority；
+// 但那是另一套独立开关，改动它会连带改变锁位用户的冷却行为，不在本次
+// 修复范围内。这里只处理 Disabled 这一个明确的「不转发」信号。
+func forwardingIPs(pool proxyActivePool) []string {
+	disabled := disabledMemberSet(pool)
+	if len(disabled) == 0 {
+		return append([]string(nil), pool.IPs...)
+	}
+	out := make([]string, 0, len(pool.IPs))
+	for _, ip := range pool.IPs {
+		if !disabled[ip] {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+// forwardingMembers 返回真正参与转发的成员（IP + 域名，剔除 Disabled）。
+func forwardingMembers(pool proxyActivePool) []string {
+	disabled := disabledMemberSet(pool)
+	out := make([]string, 0, len(pool.IPs)+len(pool.Domains))
+	for _, ip := range pool.IPs {
+		if !disabled[ip] {
+			out = append(out, ip)
+		}
+	}
+	for _, domain := range pool.Domains {
+		if !disabled[domain] {
+			out = append(out, domain)
+		}
+	}
+	return out
+}
+
 // carryPinnedIntoRebuild 把用户置顶的成员带进「全量重挑」后的新池。
 //
 // 自动换池只负责换掉不合格的成员，不能顺手把用户点名要的 IP/域名冲掉。
@@ -313,10 +368,29 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 	a.poolGuardMu.Lock()
 	a.poolBlock, a.poolBlockAt, a.poolBlockBy = poolSwitchVerdict{}, time.Time{}, ""
 	a.poolGuardMu.Unlock()
-	if a.quality != nil && len(pool.IPs) > 0 {
-		a.quality.seedActive(pool.IPs[0], pool.UpdatedAt)
+	if a.quality != nil {
+		// Active 必须指向真正转发的那一个：pool.IPs[0] 可能已被用户关闭，
+		// 把它播种成 Active 会让调度器盯着一根不承载流量的线做比较。
+		if forwarding := forwardingIPs(pool); len(forwarding) > 0 {
+			a.quality.seedActive(forwarding[0], pool.UpdatedAt)
+		}
 	}
 	log.Printf("proxy active pool applied: %s", strings.Join(fixedMembers, ","))
+	return nil
+}
+
+// commitPoolWithoutRestart 落盘并替换内存中的生效池，但不重启 cfnat。
+//
+// 只用于「-fixed 集合没有变化」的变更：典型场景是剔除一个被用户关闭的成员，
+// 它本来就不转发。为了删掉这样一条记录去重启 cfnat，会把正在转发的连接
+// 全部打断一次，代价与收益完全不成比例。调用方必须先证明前后 -fixed 一致。
+func (a *app) commitPoolWithoutRestart(pool proxyActivePool) error {
+	if err := a.saveProxyActivePool(pool); err != nil {
+		return err
+	}
+	a.activeMu.Lock()
+	a.activePool = pool
+	a.activeMu.Unlock()
 	return nil
 }
 
@@ -355,9 +429,9 @@ var probeTCPAlive = func(ctx context.Context, addr string, timeout time.Duration
 // 拿它去探测会立刻全灭，把「网络慢」误判成「旧池已死」。
 func (a *app) verifyActivePoolAlive() (int, int) {
 	pool := a.proxyActivePoolSnapshot()
-	targets := make([]string, 0, len(pool.IPs)+len(pool.Domains))
-	targets = append(targets, pool.IPs...)
-	targets = append(targets, pool.Domains...)
+	// 只验真正参与转发的成员：关闭的成员不进 -fixed，证明它们活着不能说明
+	// 「旧池还能用」；反过来，它们死了也不该拖累保留旧池的判断。
+	targets := forwardingMembers(pool)
 	if len(targets) == 0 {
 		return 0, 0
 	}
@@ -525,15 +599,18 @@ func (a *app) poolBlockStatus() map[string]any {
 func (a *app) allowPoolSwitch(now time.Time, reason string) poolSwitchVerdict {
 	current := a.proxyActivePoolSnapshot()
 	minPool := defaultProxyAutoConfig().MinPool
+	// 判死、健康、人手都只看真正参与转发的成员：被用户关闭的成员不进
+	// -fixed，它们的死活与转发质量无关，不能拿来顶住闸门或冒充「整组已死」。
+	forwarding := forwardingIPs(current)
 	// 救援先行：整组已死时，冷却与健康闸都失去意义——它们防的是"瞎换"，
 	// 而此刻不换就是断网。判死口径见 activePoolAllDead。
-	if allDead, deadCount := a.activePoolAllDead(current.IPs); allDead {
+	if allDead, deadCount := a.activePoolAllDead(forwarding); allDead {
 		log.Printf("pool switch RESCUE: all %d members reached failure threshold, bypassing cooldown/health gate (%s)", deadCount, reason)
 		return poolSwitchVerdict{Allowed: true, Reason: "rescue", Rescue: true}
 	}
 	// 残员豁免：池缩到最小数之下时，冷却不再是拒绝理由——补员优先于防抖。
 	// 冷却日志照打（审计不断），但不再拦截。
-	understaffed := len(current.IPs) < minPool
+	understaffed := len(forwarding) < minPool
 	cooldown := poolSwitchCooldown()
 	a.poolGuardMu.Lock()
 	last := a.lastPoolSwitchAt
@@ -548,12 +625,12 @@ func (a *app) allowPoolSwitch(now time.Time, reason string) poolSwitchVerdict {
 		return poolSwitchVerdict{Reason: "cooldown", NextAllowedAt: autoLast.Add(cooldown)}
 	}
 	if understaffed && !autoLast.IsZero() && now.Sub(autoLast) < cooldown {
-		log.Printf("pool switch cooldown waived for understaffed pool (%d<%d IPs, %s ago < %s): %s", len(current.IPs), minPool, now.Sub(autoLast).Round(time.Second), cooldown, reason)
+		log.Printf("pool switch cooldown waived for understaffed pool (%d<%d forwarding IPs, %s ago < %s): %s", len(forwarding), minPool, now.Sub(autoLast).Round(time.Second), cooldown, reason)
 	}
 	if understaffed {
 		return poolSwitchVerdict{Allowed: true, Reason: "understaffed"}
 	}
-	if len(current.IPs) > 0 && a.activePoolHealthy(current.IPs) {
+	if len(forwarding) > 0 && a.activePoolHealthy(forwarding) {
 		log.Printf("pool switch blocked: active pool healthy, keep working IPs (%s)", reason)
 		return poolSwitchVerdict{Reason: "healthy"}
 	}
@@ -601,6 +678,23 @@ func (a *app) poolGuardStatus() map[string]any {
 		"nextAllowedAt":    next,
 		"healthWindowMin":  int(activeHealthWindow().Minutes()),
 	}
+}
+
+// pruneActiveHealth 把被动健康账裁到当前转发成员，避免池子轮换后旧 IP
+// 的记录无限堆积。旧记录本来也不会被 activePoolHealthy 读到（它只遍历
+// 当前成员），这里纯粹是控制内存与 /api/status 的体积。
+func (a *app) pruneActiveHealth(keep []string) {
+	keepSet := make(map[string]bool, len(keep))
+	for _, ip := range keep {
+		keepSet[ip] = true
+	}
+	a.activeHealthMu.Lock()
+	for ip := range a.activeHealth {
+		if !keepSet[ip] {
+			delete(a.activeHealth, ip)
+		}
+	}
+	a.activeHealthMu.Unlock()
 }
 
 func (a *app) recordActiveHealth(ip string, success bool, now time.Time) {
@@ -884,30 +978,4 @@ func (a *app) removeCandidateIP(ip string) {
 	a.candidates = snapshot
 	a.candidateMu.Unlock()
 	_ = a.saveProxyCandidateCache(snapshot)
-}
-
-// proxyForwardDomains 返回 cfnat 兜底转发域名（-fallback）。
-// 优选域名仅转发、不解析不探测：PROXY_DOMAIN_FORWARD 显式指定时优先；
-// 否则取用户启用的优选域名前 maxForwardDomains 个。数据面拨号时按当前 DNS 解析。
-// 兜底只在主池全部拨号失败时尝试，绝不参与 IP 探测与换池。
-func (a *app) proxyForwardDomains() []string {
-	configured := envForwardDomains("PROXY_DOMAIN_FORWARD")
-	if len(configured) > 0 {
-		return configured
-	}
-	if !envBool("PROXY_AUTO_DOMAINS", false) {
-		return nil
-	}
-	snapshot := a.proxyCandidateSnapshot()
-	domains := make([]string, 0, len(snapshot.PreferredDomains))
-	for _, domain := range snapshot.PreferredDomains {
-		if !validCandidateHostname(domain) {
-			continue
-		}
-		domains = append(domains, domain)
-		if len(domains) >= maxForwardDomains {
-			break
-		}
-	}
-	return domains
 }

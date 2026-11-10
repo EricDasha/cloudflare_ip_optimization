@@ -21,7 +21,7 @@ The optimizer maintains three pools with different test costs and lifecycles:
 - **Test**: Low-cost TCP/TLS latency screening
 - **Size**: Large (hundreds to thousands)
 - **Purpose**: Fast discovery of potentially usable IPs
-- Preferred domains are not resolved into candidates: they are promoted directly to cfnat `-fixed` members (dial-time live DNS, `applyPoolLocked`) and keep `-fallback` duty when explicitly configured. No IP snapshot, no candidate-pool membership. They *are* probed for quality (VLESS data-plane through the domain), but that ledger only gates admission (see Domain Quality Gate) — it never rewrites the domain into IPs.
+- Preferred domains are not resolved into candidates: they are promoted directly to cfnat `-fixed` members (dial-time live DNS, `applyPoolLocked`). `-fallback` is controlled solely by `CFNAT_FALLBACK`; preferred domains never enter it. No IP snapshot, no candidate-pool membership. They *are* probed for quality (VLESS data-plane through the domain), but that ledger only gates admission (see Domain Quality Gate) — it never rewrites the domain into IPs.
 
 ### 2. Standby Pool (替补池)
 - **Source**: Candidate IPs that pass TCP screening
@@ -257,10 +257,17 @@ The speed probe samples reads in 250ms slices and smooths them with hand-rolled 
 - `CFDATA_AUTO_SCAN` (default **true**): gates the 6-hour background scan started by `web/main.go`. Set to `false` for manual-only operation.
 - `PROXY_CFDATA_BACKGROUND_ENABLED/MINUTES/TIMEOUT`, `PROXY_CFDATA_SIFT_COUNT`: no longer read.
 
-### Preferred Domains (fixed-member dial + optional fallback)
+### Preferred Domains (fixed-member dial)
 - `PROXY_PREFERRED_MAX_DOMAINS`: cap on enabled preferred domains (default: 20). The hard code constant is `maxForwardDomains = 30`.
+- Preferred domains enter `-fixed` only; `-fallback` is fed exclusively by `CFNAT_FALLBACK`.
 - `PROXY_PREFERRED_RESOLVE`, `PROXY_PREFERRED_IPS_PER_DOMAIN`, `PROXY_PREFERRED_RESOLVED_CANDIDATES`: deprecated, no longer read (C-zone resolve-supply was removed; domains dial as `-fixed` members with live DNS)
 - `PROXY_PREFERRED_PROBE_MINUTES`, `PROXY_DYNAMIC_DISCOVERY`: deprecated, no longer read
+
+### Disabled Members (bench, not forwarding)
+- A member in `pool.Disabled` stays in the pool but never enters `-fixed`; `forwardingIPs` / `forwardingMembers` are the single source of truth for every forwarding-related gate.
+- Disabled members are excluded from the throne probe, the scheduler health probe, `verifyActivePoolAlive`, `seedActive`, and the rescue / understaffed / healthy branches of `allowPoolSwitch`. Two chains must never act on the same member.
+- They are bench-tested by `disabled_bench.go` instead: WS 101 (2 consecutive failures → remove) plus a VLESS speed sample. Below `PROXY_DISABLED_BENCH_MIN_MBPS` the member is "weak" and a replacement is sought; a candidate must be ≥25% faster (or ≥25% and ≥15 ms lower latency when no speed sample exists) to win. `Lock` suppresses swaps, never removals.
+- Pure removal commits without restarting cfnat (`commitPoolWithoutRestart`); only a swap goes through `applyPoolLocked` and restarts. Replacement members are tagged `disabled-bench` in `MemberChannels`.
 
 ### Domain Quality Gate
 - `PROXY_DOMAIN_QUALITY_GATE`: allow only domains with no evidence of being broken into `-fixed` (default: true).

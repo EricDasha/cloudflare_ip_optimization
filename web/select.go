@@ -88,6 +88,13 @@ func (a *app) handleActiveSelect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.markPoolSwitched(pool.UpdatedAt)
+	// 新关闭的成员立刻进体检队列：用户刚说它卡，正是零成本取证的窗口。
+	for _, member := range disabled {
+		if !containsString(current.Disabled, member) {
+			a.signalDisabledBench()
+			break
+		}
+	}
 	log.Printf("active pool select: enabled=%d disabled=%d priority=%d lock=%t",
 		len(enabled), len(disabled), len(priority), body.Lock)
 	writeJSON(w, map[string]any{

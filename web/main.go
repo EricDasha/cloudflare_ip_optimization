@@ -108,6 +108,14 @@ type app struct {
 	// thronePinLoss 记录「原固定成员因判死被解除固定并下线」，供页面提示。
 	// 只保留最近几条：这是给人看的告示，不是审计全账。
 	thronePinLoss []throneLostPin
+	// disabledBench* 是「被用户关闭的成员」的体检账。关闭不等于安全，也不
+	// 等于判死——停止转发正好是零成本考试窗口。详见 disabled_bench.go。
+	disabledBenchMu      sync.Mutex
+	disabledBench        map[string]*disabledBenchStat
+	disabledBenchWake    chan struct{}
+	disabledBenchLast    time.Time
+	disabledBenchLastErr string
+	disabledBenchEvents  []disabledBenchEvent
 	// domainQuarantine 是索引期域名黑名单：验活判死的域名在一段时间内不得
 	// 自动回池，否则下一轮 reconcile 会立刻把它加回来，等于白剔一次。
 	// 到期自动失效，不靠人工重置（2026-10-22 教训：闸门拦得太狠会拦死服务）。
@@ -140,16 +148,18 @@ func main() {
 	}
 
 	a := &app{
-		dataDir:          dataDir,
-		cfnat:            newManagedProcess("cfnat", env("CFNAT_BIN", "/usr/local/bin/cfnat")),
-		cfdata:           newManagedProcess("cfdata", env("CFDATA_BIN", "/usr/local/bin/cfdata")),
-		optimizerEnabled: envBool("PROXY_BACKGROUND_OPTIMIZER", true),
-		activeHealth:     make(map[string]*activeHealthStat),
-		sourceHealth:     make(map[string]*sourceHealthStat),
-		throneProbe:      make(map[string]*throneProbeStat),
-		domainQuarantine: make(map[string]time.Time),
-		domainLatency:    make(map[string]domainLatency),
-		domainQuality:    make(map[string]*domainQuality),
+		dataDir:           dataDir,
+		cfnat:             newManagedProcess("cfnat", env("CFNAT_BIN", "/usr/local/bin/cfnat")),
+		cfdata:            newManagedProcess("cfdata", env("CFDATA_BIN", "/usr/local/bin/cfdata")),
+		optimizerEnabled:  envBool("PROXY_BACKGROUND_OPTIMIZER", true),
+		activeHealth:      make(map[string]*activeHealthStat),
+		sourceHealth:      make(map[string]*sourceHealthStat),
+		throneProbe:       make(map[string]*throneProbeStat),
+		disabledBench:     make(map[string]*disabledBenchStat),
+		disabledBenchWake: make(chan struct{}, 1),
+		domainQuarantine:  make(map[string]time.Time),
+		domainLatency:     make(map[string]domainLatency),
+		domainQuality:     make(map[string]*domainQuality),
 	}
 	a.loadProxyCandidateCache()
 	a.loadProxyActivePool()
@@ -161,7 +171,10 @@ func main() {
 	a.seedPoolGuardFromActive()
 	a.quality = newQualitySchedulerRuntime(a.dataDir)
 	if pool := a.proxyActivePoolSnapshot(); len(pool.IPs) > 0 {
-		a.quality.seedActive(pool.IPs[0], pool.UpdatedAt)
+		// 只播种真正转发的成员：pool.IPs[0] 可能已被用户关闭。
+		if forwarding := forwardingIPs(pool); len(forwarding) > 0 {
+			a.quality.seedActive(forwarding[0], pool.UpdatedAt)
+		}
 	}
 	if envBool("CFNAT_AUTO_START", true) {
 		cfg := a.cfnatStartupConfig()
@@ -175,6 +188,7 @@ func main() {
 	go a.runBackgroundOptimizerLoop()
 	go a.runSubscriptionSweepLoop()
 	go a.runThroneProbeLoop()
+	go a.runDisabledBenchLoop()
 	go a.runDomainLatencyProbeLoop()
 	go a.runCFdataBackgroundScan()
 

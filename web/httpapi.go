@@ -792,6 +792,7 @@ func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"backgroundOptimizer": a.backgroundOptimizerStatus(),
 		"qualityScheduler":    a.qualitySnapshot(),
 		"activeProbe":         a.activeProbeStatus(),
+		"disabledBench":       a.disabledBenchStatus(),
 		"sources":             a.sourceHealthSnapshot(),
 		// sourceChannels 是逐源账的渠道汇总（四层各一行），优选台饼图与
 		// 渠道排行只读这一份；归类规则留在后端，前端不再各自猜。
