@@ -143,6 +143,16 @@ const (
 	disabledBenchCandidateBatch = 6
 	// disabledBenchMaxSpeedProbes 找替补时最多给几个候选做下载测速。
 	disabledBenchMaxSpeedProbes = 3
+	// disabledBenchSpeedBytes 关闭成员测速默认读取字节数。1MB 在 2 Mbps
+	// 的慢线路上约 4 秒，20 秒预算足够，也不至于为了测一个坏成员烧掉
+	// 太多流量。
+	disabledBenchSpeedBytes = 1048576
+	// disabledBenchSpeedURLDefault 关闭成员测速的默认端点。
+	//
+	// 不能用 speed.cloudflare.com：这条 Worker+ProxyIP 链路对 Cloudflare
+	// 目标会零字节挂死（2026-11-10 实测 256KB/30s 超时），对非 CF 的 OVH
+	// 定长文件则 1MB/5s 正常。端点选错，体检永远只能得出「通路坏了」。
+	disabledBenchSpeedURLDefault = "https://proof.ovh.net/files/10Mb.dat"
 )
 
 func disabledBenchEnabled() bool {

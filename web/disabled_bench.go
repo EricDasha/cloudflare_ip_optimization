@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -356,16 +358,16 @@ func disabledBenchSpeedConfig() (vlessProbeConfig, map[string]any, error) {
 	if !base.Enabled {
 		return base, nil, fmt.Errorf("PROXY_VLESS_PROBE 未启用")
 	}
-	bytes := envInt("PROXY_VLESS_SPEED_BYTES", 2097152)
-	if bytes < 1048576 || bytes > 33554432 {
-		bytes = 2097152
+	bytes := envInt("PROXY_DISABLED_BENCH_SPEED_BYTES", disabledBenchSpeedBytes)
+	if bytes < 262144 || bytes > 8*1024*1024 {
+		bytes = disabledBenchSpeedBytes
 	}
-	timeoutSeconds := envInt("PROXY_VLESS_SPEED_TIMEOUT", 20)
-	if timeoutSeconds < 5 || timeoutSeconds > 120 {
+	timeoutSeconds := envInt("PROXY_DISABLED_BENCH_SPEED_TIMEOUT", 20)
+	if timeoutSeconds < 5 || timeoutSeconds > 60 {
 		timeoutSeconds = 20
 	}
 	cfg := base
-	cfg.TestURL = vlessSpeedTestURL(bytes)
+	cfg.TestURL = disabledBenchSpeedURL(bytes)
 	cfg.ExpectedStatus = http.StatusOK
 	cfg.ReadLimit = int64(bytes)
 	cfg.MinBytes = int64(bytes)
@@ -375,6 +377,28 @@ func disabledBenchSpeedConfig() (vlessProbeConfig, map[string]any, error) {
 		return cfg, nil, err
 	}
 	return cfg, template, nil
+}
+
+// disabledBenchSpeedURL 决定关闭成员测速的下载端点。
+//
+// 不能跟全局 VLESS 测速共用 speed.cloudflare.com：这条 Worker+ProxyIP 链路
+// 对 Cloudflare 目标会零字节挂死（2026-11-10 实测 256KB/30s 超时），对
+// 非 CF 的 OVH 定长文件则 1MB/5s 正常。测速端点选错，整条体检就永远只能
+// 得出「通路坏了」，用户关掉的坏成员一个也清不掉。
+//
+// 优先级：本通道专用变量 > 全局 PROXY_VLESS_SPEED_URL（显式配置即尊重）> 默认 OVH。
+func disabledBenchSpeedURL(size int) string {
+	raw := strings.TrimSpace(env("PROXY_DISABLED_BENCH_SPEED_URL", ""))
+	if raw == "" {
+		raw = strings.TrimSpace(env("PROXY_VLESS_SPEED_URL", ""))
+	}
+	if raw == "" {
+		raw = disabledBenchSpeedURLDefault
+	}
+	if !strings.Contains(raw, "{bytes}") {
+		return raw
+	}
+	return strings.ReplaceAll(raw, "{bytes}", strconv.Itoa(size))
 }
 
 // disabledBenchSpeedProbe 是测速函数的注入点，测试里可替换成假实现。

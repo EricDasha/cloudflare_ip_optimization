@@ -336,6 +336,8 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
    - 对照也失败 → 判定「测速通路本身坏了」，本轮不记账，避免把基础设施故障算到成员头上；
    - 对照成功 → 说明通路没问题，失败归到这批成员自己的数据面，正常累计连败。
    这条对照很关键：没有它，三个数据面全坏的成员会被永远当成「通路问题」留在关闭席上，用户的关闭决定也就没法收口。
+
+   测速端点默认使用非 Cloudflare 的 OVH 定长文件，而不是 `speed.cloudflare.com`。原因是这条 Worker+ProxyIP 链路对 CF 目标会零字节挂死（2026-11-10 实测 256KB/30s 超时），对非 CF 目标 1MB/5s 正常。端点选错，整条体检就永远只能得出「通路坏了」。
 4. **下结论**：
    - 死了 → 移除。
    - 测速低于 `PROXY_DISABLED_BENCH_MIN_MBPS` → 判「体质差」，去找替补。
@@ -354,6 +356,9 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 | `PROXY_DISABLED_BENCH_ENABLED` | 关闭成员的体检通道总闸 | `true` |
 | `PROXY_DISABLED_BENCH_INTERVAL_SECONDS` | 体检周期，秒（钳制 `[300,3600]`） | `900` |
 | `PROXY_DISABLED_BENCH_MIN_MBPS` | 低于此值判「体质差」，触发找替补（钳制 `[0,10000]`） | `3` |
+| `PROXY_DISABLED_BENCH_SPEED_URL` | 测速下载端点；默认用非 CF 的 OVH 定长文件，避免 CF 目标零字节挂死 | `https://proof.ovh.net/files/10Mb.dat` |
+| `PROXY_DISABLED_BENCH_SPEED_BYTES` | 每次测速读取字节数（钳制 `[262144,8388608]`） | `1048576` |
+| `PROXY_DISABLED_BENCH_SPEED_TIMEOUT` | 单次测速超时秒数（钳制 `[5,60]`） | `20` |
 
 ### 优选域名：固定成员与质量闸
 

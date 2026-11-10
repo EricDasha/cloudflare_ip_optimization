@@ -342,3 +342,24 @@ func TestDisabledBenchControlMemberPicksFastest(t *testing.T) {
 		t.Fatalf("disabledBenchControlMember() = %q, want 2.2.2.2", got)
 	}
 }
+
+// 关闭成员测速必须有自己的可用端点：全局默认落在 CF 目标上会零字节挂死。
+func TestDisabledBenchSpeedURLPrefersDedicatedEndpoint(t *testing.T) {
+	t.Setenv("PROXY_DISABLED_BENCH_SPEED_URL", "")
+	t.Setenv("PROXY_VLESS_SPEED_URL", "")
+	if got := disabledBenchSpeedURL(1048576); got != disabledBenchSpeedURLDefault {
+		t.Fatalf("默认端点 = %q, want %q", got, disabledBenchSpeedURLDefault)
+	}
+
+	// 显式配置的全局测速地址要尊重，并支持 {bytes} 占位。
+	t.Setenv("PROXY_VLESS_SPEED_URL", "https://example.com/speed?bytes={bytes}")
+	if got := disabledBenchSpeedURL(1234); got != "https://example.com/speed?bytes=1234" {
+		t.Fatalf("全局端点替换 = %q", got)
+	}
+
+	// 本通道专用变量优先级最高；没有占位符时原样使用。
+	t.Setenv("PROXY_DISABLED_BENCH_SPEED_URL", "https://bench.example.com/file")
+	if got := disabledBenchSpeedURL(1234); got != "https://bench.example.com/file" {
+		t.Fatalf("专用端点 = %q", got)
+	}
+}

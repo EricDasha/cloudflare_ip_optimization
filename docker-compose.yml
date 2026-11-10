@@ -145,6 +145,8 @@ services:
       # 与上面域名测速踩的是同一个坑（链路到不了 CF 目标）。故 IP 侧吞吐
       # 排序目前恒为空、形同虚设。改法是把它也指向非 CF 定长文件——这会
       # 改变优选排序、进而影响换池，属独立决策，需明示后再动。
+      # 关闭成员体检不共享这个坑：它有自己的 PROXY_DISABLED_BENCH_SPEED_URL，
+      # 默认已指向非 CF 的 OVH 定长文件。
       PROXY_VLESS_SPEED_BYTES: "2097152"
       PROXY_VLESS_SPEED_TIMEOUT: "20"
       PROXY_VLESS_MIN_DOWNLOAD_MBPS: "3"
