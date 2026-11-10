@@ -335,7 +335,9 @@ func (a *app) probeDisabledWebSockets(parent context.Context, targets []string, 
 	if len(targets) == 0 {
 		return out, true
 	}
-	if !lockTimeout(&a.proxyScanMu, 20*time.Second) {
+	// 全量重挑/补位会把 proxyScanMu 攥住一到几分钟，20 秒的窗口经常整段错过。
+	// 体检本身只需要几秒，等久一点比反复撞墙划算：90 秒足以熬过一轮考试。
+	if !lockTimeout(&a.proxyScanMu, 90*time.Second) {
 		log.Printf("disabled bench: proxy scan busy, deferring %d members", len(targets))
 		return out, false
 	}
@@ -456,7 +458,7 @@ func (a *app) findDisabledBenchReplacements(victims []string, victimStats map[st
 	if len(pending) == 0 {
 		return swaps, reasons
 	}
-	if !lockTimeout(&a.proxyScanMu, 20*time.Second) {
+	if !lockTimeout(&a.proxyScanMu, 60*time.Second) {
 		log.Printf("disabled bench: replacement scan busy, keeping %d weak members", len(victims))
 		return swaps, reasons
 	}
