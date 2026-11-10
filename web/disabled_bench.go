@@ -72,7 +72,17 @@ func (a *app) runDisabledBenchLoop() {
 	case <-a.disabledBenchWake:
 	}
 	for {
-		a.probeDisabledBenchOnce(context.Background())
+		// 扫描锁被占时不要傻等满 15 分钟：用户刚关掉成员，正是指望立刻拿到
+		// 成绩的时候。锁通常几秒内就会释放，2 分钟后重试即可。
+		if a.probeDisabledBenchOnce(context.Background()) {
+			timer := time.NewTimer(disabledBenchBusyRetry)
+			select {
+			case <-timer.C:
+			case <-a.disabledBenchWake:
+				timer.Stop()
+			}
+			continue
+		}
 		timer := time.NewTimer(disabledBenchInterval())
 		select {
 		case <-timer.C:
@@ -98,6 +108,14 @@ func (a *app) setDisabledBenchError(message string) {
 	a.disabledBenchMu.Lock()
 	a.disabledBenchLastErr = message
 	a.disabledBenchLast = time.Now()
+	a.disabledBenchMu.Unlock()
+}
+
+// clearDisabledBenchError 在每轮开跑前清掉上一轮的错误。否则一次早已恢复的
+// 锁占用会永远挂在状态里，页面只能看到「还在坏」，看不出「已经好了」。
+func (a *app) clearDisabledBenchError() {
+	a.disabledBenchMu.Lock()
+	a.disabledBenchLastErr = ""
 	a.disabledBenchMu.Unlock()
 }
 
@@ -143,20 +161,24 @@ func (a *app) disabledBenchTargets(pool proxyActivePool, now time.Time) []string
 }
 
 // probeDisabledBenchOnce 是一轮完整体检：握手 → 测速 → 判档 → 需要时找替补。
-func (a *app) probeDisabledBenchOnce(parent context.Context) {
+// 返回 true 表示本轮被扫描锁挡下、值得很快重试（而不是等满一个周期）。
+func (a *app) probeDisabledBenchOnce(parent context.Context) (deferred bool) {
 	pool := a.proxyActivePoolSnapshot()
 	now := time.Now()
+	// 上一轮的错误不能一直挂着：本轮只要能开跑就先清掉，再按结果重写。
+	// 粘滞的 lastError 会让页面把一次早已恢复的锁占用说成「现在还在坏」。
+	a.clearDisabledBenchError()
 	targets := a.disabledBenchTargets(pool, now)
 	a.disabledBenchMu.Lock()
 	a.disabledBenchLast = now
 	a.disabledBenchMu.Unlock()
 	if len(targets) == 0 {
-		return
+		return false
 	}
 	cfg := defaultProxyAutoConfig()
 	if cfg.Host == "" || cfg.Path == "" {
 		a.setDisabledBenchError("缺 PROXY_AUTO_HOST/PATH，跳过关闭成员体检")
-		return
+		return false
 	}
 
 	// 第一关：WS 握手。只在这一段持 proxyScanMu，测速会起 sing-box，
@@ -164,7 +186,7 @@ func (a *app) probeDisabledBenchOnce(parent context.Context) {
 	wsResults, unlocked := a.probeDisabledWebSockets(parent, targets, cfg)
 	if !unlocked {
 		a.setDisabledBenchError("候选扫描锁被占用，本轮延后")
-		return
+		return true
 	}
 	// 握手失败先原地复测一次：关闭成员本来就没有转发流量，单次失败更可能
 	// 是瞬时抖动。复测仍失败才记一笔。
@@ -300,9 +322,10 @@ func (a *app) probeDisabledBenchOnce(parent context.Context) {
 	}
 
 	if len(removals) == 0 && len(swaps) == 0 {
-		return
+		return false
 	}
 	a.applyDisabledBenchChanges(removals, swaps, swapReasons, now)
+	return false
 }
 
 // probeDisabledWebSockets 对一组 IP 做 WS 101 握手验活。返回结果表与

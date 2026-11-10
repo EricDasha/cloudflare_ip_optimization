@@ -136,6 +136,9 @@ const (
 	// disabledBenchFailThreshold 连续几轮失败才扔。单轮内还会对握手失败
 	// 立即复测一次，所以这里 2 轮≈两轮体检，而不是「一次抖动就判死」。
 	disabledBenchFailThreshold = 2
+	// disabledBenchBusyRetry 是扫描锁被占用后的重试间隔。锁通常几秒内释放，
+	// 没必要让刚关闭的成员等满一个 15 分钟周期才拿到成绩。
+	disabledBenchBusyRetry = 2 * time.Minute
 	// disabledBenchCandidateBatch 找替补时最多先摸几个候选的 WS。
 	disabledBenchCandidateBatch = 6
 	// disabledBenchMaxSpeedProbes 找替补时最多给几个候选做下载测速。
