@@ -438,7 +438,11 @@ func (a *app) handleProxyProbe(w http.ResponseWriter, r *http.Request) {
 			if speedBytes < 1048576 || speedBytes > 33554432 {
 				speedBytes = 2097152
 			}
-			speedCfg.TestURL = vlessSpeedTestURL(speedBytes)
+			// 手动体检走和关闭席测速相同的非 CF 端点。speed.cloudflare.com
+			// 经这条 Worker+ProxyIP 隧道会零字节挂死（2026-11-10 实测
+			// 256KB/30s 超时），沿用全局端点只会让「测速」按钮永远报错。
+			// 这里只影响展示，不参与换池排序，换端点没有副作用。
+			speedCfg.TestURL = disabledBenchSpeedURL(speedBytes)
 			speedCfg.ExpectedStatus = http.StatusOK
 			speedCfg.ReadLimit = int64(speedBytes)
 			speedCfg.MinBytes = int64(speedBytes)
