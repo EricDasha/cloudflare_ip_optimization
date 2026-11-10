@@ -205,31 +205,21 @@ func (a *app) probeDisabledBenchOnce(parent context.Context) (deferred bool) {
 	}
 
 	// 第二关：下载测速。只有握手通过的才值得起 sing-box。
-	speedCfg, template, speedErr := disabledBenchSpeedConfig()
-	speedAttempts, speedSuccesses := 0, 0
-	mbpsByIP := make(map[string]float64, len(targets))
-	speedErrByIP := make(map[string]string, len(targets))
-	if speedErr == nil {
-		for _, ip := range targets {
-			r, ok := wsResults[ip]
-			if !ok || r.Error != "" {
-				continue
-			}
-			speedAttempts++
-			ctx, cancel := context.WithTimeout(parent, speedCfg.Timeout)
-			metrics, err := probeVLESSCandidateMetrics(ctx, ip, cfg.Port, speedCfg, template)
-			cancel()
-			if err == nil {
-				speedSuccesses++
-				mbpsByIP[ip] = metrics.Mbps
-			} else {
-				speedErrByIP[ip] = err.Error()
-			}
+	// 整轮零成功时不能直接认定「通路坏了」，也不能直接认定「成员坏了」：
+	// 前者会让坏成员永远留在关闭席上，后者会把一次端点故障记成成员劣迹。
+	// 这里的做法是拿一个仍在转发的成员做对照下载，由对照结果来归因。
+	round := a.disabledBenchSpeedRound(parent, targets, wsResults, cfg, pool)
+	mbpsByIP, speedErrByIP := round.Mbps, round.Errors
+	speedPathBroken := round.Broken
+	pathBrokenMsg := "测速通路本轮整体失败，未计入质量结论"
+	if speedPathBroken {
+		detail := ""
+		if round.Control != "" && round.ControlErr != "" {
+			detail = fmt.Sprintf("（对照成员 %s 同样失败：%s）", round.Control, truncateBenchText(round.ControlErr, 160))
 		}
+		pathBrokenMsg = "测速通路本轮整体失败" + detail + "，未计入质量结论"
+		a.setDisabledBenchError(pathBrokenMsg)
 	}
-	// 整轮零成功 = 测速通路本身有问题（端点、sing-box、模板），不是这批
-	// 成员都坏了。此时不记连败，只把原因写进账，避免把好成员误扔。
-	speedPathBroken := speedAttempts > 0 && speedSuccesses == 0
 
 	minMbps := disabledBenchMinMbps()
 	slowMs := throneProbeSlowMs()
@@ -253,26 +243,9 @@ func (a *app) probeDisabledBenchOnce(parent context.Context) (deferred bool) {
 		}
 		st.LastProbe = now
 		st.LastLatencyMs = r.Latency
-		if wsOK {
-			st.ConsecutiveFails = 0
-			st.LastError = ""
-			if mbps, ok := mbpsByIP[ip]; ok {
-				st.SpeedTested = true
-				st.LastMbps = mbps
-			} else {
-				st.SpeedTested = false
-				if msg := speedErrByIP[ip]; msg != "" {
-					st.LastError = "测速未完成: " + msg
-					// 别人测得出、只有它测不出：更像这条线自己的数据面坏了，
-					// 记一笔。整轮零成功的情况已由 speedPathBroken 排除。
-					if !speedPathBroken {
-						st.ConsecutiveFails++
-					}
-				} else if speedErr != nil {
-					st.LastError = "测速未启用: " + speedErr.Error()
-				}
-			}
-		} else {
+		_, speedOK := mbpsByIP[ip]
+		switch {
+		case !wsOK:
 			st.ConsecutiveFails++
 			st.SpeedTested = false
 			st.LastMbps = 0
@@ -281,17 +254,35 @@ func (a *app) probeDisabledBenchOnce(parent context.Context) (deferred bool) {
 			} else {
 				st.LastError = "未取得握手结果"
 			}
-		}
-		if speedPathBroken {
+		case speedOK:
+			st.ConsecutiveFails = 0
+			st.SpeedTested = true
+			st.LastMbps = mbpsByIP[ip]
+			st.LastError = ""
+		case speedPathBroken:
 			// 通路问题不记到成员头上；保留握手结果，下一轮再测。
 			st.SpeedTested = false
 			st.LastMbps = 0
-			st.LastError = "测速通路本轮整体失败，未计入质量结论"
+			st.LastError = pathBrokenMsg
+		case round.Available && speedErrByIP[ip] != "":
+			// 握手通、数据面测不通：和连续握手失败同属「不能用」。
+			// 这里绝不能清零 ConsecutiveFails——旧写法在握手成功时先清零，
+			// 这条判定就永远攒不到阈值，数据面全坏的成员会一直留在关闭席。
+			st.ConsecutiveFails++
+			st.SpeedTested = false
+			st.LastMbps = 0
+			st.LastError = speedErrByIP[ip]
+		default:
+			st.SpeedTested = false
+			st.LastMbps = 0
+			if msg := speedErrByIP[ip]; msg != "" {
+				st.LastError = msg
+			}
 		}
 		action, reason := decideDisabledBench(wsOK, st.ConsecutiveFails, failThreshold, st.SpeedTested, st.LastMbps, minMbps, st.LastLatencyMs, slowMs)
 		// 握手通、数据面连续测不通：和连续握手失败同属「不能用」，
 		// 但 decide 的输入只看握手，所以在这里补上这一档。
-		if action == disabledBenchKeep && wsOK && !st.SpeedTested && !speedPathBroken && speedErrByIP[ip] != "" && st.ConsecutiveFails >= failThreshold {
+		if action == disabledBenchKeep && wsOK && !st.SpeedTested && round.Available && !speedPathBroken && speedErrByIP[ip] != "" && st.ConsecutiveFails >= failThreshold {
 			action = disabledBenchRemove
 			reason = fmt.Sprintf("连续 %d 轮数据面测速失败", st.ConsecutiveFails)
 		}
@@ -384,6 +375,125 @@ func disabledBenchSpeedConfig() (vlessProbeConfig, map[string]any, error) {
 		return cfg, nil, err
 	}
 	return cfg, template, nil
+}
+
+// disabledBenchSpeedProbe 是测速函数的注入点，测试里可替换成假实现。
+type disabledBenchSpeedProbe func(context.Context, string, int, vlessProbeConfig, map[string]any) (vlessProbeMetrics, error)
+
+// disabledSpeedRound 是一轮下载测速的结果。
+//
+// Broken 与 Errors 的分工：Broken 表示「这一轮的成绩不能用来评价成员」，
+// 典型是测速端点或 sing-box 整体不可用；Errors 则是每个成员自己的失败原因。
+// 把两者混成一个字符串，正是上一版把三个坏成员永久留在关闭席的根源。
+type disabledSpeedRound struct {
+	Mbps       map[string]float64
+	Errors     map[string]string
+	Available  bool
+	Broken     bool
+	Control    string
+	ControlErr string
+}
+
+func (a *app) disabledBenchSpeedRound(parent context.Context, targets []string, wsResults map[string]proxyScanResult, cfg proxyAutoConfig, pool proxyActivePool) disabledSpeedRound {
+	out := disabledSpeedRound{Mbps: map[string]float64{}, Errors: map[string]string{}}
+	speedCfg, template, err := disabledBenchSpeedConfig()
+	if err != nil {
+		for _, ip := range targets {
+			if r, ok := wsResults[ip]; ok && r.Error == "" {
+				out.Errors[ip] = "测速未启用: " + err.Error()
+			}
+		}
+		return out
+	}
+	out.Available = true
+	return probeDisabledBenchSpeeds(parent, targets, wsResults, cfg.Port, speedCfg, template, pool, probeVLESSCandidateMetrics)
+}
+
+// probeDisabledBenchSpeeds 对握手通过的关闭成员做下载测速。
+//
+// 全员零成功时起一次对照测速：拿一个仍在转发的成员跑同样的下载。
+//   - 对照成功 → 通路没问题，失败归到这批成员头上，正常累计连败；
+//   - 对照失败 → 通路问题，本轮不记连败，避免把好成员误扔。
+func probeDisabledBenchSpeeds(
+	parent context.Context,
+	targets []string,
+	wsResults map[string]proxyScanResult,
+	port int,
+	speedCfg vlessProbeConfig,
+	template map[string]any,
+	pool proxyActivePool,
+	probe disabledBenchSpeedProbe,
+) disabledSpeedRound {
+	out := disabledSpeedRound{
+		Mbps:      make(map[string]float64, len(targets)),
+		Errors:    make(map[string]string, len(targets)),
+		Available: true,
+	}
+	attempts, successes := 0, 0
+	for _, ip := range targets {
+		r, ok := wsResults[ip]
+		if !ok || r.Error != "" {
+			continue
+		}
+		attempts++
+		ctx, cancel := context.WithTimeout(parent, speedCfg.Timeout)
+		metrics, err := probe(ctx, ip, port, speedCfg, template)
+		cancel()
+		if err == nil {
+			successes++
+			out.Mbps[ip] = metrics.Mbps
+			continue
+		}
+		out.Errors[ip] = "测速未完成: " + err.Error()
+	}
+	if attempts == 0 || successes > 0 {
+		return out
+	}
+	control := disabledBenchControlMember(pool)
+	if control == "" {
+		out.Broken = true
+		return out
+	}
+	out.Control = control
+	ctx, cancel := context.WithTimeout(parent, speedCfg.Timeout)
+	_, controlErr := probe(ctx, control, port, speedCfg, template)
+	cancel()
+	if controlErr == nil {
+		return out
+	}
+	out.Broken = true
+	out.ControlErr = controlErr.Error()
+	return out
+}
+
+// disabledBenchControlMember 从仍在转发的成员里挑一个做对照，优先最近
+// 握手延迟最低的那个：拿池里状态最好的成员做基准，才配得上「通路是否可用」
+// 这个结论。
+func disabledBenchControlMember(pool proxyActivePool) string {
+	forwarding := forwardingIPs(pool)
+	if len(forwarding) == 0 {
+		return ""
+	}
+	best := forwarding[0]
+	bestLatency := int64(1<<62 - 1)
+	for _, r := range pool.Results {
+		if r.Error != "" || r.Latency <= 0 || !containsString(forwarding, r.IP) {
+			continue
+		}
+		if r.Latency < bestLatency {
+			bestLatency = r.Latency
+			best = r.IP
+		}
+	}
+	return best
+}
+
+func truncateBenchText(text string, max int) string {
+	runes := []rune(text)
+	if len(runes) <= max {
+		return text
+	}
+	return string(runes[:max]) + "…"
 }
 
 // decideDisabledBench 纯函数：给一次体检样本分档。

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -262,5 +263,82 @@ func TestApplyDisabledBenchKeepsDisabledDomains(t *testing.T) {
 	}
 	if !containsString(pool.Disabled, "edge.example.com") {
 		t.Fatalf("关闭的域名被错误解冻：%v", pool.Disabled)
+	}
+}
+
+// 全员测速失败时，必须靠对照成员区分「通路坏了」和「这批成员坏了」。
+// 旧实现一律当成通路问题，结果三个数据面全坏的成员永远留在关闭席上。
+func TestProbeDisabledBenchSpeedsAttributesZeroSuccess(t *testing.T) {
+	targets := []string{"9.9.9.9"}
+	ws := map[string]proxyScanResult{"9.9.9.9": {IP: "9.9.9.9"}}
+	pool := proxyActivePool{
+		IPs:      []string{"1.1.1.1", "9.9.9.9"},
+		Disabled: []string{"9.9.9.9"},
+	}
+	speedCfg := vlessProbeConfig{Timeout: time.Second}
+	failing := func(_ context.Context, _ string, _ int, _ vlessProbeConfig, _ map[string]any) (vlessProbeMetrics, error) {
+		return vlessProbeMetrics{}, errors.New("dial timeout")
+	}
+
+	// 对照成员同样失败 → 通路问题，本轮不能记成员连败。
+	got := probeDisabledBenchSpeeds(context.Background(), targets, ws, 443, speedCfg, nil, pool, failing)
+	if !got.Broken {
+		t.Fatalf("对照也失败时应判定通路异常，got Broken=false")
+	}
+	if got.Control != "1.1.1.1" {
+		t.Fatalf("对照成员 = %q, want 1.1.1.1", got.Control)
+	}
+
+	// 对照成员成功、目标失败 → 是目标自己的数据面坏了。
+	controlOK := func(_ context.Context, ip string, _ int, _ vlessProbeConfig, _ map[string]any) (vlessProbeMetrics, error) {
+		if ip == "1.1.1.1" {
+			return vlessProbeMetrics{Mbps: 12}, nil
+		}
+		return vlessProbeMetrics{}, errors.New("dial timeout")
+	}
+	got = probeDisabledBenchSpeeds(context.Background(), targets, ws, 443, speedCfg, nil, pool, controlOK)
+	if got.Broken {
+		t.Fatalf("对照成功时不应判定通路异常，got Broken=true")
+	}
+	if got.Errors["9.9.9.9"] == "" {
+		t.Fatalf("目标失败原因未记录：%v", got.Errors)
+	}
+	if _, ok := got.Mbps["9.9.9.9"]; ok {
+		t.Fatalf("失败目标不应有速度成绩：%v", got.Mbps)
+	}
+}
+
+// 池里没有可对照的转发成员时，只能保守判定为通路异常，不能拿成员开刀。
+func TestProbeDisabledBenchSpeedsNoControlStaysConservative(t *testing.T) {
+	got := probeDisabledBenchSpeeds(
+		context.Background(),
+		[]string{"9.9.9.9"},
+		map[string]proxyScanResult{"9.9.9.9": {IP: "9.9.9.9"}},
+		443,
+		vlessProbeConfig{Timeout: time.Second},
+		nil,
+		proxyActivePool{IPs: []string{"9.9.9.9"}, Disabled: []string{"9.9.9.9"}},
+		func(context.Context, string, int, vlessProbeConfig, map[string]any) (vlessProbeMetrics, error) {
+			return vlessProbeMetrics{}, errors.New("dial timeout")
+		},
+	)
+	if !got.Broken {
+		t.Fatalf("没有对照成员时应保守判定通路异常，got Broken=false")
+	}
+}
+
+// 对照成员优先选池内握手延迟最低的那个，而不是数组第一个。
+func TestDisabledBenchControlMemberPicksFastest(t *testing.T) {
+	pool := proxyActivePool{
+		IPs:      []string{"1.1.1.1", "2.2.2.2", "9.9.9.9"},
+		Disabled: []string{"9.9.9.9"},
+		Results: []proxyScanResult{
+			{IP: "1.1.1.1", Latency: 400},
+			{IP: "2.2.2.2", Latency: 120},
+			{IP: "9.9.9.9", Latency: 50},
+		},
+	}
+	if got := disabledBenchControlMember(pool); got != "2.2.2.2" {
+		t.Fatalf("disabledBenchControlMember() = %q, want 2.2.2.2", got)
 	}
 }
