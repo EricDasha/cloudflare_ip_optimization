@@ -363,3 +363,23 @@ func TestDisabledBenchSpeedURLPrefersDedicatedEndpoint(t *testing.T) {
 		t.Fatalf("专用端点 = %q", got)
 	}
 }
+
+// 已经离池的 IP 不能再挂着关闭标记：它不转发、也永远不会被体检到。
+// 域名必须保留——域名闸门会临时把它移出 Domains，关闭标记不能跟着丢。
+func TestPruneDisabledMissingIPsKeepsDomains(t *testing.T) {
+	pool := proxyActivePool{
+		IPs:      []string{"1.1.1.1"},
+		Domains:  []string{"edge.example.com"},
+		Disabled: []string{"9.9.9.9", "1.1.1.1", "edge.example.com"},
+	}
+	got := pruneDisabledMissingIPs(pool)
+	want := []string{"1.1.1.1", "edge.example.com"}
+	if len(got) != len(want) {
+		t.Fatalf("pruneDisabledMissingIPs() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("pruneDisabledMissingIPs() = %v, want %v", got, want)
+		}
+	}
+}

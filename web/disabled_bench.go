@@ -167,6 +167,25 @@ func (a *app) disabledBenchTargets(pool proxyActivePool, now time.Time) []string
 func (a *app) probeDisabledBenchOnce(parent context.Context) (deferred bool) {
 	pool := a.proxyActivePoolSnapshot()
 	now := time.Now()
+	// 关闭席可能残留已经离池的 IP（旧的全量换池会原样复制 Disabled）。
+	// 它们不转发、也永远进不了体检名单，留着只会让页面显示一堆幽灵。
+	// 顺手清掉：只写盘、不重启 cfnat，不等下一次换池。
+	if len(pool.Disabled) > 0 && lockTimeout(&a.cfnatCtlMu, 5*time.Second) {
+		fresh := a.proxyActivePoolSnapshot()
+		pruned := pruneDisabledMissingIPs(fresh)
+		if len(pruned) != len(fresh.Disabled) {
+			dropped := len(fresh.Disabled) - len(pruned)
+			fresh.Disabled = pruned
+			fresh.UpdatedAt = now
+			if err := a.commitPoolWithoutRestart(fresh); err != nil {
+				log.Printf("disabled bench: prune ghost members failed: %v", err)
+			} else {
+				log.Printf("disabled bench: dropped %d disabled members no longer in pool", dropped)
+				pool = fresh
+			}
+		}
+		a.cfnatCtlMu.Unlock()
+	}
 	// 上一轮的错误不能一直挂着：本轮只要能开跑就先清掉，再按结果重写。
 	// 粘滞的 lastError 会让页面把一次早已恢复的锁占用说成「现在还在坏」。
 	a.clearDisabledBenchError()

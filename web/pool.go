@@ -263,6 +263,33 @@ func forwardingMembers(pool proxyActivePool) []string {
 	return out
 }
 
+// pruneDisabledMissingIPs 清掉 Disabled 里已经不在生效池的 IP。
+//
+// Disabled 的语义是「在位但被用户关闭」。全量重挑、手动采用、调度换人都会
+// 整批替换 IP，却把 Disabled 原样复制过去，于是早已离池的 IP 会永远挂着关闭
+// 标记：既不转发、也不体检（体检只认在位成员），页面上还一直显示成关闭成员。
+// 2026-11-10 生产上就攒了 5 个这样的幽灵，关闭席看起来有 6 个成员，实际只剩
+// 1 个域名还在池里。
+//
+// 只处理 IP：域名闸门会临时把域名移出 Domains，保留关闭标记才能防止它恢复
+// 之后被自动放回转发。域名若真被移出池，由域名链自己收尾。
+func pruneDisabledMissingIPs(pool proxyActivePool) []string {
+	if len(pool.Disabled) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(pool.Disabled))
+	for _, member := range pool.Disabled {
+		if net.ParseIP(member) != nil && !containsString(pool.IPs, member) {
+			continue
+		}
+		out = append(out, member)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // carryPinnedIntoRebuild 把用户置顶的成员带进「全量重挑」后的新池。
 //
 // 自动换池只负责换掉不合格的成员，不能顺手把用户点名要的 IP/域名冲掉。
@@ -322,6 +349,9 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 	// 启动、手动采用、立即优选都走这里，若不过闸，重启就是把坏域名重新塞回
 	// -fixed 的通道——闸门只在建池时生效、在重启时失效，等于没有。
 	pool.Domains = a.admittedPoolDomains(pool.Domains, pool.Priority)
+	// 关闭标记只对在位成员有意义：整批换 IP 时原样复制 Disabled 会留下
+	// 「已经离池、却永远显示为关闭」的幽灵，体检也不会再碰它们。
+	pool.Disabled = pruneDisabledMissingIPs(pool)
 	// 池成员 = 登基 IP + 优选域名（cfnat -fixed 原生收域名，拨号时活解析）。
 	// Disabled 成员不进 -fixed；Priority 成员排最前；Lock 时只留 Priority。
 	fixedMembers, priorityMembers, err := planFixedMembers(pool)
@@ -385,6 +415,7 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 // 它本来就不转发。为了删掉这样一条记录去重启 cfnat，会把正在转发的连接
 // 全部打断一次，代价与收益完全不成比例。调用方必须先证明前后 -fixed 一致。
 func (a *app) commitPoolWithoutRestart(pool proxyActivePool) error {
+	pool.Disabled = pruneDisabledMissingIPs(pool)
 	if err := a.saveProxyActivePool(pool); err != nil {
 		return err
 	}
