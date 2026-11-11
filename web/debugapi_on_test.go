@@ -106,3 +106,23 @@ func indexOf(haystack, needle string) int {
 	}
 	return -1
 }
+
+func TestDebugProbeTimeoutClamp(t *testing.T) {
+	cases := []struct {
+		ms   int
+		want time.Duration
+	}{
+		{0, 6 * time.Second},
+		{-5, 6 * time.Second},
+		{100, time.Second},
+		{5000, 5 * time.Second},
+		{60000, 60 * time.Second},
+		{3600000, 60 * time.Second},
+		{1<<31 - 1, 60 * time.Second},
+	}
+	for _, c := range cases {
+		if got := debugProbeTimeoutMs(c.ms); got != c.want {
+			t.Errorf("debugProbeTimeoutMs(%d) = %v, want %v", c.ms, got, c.want)
+		}
+	}
+}
