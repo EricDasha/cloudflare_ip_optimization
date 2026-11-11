@@ -512,8 +512,3 @@ func (a *app) sweepSubscriptions(parent context.Context) {
 	// 本子是候选来源，考完立刻刷新聚合快照，避免下一轮自动换池读到旧输入。
 	go a.refreshAndApplyProxyPool(context.Background())
 }
-
-// loadSubscriptionPool 兼容旧入口：载入本子（含旧池迁移）。
-func (a *app) loadSubscriptionPool() {
-	a.loadSubscriptionInventory()
-}

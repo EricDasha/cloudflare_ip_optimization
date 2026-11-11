@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"net"
 	"os"
@@ -534,32 +533,6 @@ func (a *app) subscriptionEntrySnapshot(ip string) (subEntry, bool) {
 	copied.Sources = append([]string(nil), entry.Sources...)
 	copied.Via = append([]string(nil), entry.Via...)
 	return copied, true
-}
-
-// formatSubscriptionInventoryLine 给日志用的一行摘要。
-func formatSubscriptionInventoryLine(inv subscriptionInventory) string {
-	pending, pass, failed := 0, 0, 0
-	for _, entry := range inv.Entries {
-		if entry == nil {
-			continue
-		}
-		switch entry.State {
-		case subStatePass:
-			pass++
-		case subStateFail:
-			failed++
-		default:
-			pending++
-		}
-	}
-	return fmt.Sprintf("total=%d pending=%d pass=%d fail=%d", len(inv.Entries), pending, pass, failed)
-}
-
-// subscriptionInventoryCount 本子条目数，供日志与状态使用。
-func (a *app) subscriptionInventoryCount() int {
-	a.subMu.RLock()
-	defer a.subMu.RUnlock()
-	return len(a.subInv.Entries)
 }
 
 // subscriptionInventoryEntryView 是接口输出的单条记录（带 IP 字段）。
