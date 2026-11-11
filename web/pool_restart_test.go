@@ -127,3 +127,83 @@ func TestApplyPoolLockedClearsStalePoolError(t *testing.T) {
 		t.Fatalf("saved error = %q %v, want empty", saved.Error, saved.ErrorAt)
 	}
 }
+
+// 回滚必须恢复正在跑的那份定制参数：种子进程用 Addr 127.0.0.1:11234、
+// Num 7 启动，换池落盘失败触发回滚后，最后一次启动必须是这份参数，
+// 而不是默认配置重算（0.0.0.0:1234/Num 3）+ 旧池原样 IP。
+func TestApplyPoolLockedRollbackRestoresRunningArgs(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "starts.log")
+	script := filepath.Join(dir, "fake-cfnat.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$@\" >> "+logPath+"\nexec sleep 30\n"), 0755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	a := &app{dataDir: dir, cfnat: newManagedProcess("cfnat", script)}
+	seedCfg := defaultCFnatConfig()
+	seedCfg.Addr = "127.0.0.1:11234"
+	seedCfg.Num = 7
+	seedCfg.Fixed = "3.3.3.3"
+	if err := a.cfnat.start(dir, seedCfg.args(), ""); err != nil {
+		t.Fatalf("seed cfnat start: %v", err)
+	}
+	defer a.cfnat.stop()
+	// 等 seed 的启动记录落盘再继续：start() 返回只表示已 spawn，
+	// shell 落日志有毫秒级滞后；不等它，后面 stop() 可能抢在 echo 前。
+	seedDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(seedDeadline) {
+		if data, err := os.ReadFile(logPath); err == nil && len(data) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// 堵死落盘：proxy-active.json.tmp 预先建成目录，WriteFile 必败。
+	if err := os.Mkdir(filepath.Join(dir, proxyActivePoolFile+".tmp"), 0755); err != nil {
+		t.Fatalf("mkdir tmp: %v", err)
+	}
+	current := proxyActivePool{IPs: []string{"3.3.3.3"}, Disabled: []string{"3.3.3.3"}, UpdatedAt: time.Now()}
+	pool := proxyActivePool{IPs: []string{"2.2.2.2"}, UpdatedAt: time.Now()}
+	err := a.applyPoolLocked(pool, current)
+	if err == nil || !strings.Contains(err.Error(), "保存生效池") {
+		t.Fatalf("applyPoolLocked err = %v, want 保存生效池", err)
+	}
+	lines := []string{}
+	// start() 返回只表示进程已 spawn，脚本落日志有毫秒级滞后，轮询等齐。
+	// 注意中间那次新池启动的 echo 可能永远落不下来：落盘失败后 stop()
+	// 立刻跟上，经常抢在 shell 执行 echo 之前——不断言它的行数，只
+	// 断言最后一行（回滚启动常驻，echo 一定能落下来）。
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(logPath); err == nil {
+			lines = strings.Split(strings.TrimSpace(string(data)), "\n")
+			if len(lines) >= 2 && strings.Contains(lines[len(lines)-1], "127.0.0.1:11234") {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(lines) < 2 {
+		t.Fatalf("expected at least 2 start attempts (seed, rollback), got %d: %v", len(lines), lines)
+	}
+	// 回滚用的必须是正在跑的那份定制参数，而不是默认配置重算。
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "127.0.0.1:11234") || !strings.Contains(last, "-num 7") {
+		t.Fatalf("rollback did not restore running args: %q", last)
+	}
+	if !a.cfnat.status().Running {
+		t.Fatalf("cfnat not running after rollback")
+	}
+}
+
+// 无可回滚时如实报错：从未成功启动过、旧池又全员关闭，回滚无参数可用。
+func TestApplyPoolLockedRollbackImpossibleIsReported(t *testing.T) {
+	a := &app{
+		dataDir: t.TempDir(),
+		cfnat:   newManagedProcess("cfnat", filepath.Join(t.TempDir(), "missing-cfnat")),
+	}
+	current := proxyActivePool{IPs: []string{"3.3.3.3"}, Disabled: []string{"3.3.3.3"}, UpdatedAt: time.Now()}
+	pool := proxyActivePool{IPs: []string{"2.2.2.2"}, UpdatedAt: time.Now()}
+	err := a.applyPoolLocked(pool, current)
+	if err == nil || !strings.Contains(err.Error(), "无可回滚") {
+		t.Fatalf("expected '无可回滚' error, got %v", err)
+	}
+}

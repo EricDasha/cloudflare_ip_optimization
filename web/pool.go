@@ -388,15 +388,24 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 	cfnatCfg.Fixed = strings.Join(fixedMembers, ",")
 	cfnatCfg.Priority = strings.Join(priorityMembers, ",")
 	cfnatCfg.Fallback = strings.TrimSpace(env("CFNAT_FALLBACK", ""))
-	rollbackFixed, rollbackPriority, rollbackErr := planFixedMembers(current)
-	if rollbackErr != nil {
-		rollbackFixed = append(append([]string(nil), current.IPs...), current.Domains...)
-		rollbackPriority = nil
+	// 回滚目标是「换池前正在跑的那一份」，不是「用默认参数重算一份」：
+	// 现跑进程可能经 /api/cfnat/start 定制过 Addr/Port/Num/Sticky，
+	// 默认配置会把它们全丢掉。status().Args 是上一次成功启动的参数
+	// （start() 失败不改写它），直接复用就是最忠实的回滚。
+	// 只有从未成功启动过（无运行参数可复用）时，才用默认配置 +
+	// planFixedMembers(current) 重算；若连这份规划都做不出来（全员
+	// 关闭/锁位无置顶），宁可不回滚、如实报错，也不用原样 IP+域名
+	// 把已关闭的成员重新投入转发。
+	rollbackArgs := a.cfnat.status().Args
+	if len(rollbackArgs) == 0 {
+		if fixed, priority, err := planFixedMembers(current); err == nil {
+			rollbackCfg := defaultCFnatConfig()
+			rollbackCfg.Fixed = strings.Join(fixed, ",")
+			rollbackCfg.Priority = strings.Join(priority, ",")
+			rollbackCfg.Fallback = strings.TrimSpace(env("CFNAT_FALLBACK", ""))
+			rollbackArgs = rollbackCfg.args()
+		}
 	}
-	rollbackCfg := defaultCFnatConfig()
-	rollbackCfg.Fixed = strings.Join(rollbackFixed, ",")
-	rollbackCfg.Priority = strings.Join(rollbackPriority, ",")
-	rollbackCfg.Fallback = strings.TrimSpace(env("CFNAT_FALLBACK", ""))
 	// 同参不重启：自动换池、在位验活剔人、域名体检回池三条后台路径各自重算
 	// -fixed，同一轮里经常得出与正在运行的进程逐字相同的参数（生产日志里
 	// 16:21:12/16:21:16 连续三次 applied 的 -fixed 完全相同，每次都是一次
@@ -424,7 +433,10 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 	}
 	if err := a.cfnat.start(a.dataDir, cfnatCfg.args(), ""); err != nil {
 		applyErr := fmt.Errorf("启动新 cfnat: %w", err)
-		if rollbackErr := a.cfnat.start(a.dataDir, rollbackCfg.args(), ""); rollbackErr != nil {
+		if len(rollbackArgs) == 0 {
+			return fmt.Errorf("%w；无可回滚的运行配置（旧池规划也失败），cfnat 已停止", applyErr)
+		}
+		if rollbackErr := a.cfnat.start(a.dataDir, rollbackArgs, ""); rollbackErr != nil {
 			return fmt.Errorf("%w；回滚 cfnat 也失败: %v", applyErr, rollbackErr)
 		}
 		return applyErr
@@ -434,7 +446,10 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 		if stopErr := a.cfnat.stop(); stopErr != nil {
 			return fmt.Errorf("%w；回滚前停止新 cfnat 失败: %v", commitErr, stopErr)
 		}
-		if rollbackErr := a.cfnat.start(a.dataDir, rollbackCfg.args(), ""); rollbackErr != nil {
+		if len(rollbackArgs) == 0 {
+			return fmt.Errorf("%w；无可回滚的运行配置（旧池规划也失败），cfnat 已停止", commitErr)
+		}
+		if rollbackErr := a.cfnat.start(a.dataDir, rollbackArgs, ""); rollbackErr != nil {
 			return fmt.Errorf("%w；回滚 cfnat 也失败: %v", commitErr, rollbackErr)
 		}
 		return commitErr
