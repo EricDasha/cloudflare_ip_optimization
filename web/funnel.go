@@ -460,6 +460,20 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 			if len(rejected) > 0 {
 				log.Printf("proxy pool DEGRADED: 拒绝降级 %d 个候选: %v", len(rejected), rejected)
 			}
+			// 降级候选同样要过入池上限与准入闸：直接 append 会把
+			// WS 2~5 秒的慢 IP 经后门塞进粘性转发的池子——800ms 上限
+			// 的注释写明「所有换池入口必须同一口径」。
+			if ceiling := poolEntryMaxLatencyMs(); len(extra) > 0 {
+				before := len(extra)
+				extra = admitPassedUnderCeiling(extra, results, ceiling)
+				if dropped := before - len(extra); dropped > 0 {
+					log.Printf("proxy pool DEGRADED: 拒绝降级 %d 个候选（超过 %dms 入池上限）", dropped, ceiling)
+				}
+			}
+			if admitted, rejected := filterPoolAdmissibleIPs(extra); len(rejected) > 0 {
+				log.Printf("proxy pool DEGRADED: 拒绝降级 %d 个候选（未通过准入闸）: %v", len(rejected), rejected)
+				extra = admitted
+			}
 			if len(extra) > 0 {
 				passed = append(passed, extra...)
 				message = fmt.Sprintf("%s；已降级采用 %d 个 VLESS 非超时失败的候选", message, len(extra))
