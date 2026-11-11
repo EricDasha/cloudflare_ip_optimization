@@ -999,6 +999,12 @@ func handleConnectionWithDial(conn net.Conn, forwardAddrs []string, dial func(co
 	log.Printf("未找到可用的转发连接: %v", lastErr)
 }
 
+// pipeIdleTimeout 任一方向无流量超过此时长即断开：半开/装死的连接
+// 否则会永远占着两个 goroutine、两个 FD 与一个 activeConnections
+// 计数。10 分钟——内层协议自带心跳，真空闲这么久就是死了。
+// 变量而非常量，供测试收窄。
+var pipeIdleTimeout = 10 * time.Minute
+
 func pipeConnections(src, dst net.Conn) {
 	var wg sync.WaitGroup
 	var closeOnce sync.Once
@@ -1013,15 +1019,41 @@ func pipeConnections(src, dst net.Conn) {
 
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(src, dst)
+		_, _ = copyWithIdleTimeout(src, dst, pipeIdleTimeout)
 		closeBoth()
 	}()
 
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(dst, src)
+		_, _ = copyWithIdleTimeout(dst, src, pipeIdleTimeout)
 		closeBoth()
 	}()
 
 	wg.Wait()
+}
+
+// copyWithIdleTimeout 从 src 拷到 dst，每次读前刷新 src 的读 deadline。
+// 对端握手完就装死时，读超时即返回，不再无限占槽。
+func copyWithIdleTimeout(dst io.Writer, src net.Conn, timeout time.Duration) (int64, error) {
+	buf := make([]byte, 32*1024)
+	var written int64
+	for {
+		if err := src.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+			return written, err
+		}
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[:nr])
+			written += int64(nw)
+			if ew != nil {
+				return written, ew
+			}
+			if nw != nr {
+				return written, io.ErrShortWrite
+			}
+		}
+		if er != nil {
+			return written, er
+		}
+	}
 }

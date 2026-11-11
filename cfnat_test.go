@@ -390,3 +390,20 @@ func TestScanIPsZeroThreadsDoesNotDeadlock(t *testing.T) {
 		t.Fatal("scanIPs(maxThreads=0) deadlocked")
 	}
 }
+
+// 装死的空闲连接必须在空闲超时后断开，不再永远占着 goroutine 与 FD。
+func TestPipeConnectionsIdleTimeout(t *testing.T) {
+	old := pipeIdleTimeout
+	pipeIdleTimeout = 100 * time.Millisecond
+	defer func() { pipeIdleTimeout = old }()
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	done := make(chan struct{})
+	go func() { pipeConnections(a, b); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pipeConnections did not close idle connection")
+	}
+}
