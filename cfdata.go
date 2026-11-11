@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -276,7 +277,7 @@ func runIPScan(ipType int, scanMaxThreads int) {
 	wg.Add(len(ipList))
 	resultChan := make(chan ScanResult, len(ipList))
 	thread := make(chan struct{}, scanMaxThreads)
-	var count int
+	var count int32
 	total := len(ipList)
 
 	for _, ip := range ipList {
@@ -285,10 +286,10 @@ func runIPScan(ipType int, scanMaxThreads int) {
 			defer func() {
 				<-thread
 				wg.Done()
-				count++
-				percentage := float64(count) / float64(total) * 100
-				fmt.Printf("扫描进度: %d/%d (%.2f%%)\r", count, total, percentage)
-				if count == total {
+				current := atomic.AddInt32(&count, 1)
+				percentage := float64(current) / float64(total) * 100
+				fmt.Printf("扫描进度: %d/%d (%.2f%%)\r", current, total, percentage)
+				if int(current) == total {
 					fmt.Println("")
 				}
 			}()
@@ -524,7 +525,7 @@ func runDetailedTest(ipList []string, selectedDC string, port int, delay int, te
 	wg.Add(len(ipList))
 	resultChan := make(chan TestResult, len(ipList))
 	thread := make(chan struct{}, testThreads)
-	var count int
+	var count int32
 	total := len(ipList)
 	for _, ip := range ipList {
 		thread <- struct{}{}
@@ -532,10 +533,10 @@ func runDetailedTest(ipList []string, selectedDC string, port int, delay int, te
 			defer func() {
 				<-thread
 				wg.Done()
-				count++
-				perc := float64(count) / float64(total) * 100
-				fmt.Printf("详细测试进度: %d/%d (%.2f%%)\r", count, total, perc)
-				if count == total {
+				current := atomic.AddInt32(&count, 1)
+				perc := float64(current) / float64(total) * 100
+				fmt.Printf("详细测试进度: %d/%d (%.2f%%)\r", current, total, perc)
+				if int(current) == total {
 					fmt.Println("")
 				}
 			}()
