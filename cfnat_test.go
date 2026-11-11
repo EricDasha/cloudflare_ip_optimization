@@ -327,3 +327,18 @@ func TestCapFixedTargetsZeroIPKeepsDomains(t *testing.T) {
 		t.Fatalf("capFixedTargets() dropped domains: %v", got)
 	}
 }
+
+func TestApplyColoFilter(t *testing.T) {
+	results := []result{
+		{ip: "1.1.1.1", dataCenter: "HKG"},
+		{ip: "2.2.2.2", dataCenter: "SJC"},
+		{ip: "3.3.3.3", dataCenter: "LAX"},
+	}
+	if got := applyColoFilter(results, "hkg,sjc"); len(got) != 2 {
+		t.Fatalf("applyColoFilter(hkg,sjc) = %d results, want 2", len(got))
+	}
+	// 全部滤掉必须返回空切片，调用方据此重扫、不得进 accept 循环。
+	if got := applyColoFilter(results, "XXX"); len(got) != 0 {
+		t.Fatalf("applyColoFilter(XXX) = %d results, want 0", len(got))
+	}
+}

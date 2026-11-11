@@ -385,17 +385,14 @@ func main() {
 
 		// 应用数据中心筛选
 		if *coloFilter != "" && !fixedMode {
-			filters := strings.Split(*coloFilter, ",")
-			var filteredResults []result
-			for _, r := range results {
-				for _, filter := range filters {
-					if strings.EqualFold(r.dataCenter, filter) {
-						filteredResults = append(filteredResults, r)
-						break
-					}
-				}
+			results = applyColoFilter(results, *coloFilter)
+			if len(results) == 0 {
+				// 过滤后为空不能进 accept 循环：否则 SetIPAddresses(nil)
+				// 后每个连接都无上游可转、且永远不再重扫。
+				fmt.Println("数据中心筛选后无可用IP")
+				time.Sleep(3 * time.Second)
+				continue
 			}
-			results = filteredResults
 		}
 
 		// 按 TCP 延迟排序
@@ -836,6 +833,21 @@ func getRandomIPv6s(ipList []string) []string {
 		}
 	}
 	return randomIPs
+}
+
+// applyColoFilter 按数据中心（逗号分隔，忽略大小写）筛选扫描结果。
+func applyColoFilter(results []result, coloFilter string) []result {
+	filters := strings.Split(coloFilter, ",")
+	var filtered []result
+	for _, r := range results {
+		for _, filter := range filters {
+			if strings.EqualFold(r.dataCenter, filter) {
+				filtered = append(filtered, r)
+				break
+			}
+		}
+	}
+	return filtered
 }
 
 // 从CIDR中拆分出所有IP
