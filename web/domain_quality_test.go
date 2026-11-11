@@ -444,3 +444,35 @@ func TestRecalculateTCPOnlyNeverHealthy(t *testing.T) {
 		t.Fatalf("mixed state = %q, want healthy", q.State)
 	}
 }
+
+// 账本损坏不得静默丢弃：文件改名备查，内存用空账本启动。
+func TestLoadDomainQualityRenamesCorruptFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, domainQualityFile), []byte("{not json"), 0600); err != nil {
+		t.Fatalf("write corrupt file: %v", err)
+	}
+	a := &app{dataDir: dir, domainQuality: make(map[string]*domainQuality)}
+	a.loadDomainQuality()
+	if _, err := os.Stat(filepath.Join(dir, domainQualityFile)); !os.IsNotExist(err) {
+		t.Fatalf("corrupt file still in place")
+	}
+	entries, err := filepath.Glob(filepath.Join(dir, domainQualityFile+".corrupt-*"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("corrupt backups = %v, want 1", entries)
+	}
+	if len(a.domainQuality) != 0 {
+		t.Fatalf("domainQuality = %d records, want 0", len(a.domainQuality))
+	}
+}
+
+// 质量账本损坏时构造函数不得崩溃，空账本启动（失败原因已记日志）。
+func TestNewQualitySchedulerRuntimeToleratesCorruptCache(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, proxyQualityFile), []byte("{not json"), 0600); err != nil {
+		t.Fatalf("write corrupt file: %v", err)
+	}
+	r := newQualitySchedulerRuntime(dir)
+	if r == nil || r.data.ActiveIP != "" || len(r.data.Records) != 0 {
+		t.Fatalf("corrupt cache produced non-empty runtime: %#v", r.data)
+	}
+}

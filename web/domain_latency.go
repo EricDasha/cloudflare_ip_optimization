@@ -176,12 +176,23 @@ type domainLatency struct {
 // ---------------------------------------------------------------------------
 
 func (a *app) loadDomainQuality() {
-	data, err := os.ReadFile(filepath.Join(a.dataDir, domainQualityFile))
+	path := filepath.Join(a.dataDir, domainQualityFile)
+	data, err := os.ReadFile(path)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("domain quality cache load failed, starting empty: %v", err)
+		}
 		return
 	}
 	var stored domainQualityStore
-	if json.Unmarshal(data, &stored) != nil {
+	if err := json.Unmarshal(data, &stored); err != nil {
+		// 损坏文件改名备查：否则下次落盘会用空账本把它覆盖，死因无从查。
+		bad := path + ".corrupt-" + strconv.FormatInt(time.Now().Unix(), 10)
+		if rerr := os.Rename(path, bad); rerr != nil {
+			log.Printf("domain quality cache corrupt (%v), rename failed: %v", err, rerr)
+		} else {
+			log.Printf("domain quality cache corrupt (%v), moved to %s", err, bad)
+		}
 		return
 	}
 	if stored.Records == nil {

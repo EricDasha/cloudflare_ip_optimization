@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -103,7 +104,11 @@ func newQualitySchedulerRuntime(dataDir string) *qualitySchedulerRuntime {
 		apply: envBool("PROXY_SCHEDULER_APPLY", true), interval: interval, batch: batch,
 		data: qualityStoreData{Version: 1, Records: make(map[string]*qualityRecord)},
 	}
-	_ = r.load()
+	// 载入失败不得静默吞掉：文件损坏或版本不对时进程会带着空账本启动，
+	// 至多 1500 条质量记录、Active 指向与晋升历史悄悄清零，死因无从查。
+	if err := r.load(); err != nil {
+		log.Printf("quality cache load failed, starting with empty ledger: %v", err)
+	}
 	return r
 }
 
