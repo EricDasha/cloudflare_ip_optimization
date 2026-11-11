@@ -55,10 +55,12 @@ func TestParseProcTCPAggregatesSources(t *testing.T) {
 		t.Fatal(err)
 	}
 	item := byIP["192.168.1.100"]
-	if stats.Total != 3 || stats.PortHits != 4 || stats.Scanned != 5 {
+	// TIME_WAIT（第 1 行）是已断连接的残留，不计入在途连接；PortHits
+	// 是诊断计数（命中端口的行数），保持 4 不变。
+	if stats.Total != 2 || stats.PortHits != 4 || stats.Scanned != 5 {
 		t.Fatalf("stats=%+v", stats)
 	}
-	if item == nil || item.Connections != 2 || item.States["ESTABLISHED"] != 1 || item.States["TIME_WAIT"] != 1 {
+	if item == nil || item.Connections != 1 || item.States["ESTABLISHED"] != 1 || item.States["TIME_WAIT"] != 0 {
 		t.Fatalf("item=%#v", item)
 	}
 	if _, exists := byIP["8.8.8.8"]; !exists {
@@ -66,5 +68,27 @@ func TestParseProcTCPAggregatesSources(t *testing.T) {
 	}
 	if _, exists := byIP["127.0.0.1"]; exists {
 		t.Fatal("loopback source must be filtered")
+	}
+}
+
+// 上游统计必须认公网 IPv6：CFNAT_IPS=6 时上游全是 v6 地址。
+func TestParseProcTCPUpstreamCountsIPv6(t *testing.T) {
+	input := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode
+   0: 00000000000000000000000000000000:04D2 00470626000000470000000011110000:01BB 01 00000000:00000000 00:00000000 00000000 0 0 0
+   1: 00000000000000000000000000000000:04D2 0000000000000000FFFF000004030201:01BB 01 00000000:00000000 00:00000000 00000000 0 0 0
+   2: 00000000000000000000000000000000:04D2 00470626000000470000000011110000:01BB 06 00000000:00000000 00:00000000 00000000 0 0 0`
+	byIP := make(map[string]*upstreamConnection)
+	total := 0
+	if err := parseProcTCPUpstream(strings.NewReader(input), true, 443, byIP, &total); err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 {
+		t.Fatalf("total = %d, want 2 (v6 + v4-mapped, TIME_WAIT excluded)", total)
+	}
+	if item := byIP["2606:4700:4700::1111"]; item == nil || item.Connections != 1 {
+		t.Fatalf("ipv6 upstream missing: %#v", byIP)
+	}
+	if item := byIP["1.2.3.4"]; item == nil || item.Connections != 1 {
+		t.Fatalf("ipv4-mapped upstream missing: %#v", byIP)
 	}
 }

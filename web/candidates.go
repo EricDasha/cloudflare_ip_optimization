@@ -713,6 +713,12 @@ func isPublicIPv4(ip net.IP) bool {
 	return ip != nil && ip.To4() != nil && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsUnspecified() && !ip.IsMulticast() && !ip.IsLinkLocalUnicast()
 }
 
+// isPublicIPv6 与 isPublicIPv4 同口径的公网 IPv6 判定：To4() != nil 的
+// IPv4 映射地址不算 IPv6（由 isPublicIPv4 覆盖）。
+func isPublicIPv6(ip net.IP) bool {
+	return ip != nil && ip.To4() == nil && ip.To16() != nil && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsUnspecified() && !ip.IsMulticast() && !ip.IsLinkLocalUnicast()
+}
+
 const maxCandidateSourceBody = 512 * 1024
 
 func extractPublicIPv4(text string) []string {
