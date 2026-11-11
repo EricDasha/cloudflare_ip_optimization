@@ -170,8 +170,10 @@ func main() {
 	fmt.Println("\n程序执行结束，请按 CTRL+C 或 回车键退出程序。")
 	exitChan := make(chan struct{})
 	go func() {
-		reader := bufio.NewReader(os.Stdin)
-		_, _ = reader.ReadString('\n')
+		// 必须复用全局 stdinReader：另建一个 bufio.Reader 会各建
+		// 4096 字节缓冲，先读的那个可能把回车吞进自己缓冲里，另
+		// 一个永远等不到，只能 Ctrl+C 退出。
+		_, _ = stdinReader.ReadString('\n')
 		exitChan <- struct{}{}
 	}()
 	signalChan := make(chan os.Signal, 1)
