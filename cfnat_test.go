@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -340,5 +342,25 @@ func TestApplyColoFilter(t *testing.T) {
 	// 全部滤掉必须返回空切片，调用方据此重扫、不得进 accept 循环。
 	if got := applyColoFilter(results, "XXX"); len(got) != 0 {
 		t.Fatalf("applyColoFilter(XXX) = %d results, want 0", len(got))
+	}
+}
+
+func TestReadIPsRejectsHugeCIDR(t *testing.T) {
+	write := func(content string) string {
+		f := filepath.Join(t.TempDir(), "ip.csv")
+		if err := os.WriteFile(f, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	// /24 展开 256 个，正常。
+	if ips, err := readIPs(write("10.0.0.0/24\n")); err != nil || len(ips) != 256 {
+		t.Fatalf("readIPs(/24) = %d, %v, want 256, nil", len(ips), err)
+	}
+	// IPv4 /8 与 IPv6 /48 展开天文数字，必须直接拒绝而不是硬跑。
+	for _, cidr := range []string{"10.0.0.0/8\n", "2001:db8::/48\n"} {
+		if ips, err := readIPs(write(cidr)); err == nil {
+			t.Fatalf("readIPs(%q) = %d, want error", cidr, len(ips))
+		}
 	}
 }

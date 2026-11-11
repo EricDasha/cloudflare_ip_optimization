@@ -850,6 +850,14 @@ func applyColoFilter(results []result, coloFilter string) []result {
 	return filtered
 }
 
+// readIPs 展开上限：单个 CIDR 最多 65536 个地址（/16），整文件最多
+// 262144 条。再大不是“候选列表”，是直接把内存和扫描时间撑爆——
+// IPv6 /48 展开是 2^80 个地址，旧代码会在这个循环里跑到天荒地老。
+const (
+	maxCIDRExpansion = 65536
+	maxReadIPsTotal  = 262144
+)
+
 // 从CIDR中拆分出所有IP
 func readIPs(filename string) ([]string, error) {
 	file, err := os.Open(filename)
@@ -871,12 +879,20 @@ func readIPs(filename string) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
+			// 先算再展开：掩码位数直接决定展开规模，IPv6 大前缀
+			// 不经此检查会把循环跑到天荒地老。
+			if ones, bits := ipNet.Mask.Size(); bits-ones > 16 {
+				return nil, fmt.Errorf("CIDR %s 展开超过 %d 个地址", line, maxCIDRExpansion)
+			}
 			// 使用新变量避免遮蔽
 			for currentIP := ipAddr.Mask(ipNet.Mask); ipNet.Contains(currentIP); incrementIP(currentIP) {
 				ips = append(ips, currentIP.String())
 			}
 		} else {
 			ips = append(ips, line)
+		}
+		if len(ips) > maxReadIPsTotal {
+			return nil, fmt.Errorf("IP 文件展开超过 %d 条", maxReadIPsTotal)
 		}
 	}
 
