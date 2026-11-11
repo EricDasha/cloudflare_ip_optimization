@@ -610,6 +610,11 @@ func coloFromCFRay(ray string) string {
 	return coloPattern.FindString(strings.TrimSpace(ray))
 }
 
+// probeTLSConfig 抽成变量便于测试注入（默认用系统根证书校验 SNI）。
+var probeTLSConfig = func(host string) *tls.Config {
+	return &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
+}
+
 func probeProxyWebSocket(ctx context.Context, ip string, cfg proxyAutoConfig) (string, error) {
 	dialer := &net.Dialer{}
 	raw, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(cfg.Port)))
@@ -617,7 +622,17 @@ func probeProxyWebSocket(ctx context.Context, ip string, cfg proxyAutoConfig) (s
 		return "", err
 	}
 	defer raw.Close()
-	tlsConn := tls.Client(raw, &tls.Config{ServerName: cfg.Host, MinVersion: tls.VersionTLS12})
+	// 握手后的读写是裸读：对端完成 TLS 握手后装死，req.Write /
+	// ReadResponse 会无限等下去，goroutine 与信号量槽位一起被占住，
+	// MaxLatency 形同虚设。DialContext/HandshakeContext 只管建连，
+	// 不管建连后的读写——建连成功就按 ctx 的 deadline 兜底，无
+	// deadline 时用 cfg.MaxLatency 算一个。
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = raw.SetDeadline(deadline)
+	} else if cfg.MaxLatency > 0 {
+		_ = raw.SetDeadline(time.Now().Add(time.Duration(cfg.MaxLatency) * time.Millisecond))
+	}
+	tlsConn := tls.Client(raw, probeTLSConfig(cfg.Host))
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		return "", err
 	}
