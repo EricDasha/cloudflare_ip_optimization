@@ -700,9 +700,18 @@ func (a *app) poolDomainMembers() []string {
 	fallback := make([]string, 0, minFallbackForwardDomains)
 	if len(domains) == 0 && len(snapshot.ForwardDomains) > 0 {
 		before := len(domains)
-		for _, domain := range a.topDomainsByQuality(snapshot.ForwardDomains, minFallbackForwardDomains) {
+		for _, domain := range a.topDomainsByQuality(snapshot.ForwardDomains, len(snapshot.ForwardDomains)) {
 			if len(domains) >= minFallbackForwardDomains {
 				break
+			}
+			// 隔离期是体检当场给的「别放回」verdict：兜底也不该把它拉
+			// 回来，否则刚隔离的域名立刻回池、再被踢出，3 ↔ 25 域名横
+			// 跳、每摆一次重启一次 cfnat。只放行未隔离的（哪怕它体检
+			// 成绩差），兜底的本意就是「有总比没有强」。输入放宽到全部
+			// 候选、仍按成功率降序取前 3 个未隔离的，避免前 3 里有隔离
+			// 者时名额白白浪费。
+			if a.domainQuarantined(domain, now) {
+				continue
 			}
 			prev := len(domains)
 			add(domain)

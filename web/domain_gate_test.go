@@ -232,3 +232,29 @@ func TestRecalculateKeepsHistoryBelowRecoveryStreak(t *testing.T) {
 		t.Fatalf("state = healthy below recovery streak, want unstable")
 	}
 }
+
+// 兜底也不得拉回隔离期域名：闸门把坏域名全拦下后，兜底按成功率取前 3，
+// 其中成绩最好的正在隔离——跳过它取下一位，而不是把它拉回池里再被踢出。
+func TestPoolDomainMembersFallbackSkipsQuarantined(t *testing.T) {
+	a := newProbeTestApp(t)
+	a.candidates = proxyCandidateSnapshot{
+		ForwardDomains: []string{"q.example.com", "d.example.com", "e.example.com"},
+	}
+	for domain, rate := range map[string]float64{
+		"q.example.com": 0.5, "d.example.com": 0.3, "e.example.com": 0.1,
+	} {
+		rec := freshRecord(domainStateDead)
+		rec.SuccessRate = rate
+		a.domainQuality[domain] = rec
+	}
+	a.quarantineDomain("q.example.com", time.Now().Add(30*time.Minute))
+
+	got := a.poolDomainMembers()
+	want := []string{"d.example.com", "e.example.com"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("poolDomainMembers() = %v, want %v", got, want)
+	}
+	if fb := a.domainFallbackSnapshot(); !reflect.DeepEqual(fb, want) {
+		t.Fatalf("fallback = %v, want %v", fb, want)
+	}
+}
