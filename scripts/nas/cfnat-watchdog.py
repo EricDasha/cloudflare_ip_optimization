@@ -10,9 +10,14 @@ Every run (cron, 1/min):
   2. healthy + pool mode          -> done
      healthy + fallback mode      -> probe pool directly (cert check);
                                      2 consecutive OK -> switch back + TG alert
-  3. dead   -> probe the NODE itself (direct www.ox.ac.uk:443 cert check)
-     node dead                    -> TG "node down" (cooldown-guarded), no churn
-     node alive                  -> rotate fallbacks until tunnel OK -> TG alert
+  3. dead   -> debounce (2 consecutive dead runs), then rotate fallback
+     entries directly; trying a fallback IS the node liveness test
+     (it only succeeds if the node is up) -> TG alert on switch
+     (30 min cooldown). There is no separate "node down" alert:
+     the old "probe the node first" gate was removed — when the tunnel
+     is down this host's direct path to Cloudflare is blocked as well,
+     so the gate could never pass, and scanning the candidates cost
+     minutes and overran the 1-minute cron window.
 
 TG alerts go through the SAME bot openclaw uses (token read at runtime from
 openclaw.json, never logged). The proxy is restored BEFORE sending, so the
