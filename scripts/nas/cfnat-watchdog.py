@@ -106,7 +106,13 @@ def load_state():
 
 
 def save_state(st):
-    json.dump(st, open(STATE_F, "w"), indent=2)
+    # 原子写：先写临时文件再 rename。直接 open(STATE_F, "w") 写一半崩了，
+    # 状态文件损坏，下次 load_state 回落默认值，mode/fb_idx 全丢。
+    # 与 cf_inspect.py 的 _queue_save 同一做法。
+    tmp = STATE_F + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(st, f, indent=2)
+    os.replace(tmp, STATE_F)
 
 
 def read_cfg():
@@ -131,15 +137,23 @@ def current_target():
 
 
 def probe_tunnel(timeout=PROBE_TIMEOUT):
-    r = run(["curl", "-s", "-o", "/dev/null", "-m", str(timeout), "-x", PROXY,
-             "-w", "%{http_code}", PROBE_URL], timeout=timeout + 6)
+    try:
+        r = run(["curl", "-s", "-o", "/dev/null", "-m", str(timeout), "-x", PROXY,
+                 "-w", "%{http_code}", PROBE_URL], timeout=timeout + 6)
+    except subprocess.TimeoutExpired:
+        # 超时即探针失败：旧代码让 TimeoutExpired 一路抛到 cron 主流程，
+        # 整轮崩掉，本轮 dead_consec 白计。
+        return False
     return r.stdout.strip() == "204"
 
 
 def egress_ip(timeout=PROBE_TIMEOUT):
     """Exit IP as seen through the tunnel; empty on failure."""
-    r = run(["curl", "-s", "-m", str(timeout), "-x", PROXY, TRACE_URL],
-            timeout=timeout + 6)
+    try:
+        r = run(["curl", "-s", "-m", str(timeout), "-x", PROXY, TRACE_URL],
+                timeout=timeout + 6)
+    except subprocess.TimeoutExpired:
+        return ""
     for line in r.stdout.splitlines():
         if line.startswith("ip="):
             return line[3:].strip()
@@ -155,7 +169,10 @@ def direct_ip(timeout=10):
     global _DIRECT_IP
     if _DIRECT_IP is not None:
         return _DIRECT_IP
-    r = run(["curl", "-s", "-m", str(timeout), TRACE_URL], timeout=timeout + 6)
+    try:
+        r = run(["curl", "-s", "-m", str(timeout), TRACE_URL], timeout=timeout + 6)
+    except subprocess.TimeoutExpired:
+        return ""
     for line in r.stdout.splitlines():
         if line.startswith("ip="):
             _DIRECT_IP = line[3:].strip()

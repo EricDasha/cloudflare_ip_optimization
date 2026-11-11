@@ -74,7 +74,12 @@ def patch_vless(server, port, path):
 
 def restore():
     if os.path.exists(CFG_BAK):
-        run(SUDO + f"cp {CFG_BAK} {CFG}")
+        # 恢复 cp 失败必须停下：旧代码不看返回值，cp 失败仍重启旧配置
+        # 并删掉唯一备份，原配置永久丢失。
+        cp = run(SUDO + f"cp {CFG_BAK} {CFG}")
+        if cp.returncode != 0:
+            print(f"RESTORE FAILED: cp backup back failed (rc={cp.returncode}), keeping backup {CFG_BAK}")
+            sys.exit(1)
         run(SUDO + "docker restart sing-box", timeout=120)
         time.sleep(10)
         run(SUDO + f"rm -f {CFG_BAK}")
