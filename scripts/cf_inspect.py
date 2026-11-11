@@ -47,6 +47,7 @@
 
 import argparse
 import calendar
+from datetime import datetime
 import json
 import os
 import re
@@ -278,11 +279,12 @@ def check_forward(verdicts, status):
     age = None
     if at:
         try:
-            # forward.at 是 UTC（尾部带 Z），必须按 UTC 解析——用本地时间
-            # 会凭空差一个时区，把「刚刚的转发」误判成「几小时前的陈旧记录」。
-            ts = calendar.timegm(time.strptime(
-                at.replace("Z", "").split(".")[0], "%Y-%m-%dT%H:%M:%S"))
-            age = time.time() - ts
+            # forward.at 是 RFC3339，带容器时区偏移（compose 设 TZ=Asia/Shanghai，
+            # 形如 ...+08:00），不是 UTC 带 Z。旧写法 strptime 固定格式在
+            # +08:00 上必失败，age 恒为 None，stale 检查悄悄跳过。
+            # fromisoformat 同时接受 Z 与 +08:00 两种后缀。
+            ts = datetime.fromisoformat(at.replace("Z", "+00:00"))
+            age = time.time() - ts.timestamp()
         except Exception:
             age = None
     if age is not None and age > MAX_FORWARD_AGE_SEC:
