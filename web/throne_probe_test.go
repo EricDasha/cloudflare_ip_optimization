@@ -398,3 +398,24 @@ func TestDomainQuarantineExpiresAutomatically(t *testing.T) {
 		t.Fatal("expired entry must be cleaned up")
 	}
 }
+
+// 单次探测超时必须高于慢阈值：slowMs=4000 时超时应为 4500 而非钳到
+// 3000，否则 3500ms 的握手先超时、被记成失败而不是慢。
+func TestThroneProbeMaxLatencyFollowsSlowMs(t *testing.T) {
+	cases := []struct {
+		env  string
+		want int
+	}{
+		{"300", 1500},
+		{"1500", 2000},
+		{"2500", 3000},
+		{"4000", 4500},
+		{"5000", 5500},
+	}
+	for _, c := range cases {
+		t.Setenv("PROXY_ACTIVE_PROBE_SLOW_MS", c.env)
+		if got := throneProbeMaxLatencyMs(); got != c.want {
+			t.Errorf("maxLatency(slowMs=%q) = %d, want %d", c.env, got, c.want)
+		}
+	}
+}

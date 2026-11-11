@@ -115,6 +115,18 @@ func poolEntryMaxLatencyMs() int64 {
 // 为什么不复用进池那条 800ms：进池是「别把慢的放进来」，代价为零，卡得越紧越好；
 // 请下台要重启一次 cfnat、断一次现有连接，必须留滞回余量。实测好 IP 的 WS 约
 // 190ms，坏的 1650/1809ms，1500ms 落在中间的空档里，两边都不容易误伤。
+// throneProbeMaxLatencyMs 单次探测超时：必须高于「慢」阈值，否则慢成员
+// 先被超时打断、记成失败，「慢」这一档永远测不出来。上限跟着慢阈值走
+// （慢阈值本身钳在 [300,5000]，超时最多 5500），不再另钳 3000——
+// 旧实现钳 3000 时 slowMs>2500 的「慢」根本不可观测。
+func throneProbeMaxLatencyMs() int {
+	ms := int(throneProbeSlowMs()) + 500
+	if ms < 1500 {
+		ms = 1500
+	}
+	return ms
+}
+
 func throneProbeSlowMs() int64 {
 	ms := int64(envInt("PROXY_ACTIVE_PROBE_SLOW_MS", 1500))
 	if ms < 300 || ms > 5000 {

@@ -276,15 +276,7 @@ func (a *app) probeThroneOnce(parent context.Context) {
 		return
 	}
 	cfg.Concurrency = 4
-	// 单次探测超时必须高于「慢」阈值，否则慢成员会先被超时打断、记成失败，
-	// 于是「慢」这一档永远测不出来——那正是我们要抓的那批人。
-	cfg.MaxLatency = int(throneProbeSlowMs()) + 500
-	if cfg.MaxLatency < 1500 {
-		cfg.MaxLatency = 1500
-	}
-	if cfg.MaxLatency > 3000 {
-		cfg.MaxLatency = 3000
-	}
+	cfg.MaxLatency = throneProbeMaxLatencyMs()
 	targets := a.throneProbeTargets(members)
 	// 整轮预算要盖得住「每个目标都摸到慢阈值」的最坏情况，否则排在尾部的那批
 	// 目标会在 ctx 已经到期后才开跑，连一个字节都没发出去就被记成失败——这和
