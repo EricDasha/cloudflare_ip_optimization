@@ -282,6 +282,10 @@ func probeVLESSPool(parent context.Context, results []proxyScanResult, candidate
 		if err != nil {
 			results[i].Stage = "VLESS_FAIL"
 			results[i].Error = err.Error()
+			// 失败必须归类：降级逻辑（degradedFromWSResults）靠 ErrorClass
+			// 区分「数据面超时」与「快速失败」；此前这里从不写 ErrorClass，
+			// VLESS_FAIL 的 errorClass 一律为空，降级无从判断。
+			results[i].ErrorClass = classifyProbeError(err)
 			continue
 		}
 		results[i].Stage = "VLESS_PASS"

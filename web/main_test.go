@@ -536,6 +536,12 @@ func TestVLESSProbeCandidateLimit(t *testing.T) {
 	if results[0].Stage != "VLESS_FAIL" || results[1].Stage != "VLESS_FAIL" {
 		t.Fatalf("first two candidates were not attempted: %#v", results)
 	}
+	// 改动 B：VLESS 失败必须归类，否则降级逻辑无从区分超时与快速失败。
+	for _, r := range results[:2] {
+		if r.ErrorClass == "" {
+			t.Fatalf("VLESS_FAIL %s 缺少 ErrorClass 归类: %#v", r.IP, r)
+		}
+	}
 	if results[2].Stage != "WS_PASS" || results[2].Error != "" {
 		t.Fatalf("candidate limit was not enforced: %#v", results[2])
 	}
