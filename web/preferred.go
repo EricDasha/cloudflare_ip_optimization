@@ -291,11 +291,14 @@ func (a *app) mergeCfdataIPsIntoCandidates(ips []string) {
 		if _, ok := snapshot.SourceByIP[ip]; ok {
 			continue
 		}
+		// 先判上限再登记：旧代码先写 SourceByIP 再截 IPs[:1000]，
+		// 到上限后每个新 IP 只进 map、随即被截掉——map 无限长，
+		// IP 却永远进不来，且 SourceByIP 里留一堆不在 IPs 里的孤儿。
+		if len(snapshot.IPs) >= candidatePoolTotalCap {
+			break
+		}
 		snapshot.SourceByIP[ip] = "cfdata"
 		snapshot.IPs = append(snapshot.IPs, ip)
-		if len(snapshot.IPs) > 1000 {
-			snapshot.IPs = snapshot.IPs[:1000]
-		}
 	}
 	if len(snapshot.IPs) > 0 {
 		a.candidates = snapshot
