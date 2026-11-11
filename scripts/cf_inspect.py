@@ -105,6 +105,8 @@ TELEGRAM_PROXY = os.environ.get("CF_TG_PROXY", "http://127.0.0.1:39281")
 # 判定阈值
 DIAL_MS_WARN = int(os.environ.get("CF_DIAL_MS_WARN", "3000"))
 HTTP_TIMEOUT = float(os.environ.get("CF_HTTP_TIMEOUT", "20"))
+# /api/status 带完整池快照也不会超过此值；超限说明对端异常。
+MAX_HTTP_JSON_BYTES = 1 << 20
 MAX_FORWARD_AGE_SEC = int(os.environ.get("CF_MAX_FORWARD_AGE_SEC", "1800"))
 
 # CF 官方 IPv4 段（与 web/cfranges.go 的 cloudflareIPv4CIDRs 保持一致）。
@@ -139,7 +141,15 @@ def in_cf_segment(ip):
 def http_json(url, timeout=HTTP_TIMEOUT):
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        # urlopen 遇到 4xx/5xx 会直接抛 HTTPError；这里再显式校验，
+        # 防止 200 伪装的错误页（可解析为 JSON）被当成正常状态。
+        if resp.status != 200:
+            raise ValueError("unexpected HTTP status %s for %s" % (resp.status, url))
+        raw = resp.read(MAX_HTTP_JSON_BYTES + 1)
+        if len(raw) > MAX_HTTP_JSON_BYTES:
+            raise ValueError("response too large for %s (> %d bytes)"
+                             % (url, MAX_HTTP_JSON_BYTES))
+        return json.loads(raw.decode("utf-8"))
 
 
 # ---- 判定 ---------------------------------------------------------------
