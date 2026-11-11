@@ -491,8 +491,15 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 			a.quality.setError(err.Error())
 			return
 		}
-		passed = probeVLESSPool(ctx, results, cfg.Port, len(results), cfg.VLESS, template)
-		passed = rankVLESSPassesBySpeed(ctx, passed, results, cfg.Port, cfg.VLESS, template)
+		// VLESS 终审不得与 WS 初筛共用 45 秒预算：终审是串行的，每 IP
+		// 15 秒超时，12 个一批最坏 180 秒 + 测速 6×20 秒，45 秒一到
+		// 后面的尝试瞬间报 context 错误——不是 IP 死了，是预算没了，
+		// 降级逻辑（改动 B）还会把这些假超时当真失败采纳。与漏斗同款：
+		// 终审单独开一份 10 分钟预算，探测量不变，只是让它跑完。
+		vlessCtx, vlessCancel := newAutoApplyContext()
+		defer vlessCancel()
+		passed = probeVLESSPool(vlessCtx, results, cfg.Port, len(results), cfg.VLESS, template)
+		passed = rankVLESSPassesBySpeed(vlessCtx, passed, results, cfg.Port, cfg.VLESS, template)
 	} else {
 		for _, result := range results {
 			if result.Error == "" {
