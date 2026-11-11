@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -894,7 +895,12 @@ func (a *app) handleCFnatStart(w http.ResponseWriter, r *http.Request) {
 	a.cfnatCtlMu.Lock()
 	defer a.cfnatCtlMu.Unlock()
 	var cfg cfnatConfig
-	_ = json.NewDecoder(r.Body).Decode(&cfg)
+	// 空 body 即用默认配置（EOF 不算错）；真正的语法错误回 400，
+	// 不再静默当成零值配置。
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
 	cfg = normalizeCFnat(cfg)
 	if err := a.cfnat.stop(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -928,7 +934,10 @@ func (a *app) handleCFdataRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var cfg cfdataConfig
-	_ = json.NewDecoder(r.Body).Decode(&cfg)
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
 	cfg = normalizeCFdata(cfg)
 	if err := a.cfdata.start(a.dataDir, cfg.args(), ""); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

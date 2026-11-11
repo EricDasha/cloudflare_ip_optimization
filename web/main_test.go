@@ -695,3 +695,20 @@ func TestEnvForwardDomainsParsesCommaAndWildcard(t *testing.T) {
 		t.Fatalf("envForwardDomains() = %v, want %v", got, want)
 	}
 }
+
+// normalize 越界值一律回落默认值，不再透传到 cfnat/cfdata 命令行。
+func TestNormalizeClampsOutOfRange(t *testing.T) {
+	c := normalizeCFnat(cfnatConfig{Port: -1, Code: 99999, Delay: -5, Task: -5, IPNum: -2})
+	d := defaultCFnatConfig()
+	if c.Port != d.Port || c.Code != d.Code || c.Delay != d.Delay || c.Task != d.Task || c.IPNum != d.IPNum {
+		t.Fatalf("normalizeCFnat out-of-range not clamped: %+v", c)
+	}
+	if got := normalizeCFnat(cfnatConfig{Port: 8443, Code: 200, Delay: 100, Task: 50, IPNum: 5}); got.Port != 8443 || got.Code != 200 || got.Delay != 100 || got.Task != 50 || got.IPNum != 5 {
+		t.Fatalf("normalizeCFnat clamped valid values: %+v", got)
+	}
+	f := normalizeCFdata(cfdataConfig{Scan: -1, Test: 0, Port: 70000, Delay: -1})
+	fd := defaultCFdataConfig()
+	if f.Scan != fd.Scan || f.Test != fd.Test || f.Port != fd.Port || f.Delay != fd.Delay {
+		t.Fatalf("normalizeCFdata out-of-range not clamped: %+v", f)
+	}
+}

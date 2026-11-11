@@ -405,10 +405,12 @@ func normalizeCFnat(c cfnatConfig) cfnatConfig {
 	if c.Addr == "" {
 		c.Addr = d.Addr
 	}
-	if c.Code == 0 {
+	// 越界一律回落默认值：只填 0 会让 -1/99999 之类透传到 cfnat
+	// 命令行（-port -1、-delay -1 拨号无超时、-code 99999 永不命中）。
+	if c.Code < 100 || c.Code > 599 {
 		c.Code = d.Code
 	}
-	if c.Delay == 0 {
+	if c.Delay < 1 {
 		c.Delay = d.Delay
 	}
 	if c.Domain == "" {
@@ -423,7 +425,7 @@ func normalizeCFnat(c cfnatConfig) cfnatConfig {
 	if c.Fallback == "" {
 		c.Fallback = d.Fallback
 	}
-	if c.IPNum == 0 {
+	if c.IPNum < 1 {
 		c.IPNum = d.IPNum
 	}
 	if c.IPs == "" {
@@ -437,10 +439,10 @@ func normalizeCFnat(c cfnatConfig) cfnatConfig {
 	if c.Num < 1 || c.Num > maxCFnatNum {
 		c.Num = d.Num
 	}
-	if c.Port == 0 {
+	if c.Port < 1 || c.Port > 65535 {
 		c.Port = d.Port
 	}
-	if c.Task == 0 {
+	if c.Task < 1 || c.Task > 1000 {
 		c.Task = d.Task
 	}
 	return c
@@ -487,16 +489,16 @@ func normalizeCFdata(c cfdataConfig) cfdataConfig {
 	if c.IPType != 4 && c.IPType != 6 {
 		c.IPType = d.IPType
 	}
-	if c.Scan == 0 {
+	if c.Scan < 1 || c.Scan > 1000 {
 		c.Scan = d.Scan
 	}
-	if c.Test == 0 {
+	if c.Test < 1 || c.Test > 1000 {
 		c.Test = d.Test
 	}
-	if c.Port == 0 {
+	if c.Port < 1 || c.Port > 65535 {
 		c.Port = d.Port
 	}
-	if c.Delay == 0 {
+	if c.Delay < 1 {
 		c.Delay = d.Delay
 	}
 	return c
