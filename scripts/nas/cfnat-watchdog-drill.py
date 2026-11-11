@@ -27,12 +27,17 @@ CFG_BAK = f"{SB_DIR}/config.json.drill-bak"
 STATE = f"{SB_DIR}/watchdog-state.json"
 # sudo 口令只从运行时环境读，绝不写进仓库。未设 NAS_SUDO_PW 时退回
 # `sudo -n`（要求已配 NOPASSWD，否则脚本会在第一次提权时明确失败）。
+# 有口令时 sudo -S 从 stdin 读口令：旧写法 `echo 口令 | sudo -S` 把口令
+# 拼进 sh -c 命令行，/proc/<pid>/cmdline 里明文可见。
 _SUDO_PW = os.environ.get("NAS_SUDO_PW", "")
-SUDO = f"echo {_SUDO_PW} | sudo -S -p '' " if _SUDO_PW else "sudo -n "
+SUDO = "sudo -S -p '' " if _SUDO_PW else "sudo -n "
 
 
 def run(cmd, timeout=90):
-    return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+    kwargs = dict(capture_output=True, text=True, timeout=timeout)
+    if _SUDO_PW and cmd.startswith("sudo -S "):
+        kwargs["input"] = _SUDO_PW + "\n"
+    return subprocess.run(cmd, shell=True, **kwargs)
 
 
 def read_state():
