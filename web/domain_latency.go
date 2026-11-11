@@ -693,10 +693,8 @@ func (q *domainQuality) recalculate() {
 	// 没有一次真正测过速度（全是 tcp-only 降级样本）时，状态封顶在
 	// testing：只凭 TCP 通就判 healthy，会让从未测速的域名通过质量闸。
 	// probeOneDomain 的注释也只说 tcp-only「只报可达性，不判死」。
-	if len(speeds) == 0 {
-		q.State = domainStateTesting
-		return
-	}
+	// 注意封顶必须放在失败分支之后：全是失败测速样本时 speeds 同样
+	// 为空，若先封顶，连败 12 轮的域名也会被判 testing 而非 dead。
 	switch {
 	case q.ConsecutiveFailures >= domainDeadFailures:
 		q.State = domainStateDead
@@ -704,6 +702,8 @@ func (q *domainQuality) recalculate() {
 		q.State = domainStateUnstable
 	case q.JitterRatio > domainJitterThreshold:
 		q.State = domainStateUnstable
+	case len(speeds) == 0:
+		q.State = domainStateTesting
 	default:
 		q.State = domainStateHealthy
 	}
