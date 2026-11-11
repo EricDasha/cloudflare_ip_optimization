@@ -518,28 +518,33 @@ func (a *app) handleProxyPromote(w http.ResponseWriter, r *http.Request) {
 	// 旧实现只考握手，于是 1168ms 的慢 IP 也能堂堂正正换进池，
 	// 再被设备粘性锁死——生产事故的根因。
 	cfg := defaultProxyAutoConfig()
+	// 未配置 SNI 时不得跳过体检直接顶替：与 handleProxyProbe 同口径回
+	// 412。旧实现用 if 守着体检块，Host/Path 为空就整段跳过，任何公网
+	// IP 都能不经 WS 握手进池。
+	if cfg.Host == "" || cfg.Path == "" {
+		http.Error(w, "未配置 PROXY_AUTO_HOST/PATH，无法体检", http.StatusPreconditionFailed)
+		return
+	}
 	entryColo := ""
 	fresh := make([]proxyScanResult, 0, 1)
-	if cfg.Host != "" && cfg.Path != "" {
-		measureCtx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-		latency, colo, fails := measurePoolEntryLatency(measureCtx, ip, cfg)
-		cancel()
-		if latency == 0 {
-			http.Error(w, "体检未通过（WS 握手三次全败），拒绝顶替", http.StatusBadRequest)
-			return
-		}
-		if ceiling := poolEntryMaxLatencyMs(); latency > ceiling {
-			http.Error(w, fmt.Sprintf("延迟 %dms 超过进池上限 %dms，拒绝顶替：握手虽通但太慢，进池会拖垮粘在那台设备上的所有连接", latency, ceiling), http.StatusBadRequest)
-			return
-		}
-		entryColo = colo
-		_ = fails // 失败次数并入体检注记，软信号不否决
-		// 入池体检结果写进新成员的成绩单：机房码随行，丢手率记档。
-		fresh = append(fresh, proxyScanResult{
-			IP: ip, Latency: latency, Colo: colo, Stage: "WS_PASS",
-			Note: fmt.Sprintf("入池体检 %d/3 通过", 3-fails),
-		})
+	measureCtx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	latency, colo, fails := measurePoolEntryLatency(measureCtx, ip, cfg)
+	cancel()
+	if latency == 0 {
+		http.Error(w, "体检未通过（WS 握手三次全败），拒绝顶替", http.StatusBadRequest)
+		return
 	}
+	if ceiling := poolEntryMaxLatencyMs(); latency > ceiling {
+		http.Error(w, fmt.Sprintf("延迟 %dms 超过进池上限 %dms，拒绝顶替：握手虽通但太慢，进池会拖垮粘在那台设备上的所有连接", latency, ceiling), http.StatusBadRequest)
+		return
+	}
+	entryColo = colo
+	_ = fails // 失败次数并入体检注记，软信号不否决
+	// 入池体检结果写进新成员的成绩单：机房码随行，丢手率记档。
+	fresh = append(fresh, proxyScanResult{
+		IP: ip, Latency: latency, Colo: colo, Stage: "WS_PASS",
+		Note: fmt.Sprintf("入池体检 %d/3 通过", 3-fails),
+	})
 	// 先踢在位最差者：按质量记录里延迟最差者，无记录则末位。
 	victim := a.worstPoolMember(current.IPs)
 	pool := current
