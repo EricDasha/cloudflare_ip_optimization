@@ -62,7 +62,6 @@ const (
 	reasonProbePassed                = "probe_passed"
 	reasonPromotedSuperiorThroughput = "promoted_by_superior_throughput"
 	reasonPromotedNoActive           = "promoted_without_active"
-	reasonThroughputDrop             = "throughput_drop"
 	reasonProbeTimeout               = "probe_timeout"
 	reasonFailoverAfterActiveFailure = "failover_after_active_failure"
 	// reasonOrphanActiveDemoted：不变量修复时清出的「幽灵 ACTIVE」。
