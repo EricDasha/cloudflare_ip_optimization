@@ -212,7 +212,12 @@ func (a *app) harvestSubscriptions(parent context.Context) (int, error) {
 		}
 		text := string(f.body)
 		extracted := 0
+		// 直接 IP 与域名解析共用同一 perMaintainer 上限：旧代码只在解析
+		// 分支计数，一个维护者塞几千个直连 IP 能一次灌满整个本子。
 		for _, ip := range extractPublicIPv4(text) {
+			if extracted >= perMaintainer {
+				break
+			}
 			if _, ok := sources[ip]; !ok {
 				sources[ip] = f.maintainer
 				extracted++
@@ -223,19 +228,17 @@ func (a *app) harvestSubscriptions(parent context.Context) (int, error) {
 		// 溯源按主机名逐个回填：哪个域名解析到哪个 IP，就记哪个域名。
 		// 旧写法把平坦结果配给每个域名，同一维护者的多个域名全记成第一个，
 		// 排障时看到的来源是错的——比没有来源更坏。
-		resolvedCount := 0
 		for i, host := range hosts {
-			if i >= len(byHost) || resolvedCount >= perMaintainer {
+			if i >= len(byHost) || extracted >= perMaintainer {
 				break
 			}
 			for _, ip := range byHost[i] {
-				if resolvedCount >= perMaintainer {
+				if extracted >= perMaintainer {
 					break
 				}
 				if _, ok := sources[ip]; !ok {
 					sources[ip] = f.maintainer
 					extracted++
-					resolvedCount++
 					if via[ip] == "" {
 						via[ip] = host
 					}
