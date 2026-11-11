@@ -207,3 +207,21 @@ func TestApplyPoolLockedRollbackImpossibleIsReported(t *testing.T) {
 		t.Fatalf("expected '无可回滚' error, got %v", err)
 	}
 }
+
+// 报错只写内存不落盘，重启后报错消失，与 Error/ErrorAt 的持久化结构
+// 自相矛盾；且快照-改-写回会盖掉夹在中间落成的池。
+func TestSetProxyPoolErrorPersists(t *testing.T) {
+	dir := t.TempDir()
+	a := &app{dataDir: dir, activePool: proxyActivePool{IPs: []string{"1.2.3.4"}}}
+	a.setProxyPoolError("boom", nil)
+	if a.activePool.Error != "boom" || a.activePool.ErrorAt.IsZero() {
+		t.Fatalf("memory error = %q %v, want boom + time", a.activePool.Error, a.activePool.ErrorAt)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, proxyActivePoolFile))
+	if err != nil {
+		t.Fatalf("read pool file: %v", err)
+	}
+	if !strings.Contains(string(data), "boom") || !strings.Contains(string(data), "1.2.3.4") {
+		t.Fatalf("pool file = %s, want error + ips persisted", data)
+	}
+}

@@ -516,15 +516,23 @@ func (a *app) commitPoolWithoutRestart(pool proxyActivePool) error {
 }
 
 func (a *app) setProxyPoolError(message string, results []proxyScanResult) {
-	pool := a.proxyActivePoolSnapshot()
-	pool.Error = message
-	pool.ErrorAt = time.Now()
-	if results != nil {
-		pool.Results = results
-	}
+	// 快照-改-写回是竞态：promote/select 在 cfnatCtlMu 下落池的瞬间若
+	// 夹在快照与写回之间，刚落成的池会被这份旧快照原样盖掉；且只写内
+	// 存不落盘，重启后报错消失，与 Error/ErrorAt 的持久化结构自相矛
+	// 盾。改成在 activeMu 下直接读改写、解锁后再落盘。注意不能拿
+	// cfnatCtlMu：revalidate 在持双锁（proxyScanMu + cfnatCtlMu）时
+	// 调本函数，拿锁会死锁。
 	a.activeMu.Lock()
-	a.activePool = pool
+	a.activePool.Error = message
+	a.activePool.ErrorAt = time.Now()
+	if results != nil {
+		a.activePool.Results = results
+	}
+	pool := a.activePool
 	a.activeMu.Unlock()
+	if err := a.saveProxyActivePool(pool); err != nil {
+		log.Printf("proxy pool error persist failed: %v", err)
+	}
 	log.Printf("proxy auto apply skipped: %s", message)
 }
 
