@@ -199,6 +199,82 @@ func TestRecordDomainProbeCountsFailuresWhenPeerSucceeds(t *testing.T) {
 	}
 }
 
+// 改动 A：DNS 解析失败占大头且无一例测速成功时，判定为体检通路故障——
+// 本轮失败样本不入账、不累计连败、状态不重算，且返回 true 让调用方跳过
+// reconcile（池子成员数量不变）。
+func TestRecordDomainProbePathBrokenOnDNSFailures(t *testing.T) {
+	a := newProbeTestApp(t)
+	samples := map[string]domainProbeSample{
+		"a.example.com": failSample("dns"),
+		"b.example.com": failSample("dns"),
+		"c.example.com": failSample("dns"),
+		"d.example.com": failSample("tcp"),
+	}
+	if broken := a.recordDomainProbeResults(samples); !broken {
+		t.Fatal("4/4 解析+建连失败应判定为通路故障")
+	}
+	for domain, rec := range a.domainQuality {
+		if len(rec.Samples) != 0 {
+			t.Fatalf("%s samples = %d, want 0 (path-broken rounds must not enter the ledger)", domain, len(rec.Samples))
+		}
+		if rec.ConsecutiveFailures != 0 {
+			t.Fatalf("%s consecutiveFailures = %d, want 0", domain, rec.ConsecutiveFailures)
+		}
+		if rec.State != "" {
+			t.Fatalf("%s state = %q, want untouched empty state", domain, rec.State)
+		}
+	}
+}
+
+// 改动 A：失败占比低于阈值（<70%）时不是通路故障——有个别域名真死时，
+// 它的失败仍要照常计数，否则坏域名永远清不掉。
+func TestRecordDomainProbeNotBrokenBelowThreshold(t *testing.T) {
+	a := newProbeTestApp(t)
+	samples := map[string]domainProbeSample{
+		"a.example.com": failSample("dns"),
+		"b.example.com": failSample("tcp"),
+		"c.example.com": okSample(12, 25),
+		"d.example.com": okSample(10, 30),
+	}
+	if broken := a.recordDomainProbeResults(samples); broken {
+		t.Fatal("2/4 解析+建连失败且有测速成功，不应判定为通路故障")
+	}
+}
+
+// 改动 A：纯函数分账与 70% 阈值边界——恰好 7/10 失败判通路故障，6/10 不判。
+func TestClassifyDomainProbeRoundThreshold(t *testing.T) {
+	build := func(dns, tcp, speedFail int) map[string]domainProbeSample {
+		samples := make(map[string]domainProbeSample, dns+tcp+speedFail)
+		for i := 0; i < dns; i++ {
+			samples["dns"+string(rune('a'+i))+".example.com"] = failSample("dns")
+		}
+		for i := 0; i < tcp; i++ {
+			samples["tcp"+string(rune('a'+i))+".example.com"] = failSample("tcp")
+		}
+		for i := 0; i < speedFail; i++ {
+			samples["spd"+string(rune('a'+i))+".example.com"] = failSample("speed")
+		}
+		return samples
+	}
+	stats := classifyDomainProbeRound(build(4, 3, 3))
+	if stats.DNSFailed != 4 || stats.TCPFailed != 3 || stats.SpeedFailed != 3 || stats.Total != 10 {
+		t.Fatalf("stats = %+v, want dns=4 tcp=3 speed=3 total=10", stats)
+	}
+	if !stats.pathBroken() {
+		t.Fatal("7/10 解析+建连失败应判定为通路故障")
+	}
+	if stats := classifyDomainProbeRound(build(3, 3, 4)); stats.pathBroken() {
+		t.Fatal("6/10 解析+建连失败不应判定为通路故障")
+	}
+	// 只要有一例测速成功，即使 9/10 解析失败也不是通路故障——
+	// 同伴成功证明通路本身还活着。
+	samples := build(9, 0, 0)
+	samples["ok.example.com"] = okSample(12, 25)
+	if stats := classifyDomainProbeRound(samples); stats.pathBroken() {
+		t.Fatal("有测速成功时不应判定为通路故障")
+	}
+}
+
 func TestRecordDomainProbePrunesRemovedDomains(t *testing.T) {
 	a := newProbeTestApp(t)
 	a.recordDomainProbeResults(map[string]domainProbeSample{

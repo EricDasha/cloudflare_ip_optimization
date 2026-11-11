@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -329,12 +330,68 @@ func (a *app) domainProbeTargets() []string {
 	return domains
 }
 
+// domainProbePathBrokenThreshold 体检通路故障的判定阈值：
+// 一轮里 DNS 解析失败 + TCP 建连失败合计占比达到该值、且无一例测速成功，
+// 即判定为体检通路故障而非域名本身死亡（见 classifyDomainProbeRound）。
+const domainProbePathBrokenThreshold = 0.7
+
+// domainProbeRoundStats 是一轮域名体检的失败分账：DNS 解析失败、TCP 建连
+// 失败、测速失败三者分开记——只有分开，才能区分「通路坏了」与「域名死了」。
+// 旧实现只看「测速成功数是否为 0」，DNS/TCP 全灭时仍把失败记进账本，
+// 于是新域名永远停在 state=""，质量闸一律放行，坏域名被整批塞回池。
+type domainProbeRoundStats struct {
+	Total        int
+	DNSFailed    int
+	TCPFailed    int
+	SpeedFailed  int
+	SpeedOK      int
+	TCPReachable int // Stage=speed 的样本数：真正走到了测速阶段
+}
+
+// classifyDomainProbeRound 按样本的失败阶段分账。Stage 由 probeOneDomain
+// 在失败点如实填写：dns=解析不到，tcp=解析到了但建连失败，speed=建连成功
+// 但测速失败。纯函数，便于单测钉死阈值边界。
+func classifyDomainProbeRound(samples map[string]domainProbeSample) domainProbeRoundStats {
+	stats := domainProbeRoundStats{Total: len(samples)}
+	for _, sample := range samples {
+		switch {
+		case sample.OK && sample.Stage == "speed":
+			stats.SpeedOK++
+			stats.TCPReachable++
+		case sample.OK:
+			// tcp-only 降级样本：只报可达性，没进测速阶段，不计入任一失败账。
+		case sample.Stage == "speed":
+			stats.SpeedFailed++
+			stats.TCPReachable++
+		case sample.Stage == "dns":
+			stats.DNSFailed++
+		default:
+			// Stage=tcp 或未知：解析到了（或无法区分）但建连失败。
+			stats.TCPFailed++
+		}
+	}
+	return stats
+}
+
+// pathBroken 判定本轮是否为体检通路故障：解析/建连失败占大头且无一例
+// 测速成功。测速失败（Stage=speed）不计入分子——解析成功、建连成功、
+// 测速失败的才是域名本身的问题。
+func (s domainProbeRoundStats) pathBroken() bool {
+	if s.Total == 0 || s.SpeedOK > 0 {
+		return false
+	}
+	unreachable := s.DNSFailed + s.TCPFailed
+	return float64(unreachable) >= domainProbePathBrokenThreshold*float64(s.Total)
+}
+
 // probeActiveDomainLatencies 给生效池里的每个优选域名做一轮体检：
 // TCP:443 快检 → VLESS 短时下载 → 写稳定性账。
-func (a *app) probeActiveDomainLatencies(ctx context.Context) {
+// 返回本轮是否为体检通路故障：是则调用方应跳过 reconcilePoolDomains，
+// 保持生效池域名集合不变——通路坏时体检结论不可信，不能据此换池。
+func (a *app) probeActiveDomainLatencies(ctx context.Context) bool {
 	domains := a.domainProbeTargets()
 	if len(domains) == 0 {
-		return
+		return false
 	}
 
 	speedCfg, template, speedErr := a.domainSpeedProbeConfig()
@@ -360,11 +417,17 @@ func (a *app) probeActiveDomainLatencies(ctx context.Context) {
 		}(domain)
 	}
 	wg.Wait()
-	a.recordDomainProbeResults(samples)
+	return a.recordDomainProbeResults(samples)
 }
 
 // probeOneDomain 单域名体检。TCP 不通即失败；TCP 通但测速失败仍记失败，
 // 但保留 TCP 延迟，便于区分「解析不到」与「能连上但跑不动」。
+//
+// TODO(改动 C，已评估，暂不做)：本函数解析域名后直连得到的 CF 前置 IP，
+// 走的正是可能已坏的出口，体检必然零样本。曾评估改为经 PROXY_AUTO_HOST
+// 的 Worker 路径做健康判定，但那会把「域名入口质量」换成「Worker 链路
+// 质量」，且要重排 probeVLESSCandidateMetrics 的 server/Host 拼装与测速
+// 端点选择，改动面远超 30 行——按交接单要求放弃，留此 TODO，不重构。
 func (a *app) probeOneDomain(ctx context.Context, domain string, timeout time.Duration, cfg vlessProbeConfig, template map[string]any, speedEnabled bool) (domainLatency, domainProbeSample) {
 	started := time.Now()
 	dialer := net.Dialer{Timeout: timeout}
@@ -375,6 +438,14 @@ func (a *app) probeOneDomain(ctx context.Context, domain string, timeout time.Du
 	if err != nil {
 		view.Error = err.Error()
 		sample.Error = err.Error()
+		// DNS 解析失败与 TCP 建连失败必须分开记：前者是解析通路问题，
+		// 后者是出口/目标问题；混在一起，recordDomainProbeResults
+		// 就无法判定「体检通路故障」。
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) {
+			view.Stage = "dns"
+			sample.Stage = "dns"
+		}
 		return view, sample
 	}
 	_ = conn.Close()
@@ -480,34 +551,37 @@ func (a *app) speedPathStatus() speedPathStat {
 }
 
 // recordDomainProbeResults 把本轮样本记入稳定性账，重算统计与状态，并回填 UI 视图。
+// 返回本轮是否为体检通路故障：是则调用方应保持生效池不变（见 probeActiveDomainLatencies）。
 //
 // 一道刻意的保险：只有当本轮至少有一个域名测速成功时，失败才计入连败。
 // 若整轮无一人测出速度，那更可能是测速通路本身坏了（模板失效、sing-box 缺位、
 // 上游测速端点不可达），而不是十二个域名同时死。此时累加连败会把整个域名池
 // 打成 dead，「只开活跃」随即清空——那是数据丢失级的方向性错误。
 // 单域名真死仍能被识别：只要同轮里还有同伴成功，它的失败就照常计数。
-func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) {
+//
+// 另一道保险（改动 A）：DNS 解析失败 + TCP 建连失败合计占比达到阈值
+// （domainProbePathBrokenThreshold）且无一例测速成功时，同样判定为通路
+// 故障——本轮失败样本不入账、不累计连败、不重算状态。旧实现只认「测速零
+// 样本 + TCP 可达」，DNS/TCP 全灭时失败照样入账，新域名永远停在 state=""
+// （质量闸一律放行），坏域名在下一轮 reconcile 时被整批塞回池。
+func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) bool {
 	now := time.Now()
-	speedSuccess := 0
-	tcpReachable := 0
-	for _, sample := range samples {
-		if sample.OK && sample.Stage == "speed" {
-			speedSuccess++
-		}
-		// 只有 Stage 为 speed 才说明「本轮真的尝试过测速且域名可达」。
-		// tcp-only 是模板不可用时的降级样本，此时根本没走到测速端点，
-		// 计进来会让「端点坏了」在模板故障时误报。
-		if sample.Stage == "speed" {
-			tcpReachable++
-		}
-	}
+	stats := classifyDomainProbeRound(samples)
+	speedSuccess := stats.SpeedOK
+	tcpReachable := stats.TCPReachable
 	a.recordSpeedPathRound(now, len(samples), speedSuccess, tcpReachable)
 	probeHealthy := speedSuccess > 0
 	// 「域名能连上、但没有一个测出速度」才是测速通路本身的可疑形态。
 	// 若连 TCP 都不通，不能把责任推给端点，仍按旧口径记失败，
 	// 否则域名真的整组死掉时反而永远清不掉。
 	probePathBroken := !probeHealthy && tcpReachable > 0
-	if !probeHealthy && len(samples) > 0 {
+	// DNS/TCP 失败占大头的通路故障：与测速通路故障同等对待。
+	roundPathBroken := stats.pathBroken()
+	if roundPathBroken {
+		log.Printf("domain probe path broken: %d/%d unreachable (dns %d, tcp %d), pool unchanged", stats.DNSFailed+stats.TCPFailed, len(samples), stats.DNSFailed, stats.TCPFailed)
+	}
+	pathBroken := probePathBroken || roundPathBroken
+	if !probeHealthy && len(samples) > 0 && !roundPathBroken {
 		log.Printf("domain probe: no domain produced a speed sample this round (%d domains), failures not counted toward dead", len(samples))
 	}
 
@@ -518,11 +592,11 @@ func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) {
 			rec = &domainQuality{Domain: domain}
 			a.domainQuality[domain] = rec
 		}
-		// 整轮无成绩（probeHealthy=false）时，失败的样本连账都不入。
+		// 整轮无成绩（pathBroken）时，失败的样本连账都不入。
 		// 只挡住 ConsecutiveFailures 不够：SuccessRate 是按时段样本算的，
 		// 端点坏三轮就会把好域名拖成 unstable，随后被移出转发——
 		// 测速端点坏了，反倒把域名池清空。
-		entered := sample.OK || !probePathBroken
+		entered := sample.OK || !pathBroken
 		if entered {
 			rec.Samples = append(rec.Samples, sample)
 			if len(rec.Samples) > domainQualitySampleCap {
@@ -555,6 +629,7 @@ func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) {
 	a.domainLatencyMu.Lock()
 	a.domainLatencyLast = now
 	a.domainLatencyMu.Unlock()
+	return pathBroken
 }
 
 // recalculate 从最近样本重算成功率、速度分位与抖动系数。
@@ -628,10 +703,13 @@ func (a *app) runDomainLatencyProbeLoop() {
 		func() {
 			ctx, cancel := context.WithTimeout(context.Background(), domainProbeInterval())
 			defer cancel()
-			a.probeActiveDomainLatencies(ctx)
+			// 体检通路故障时不 reconcile：体检结论不可信，本轮保持
+			// 生效池域名集合不变（改动 A），否则未验证域名会被整批塞回池。
+			if broken := a.probeActiveDomainLatencies(ctx); !broken {
+				// 体检结论必须能改变生效池，否则闸门只剪不补。
+				a.reconcilePoolDomains()
+			}
 		}()
-		// 体检结论必须能改变生效池，否则闸门只剪不补。
-		a.reconcilePoolDomains()
 		timer := time.NewTimer(domainProbeInterval())
 		<-timer.C
 		timer.Stop()
