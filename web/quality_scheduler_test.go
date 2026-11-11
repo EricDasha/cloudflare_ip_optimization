@@ -95,3 +95,15 @@ func TestSchedulerSimulationDoesNotOscillate(t *testing.T) {
 		}
 	}
 }
+
+// 吞吐轨晋升也要看成功率：候选再快，成功率低于 Active 就不换。
+func TestSchedulerThroughputPromotionRequiresSuccessRate(t *testing.T) {
+	policy := defaultSchedulerPolicy()
+	now := time.Date(2026, 8, 21, 2, 0, 0, 0, time.UTC)
+	active := lineQuality{IP: "A", State: lineActive, AverageMbps: 300, SuccessRate: 1}
+	jittery := lineQuality{IP: "B", State: lineStandby, AverageMbps: 500, P95Mbps: 480, PeakMbps: 520, SuccessRate: 0.2, ConsecutiveSuperior: 3}
+	decision, _ := decideLineSwitch(schedulerInput{Now: now, Active: &active, Standby: []lineQuality{jittery}}, policy)
+	if decision.Event != switchNone {
+		t.Fatalf("low-success-rate candidate promoted on throughput alone: %#v", decision)
+	}
+}
