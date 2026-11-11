@@ -225,3 +225,24 @@ func TestSetProxyPoolErrorPersists(t *testing.T) {
 		t.Fatalf("pool file = %s, want error + ips persisted", data)
 	}
 }
+
+// refillGap 缺口按实际转发的成员算：5 个在位里 2 个已关闭，实际只转
+// 3 个，缺口是 2 不是 0；锁位时不补。
+func TestRefillGapCountsForwardingOnly(t *testing.T) {
+	pool := proxyActivePool{
+		IPs:      []string{"1.1.1.1", "2.2.2.2", "3.3.3.3", "4.4.4.4", "5.5.5.5"},
+		Disabled: []string{"4.4.4.4", "5.5.5.5"},
+	}
+	if got := refillGap(pool, 5); got != 2 {
+		t.Fatalf("gap = %d, want 2", got)
+	}
+	pool.Lock = true
+	if got := refillGap(pool, 5); got != 0 {
+		t.Fatalf("locked gap = %d, want 0", got)
+	}
+	pool.Lock = false
+	pool.Disabled = nil
+	if got := refillGap(pool, 5); got != 0 {
+		t.Fatalf("full pool gap = %d, want 0", got)
+	}
+}

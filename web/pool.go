@@ -953,6 +953,14 @@ func (a *app) worstPoolMember(ips []string) string {
 	return worst
 }
 
+// refillGap 踢人补位的缺口：按实际转发的成员算，锁位时不补。
+func refillGap(pool proxyActivePool, poolSize int) int {
+	if pool.Lock {
+		return 0
+	}
+	return poolSize - len(forwardingIPs(pool))
+}
+
 // refillPoolAfterKick 踢人后的自动补位终审：从候选缓存考试新 IP，
 // 保序并入现有在位成员，把池补回 PoolSize 目标（5~15）。
 // 手动踢除的延续语义：不走 allowPoolSwitch 冷却（markPoolSwitched 由本路径自行记录）。
@@ -978,8 +986,15 @@ func (a *app) refillPoolAfterKick() {
 	}
 	defer a.proxyScanMu.Unlock()
 	current := a.proxyActivePoolSnapshot()
-	need := cfg.PoolSize - len(current.IPs)
+	// 缺口按实际转发的成员算：Disabled 成员占着 IPs 名额却不转发，
+	// 按 len(IPs) 算会得出 need=0，池永远补不满。锁位模式下补位无权
+	// 改动池子：补进来的 IP 会进 pool.IPs 但不进 -fixed，账面与转发
+	// 事实分叉，直接退出，等用户解锁再说。
+	need := refillGap(current, cfg.PoolSize)
 	if need <= 0 {
+		if current.Lock {
+			log.Printf("kick refill skipped: pool lock enabled")
+		}
 		return
 	}
 	snapshot := a.proxyCandidateSnapshot()
@@ -1055,7 +1070,9 @@ func (a *app) refillPoolAfterKick() {
 		}
 		merged = append(merged, ip)
 		added = append(added, ip)
-		if len(merged) >= cfg.PoolSize {
+		// 按新增数封顶：merged 含 Disabled 成员，按 len(merged) 封顶会
+		// 在有已关闭成员时少补（与 need 的算法同病）。
+		if len(added) >= need {
 			break
 		}
 	}
