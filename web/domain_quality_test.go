@@ -423,3 +423,24 @@ func TestRecordDomainProbeBrokenRoundCreatesNoRecords(t *testing.T) {
 		t.Fatalf("state = %q, want healthy", rec.State)
 	}
 }
+
+// tcp-only 降级样本只报可达性：攒够 3 轮也不能判 healthy——
+// 一次测速都没做过，凭 TCP 通就放行等于质量闸对它永久失明。
+func TestRecalculateTCPOnlyNeverHealthy(t *testing.T) {
+	q := &domainQuality{Domain: "x.example.com"}
+	for i := 0; i < 5; i++ {
+		q.Samples = append(q.Samples, domainProbeSample{At: time.Now(), OK: true, Stage: "tcp-only", TCPMs: 50})
+		q.ConsecutiveSuccesses++
+	}
+	q.recalculate()
+	if q.State != domainStateTesting {
+		t.Fatalf("tcp-only state = %q, want testing", q.State)
+	}
+	// 一次真实测速后即可正常晋升。
+	q.Samples = append(q.Samples, domainProbeSample{At: time.Now(), OK: true, Stage: "speed", TCPMs: 50, Mbps: 20})
+	q.ConsecutiveSuccesses++
+	q.recalculate()
+	if q.State != domainStateHealthy {
+		t.Fatalf("mixed state = %q, want healthy", q.State)
+	}
+}
