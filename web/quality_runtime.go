@@ -259,6 +259,11 @@ func (r *qualitySchedulerRuntime) observe(ip, source string, mbps float64, laten
 		rec.ConsecutiveFailures = 0
 		if rec.IP != r.data.ActiveIP {
 			rec.State, rec.StateReason, rec.StateChangedAt = lineStandby, reasonProbePassed, now
+		} else if rec.State != lineActive {
+			// 恢复的 Active 必须捡回 ACTIVE：失败时它被置 FAILED，下一轮
+			// 观察先把它挪到 PROBING，成功后若还留在 PROBING，
+			// decideLineSwitch 见 State==FAILED/非 ACTIVE 会误判。
+			rec.State, rec.StateReason, rec.StateChangedAt = lineActive, reasonProbePassed, now
 		}
 	} else {
 		rec.ConsecutiveFailures++
@@ -295,7 +300,9 @@ func (r *qualitySchedulerRuntime) observeActiveHealth(success bool, latencyMs in
 	r.recalculateLocked(rec)
 	if success {
 		rec.ConsecutiveFailures = 0
-		if rec.State == lineDegraded {
+		if rec.State != lineActive {
+			// 旧实现只从 DEGRADED 捡回：FAILED 的 Active 成功后永远卡在
+			// FAILED，decideLineSwitch 每轮误判 FAILOVER。
 			rec.State, rec.StateReason, rec.StateChangedAt = lineActive, reasonProbePassed, now
 		}
 	} else {
