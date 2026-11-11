@@ -220,7 +220,7 @@ func defaultSubscriptionConverter() string {
 }
 
 // subscriptionMaintainers 第三方订阅维护者域名清单（逗号/空白分隔）。
-// 默认内置用户给出的 7 个维护者；环境变量可覆盖。
+// 默认内置用户给出的 8 个维护者；环境变量可覆盖。
 func subscriptionMaintainers() []string {
 	raw := strings.TrimSpace(env("PROXY_SUBSCRIPTION_MAINTAINERS", "owo.o00o.ooo cm.soso.edu.kg zrf.zrf.me sub.keaeye.icu sub.mot.cloudns.biz sub.mia.xx.kg sub.lzjbaby.com sub.xdu.qzz.io"))
 	seen := make(map[string]struct{})
