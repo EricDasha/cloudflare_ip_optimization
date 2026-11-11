@@ -138,15 +138,20 @@ func (a *app) handleActiveEndorse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 扶持即置顶：已在位但尚未置顶的成员，同样要提到 -fixed 最前。
+	// 新扶持的插到 Priority 最前（保持本次扶持的顺序），不是 append
+	// 到尾部——planFixedMembers 按 Priority 顺序排 -fixed，append
+	// 会让新扶持的落在已有置顶成员之后，与「置顶」矛盾。
 	wanted := append(append([]string(nil), parsed.IPs...), parsed.Domains...)
 	priority := append([]string(nil), current.Priority...)
 	promoted := 0
+	newly := make([]string, 0, len(wanted))
 	for _, member := range wanted {
 		if !containsString(priority, member) {
-			priority = append(priority, member)
+			newly = append(newly, member)
 			promoted++
 		}
 	}
+	priority = append(newly, priority...)
 	disabled := make([]string, 0, len(current.Disabled))
 	for _, member := range current.Disabled {
 		if !containsString(wanted, member) {
