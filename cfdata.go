@@ -539,6 +539,26 @@ func writeIPsToFile(filename string, ips []string) error {
 
 // runDetailedTest 对选中的IP列表进行详细测试（10次TCP连接测试443端口），统计延迟和丢包率，结果写入CSV文件
 // 同时增加对测试结果的统计分析，并输出横向柱状图（基于 ip.txt 中的 IP 总数）
+// safeDCFilename 把数据中心名洗成安全文件名：只留字母数字 - _，其余
+// 字符变下划线。DC 名来自 ip.csv 第 2 列（外部数据），不洗的话
+// DC="../../x" 会让 os.Create 写到工作目录之外，DC="result" 会
+// 覆盖 result.csv。
+func safeDCFilename(dc string) string {
+	var b strings.Builder
+	for _, r := range dc {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	name := b.String()
+	if name == "" {
+		return "result.csv"
+	}
+	return name + ".csv"
+}
+
 func runDetailedTest(ipList []string, selectedDC string, port int, delay int, testThreads int) {
 	// -test 0 或负数同理死锁。
 	testThreads = clampThreads(testThreads, "test")
@@ -629,7 +649,7 @@ func runDetailedTest(ipList []string, selectedDC string, port int, delay int, te
 
 	outFilename := "result.csv"
 	if selectedDC != "" {
-		outFilename = selectedDC + ".csv"
+		outFilename = safeDCFilename(selectedDC)
 	}
 	file, err := os.Create(outFilename)
 	if err != nil {
