@@ -185,7 +185,22 @@ func main() {
 // ----------------------- 功能模块 -----------------------
 
 // runIPScan 根据用户选择的IPv4/IPv6，从指定URL获取CIDR列表、生成随机IP，然后扫描测试数据中心信息，最终写入 ip.csv
+// clampThreads 把用户传的并发数钳到 [1,1000]，越界时打印提示并回落。
+func clampThreads(n int, flagName string) int {
+	if n < 1 {
+		fmt.Printf("-%s %d 无效，并发数钳到 1\n", flagName, n)
+		return 1
+	}
+	if n > 1000 {
+		fmt.Printf("-%s %d 过大，并发数钳到 1000\n", flagName, n)
+		return 1000
+	}
+	return n
+}
+
 func runIPScan(ipType int, scanMaxThreads int) {
+	// -scan 0 或负数会让 make(chan,<=0) 后第一次发送即永久阻塞。
+	scanMaxThreads = clampThreads(scanMaxThreads, "scan")
 	var filename, url string
 	if ipType == 6 {
 		filename = "ips-v6.txt"
@@ -525,6 +540,8 @@ func writeIPsToFile(filename string, ips []string) error {
 // runDetailedTest 对选中的IP列表进行详细测试（10次TCP连接测试443端口），统计延迟和丢包率，结果写入CSV文件
 // 同时增加对测试结果的统计分析，并输出横向柱状图（基于 ip.txt 中的 IP 总数）
 func runDetailedTest(ipList []string, selectedDC string, port int, delay int, testThreads int) {
+	// -test 0 或负数同理死锁。
+	testThreads = clampThreads(testThreads, "test")
 	var wg sync.WaitGroup
 	wg.Add(len(ipList))
 	resultChan := make(chan TestResult, len(ipList))

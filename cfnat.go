@@ -536,11 +536,27 @@ func loadLocations() ([]location, error) {
 }
 
 // scanIPs 扫描 IP 列表并返回结果
+// clampThreads 把用户传的并发数钳到 [1,1000]，越界时打印提示并回落。
+func clampThreads(n int, flagName string) int {
+	if n < 1 {
+		fmt.Printf("-%s %d 无效，并发数钳到 1\n", flagName, n)
+		return 1
+	}
+	if n > 1000 {
+		fmt.Printf("-%s %d 过大，并发数钳到 1000\n", flagName, n)
+		return 1000
+	}
+	return n
+}
+
 func scanIPs(ipList []string, locationMap map[string]location, maxThreads int) []result {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var results []result
 
+	// -task 0 或负数会让 make(chan,<=0) 后第一次发送即永久阻塞；
+	// 上限 1000 防手滑把并发打爆。
+	maxThreads = clampThreads(maxThreads, "task")
 	thread := make(chan struct{}, maxThreads)
 
 	var count int32

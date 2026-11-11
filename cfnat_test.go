@@ -364,3 +364,29 @@ func TestReadIPsRejectsHugeCIDR(t *testing.T) {
 		}
 	}
 }
+
+func TestClampThreads(t *testing.T) {
+	if got := clampThreads(0, "task"); got != 1 {
+		t.Fatalf("clampThreads(0) = %d, want 1", got)
+	}
+	if got := clampThreads(-5, "task"); got != 1 {
+		t.Fatalf("clampThreads(-5) = %d, want 1", got)
+	}
+	if got := clampThreads(1001, "task"); got != 1000 {
+		t.Fatalf("clampThreads(1001) = %d, want 1000", got)
+	}
+	if got := clampThreads(100, "task"); got != 100 {
+		t.Fatalf("clampThreads(100) = %d, want 100", got)
+	}
+}
+
+// -task 0 曾让 scanIPs 在第一次发送即永久阻塞；现在应钳到 1 并跑完。
+func TestScanIPsZeroThreadsDoesNotDeadlock(t *testing.T) {
+	done := make(chan []result, 1)
+	go func() { done <- scanIPs([]string{"127.0.0.1"}, map[string]location{}, 0) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("scanIPs(maxThreads=0) deadlocked")
+	}
+}
