@@ -765,7 +765,7 @@ func fetchHTTPSBody(parent context.Context, rawURL string) ([]byte, error) {
 	client := &http.Client{
 		Timeout: 8 * time.Second,
 		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			if !strings.EqualFold(req.URL.Hostname(), target.Hostname()) {
+			if !allowHTTPSRedirect(req, target) {
 				return http.ErrUseLastResponse
 			}
 			return nil

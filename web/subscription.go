@@ -20,6 +20,13 @@ var (
 
 // fetchSubscriptionBody 拉取单个维护者订阅内容：HTTPS 同 host 跳转、≤512KiB。
 // 返回值附带 HTTP 状态码，供留痕使用——「404」和「超时」是两种完全不同的故障。
+// allowHTTPSRedirect 判定是否跟进重定向：只认同 host 且仍为 HTTPS。
+// 只比 host 的旧写法会放行同 host https→http：订阅 URL 里带 token
+// 查询串（及候选源内容）会被明文发出。
+func allowHTTPSRedirect(req *http.Request, base *url.URL) bool {
+	return req.URL.Scheme == "https" && strings.EqualFold(req.URL.Hostname(), base.Hostname())
+}
+
 func fetchSubscriptionBody(parent context.Context, converter, maintainer, token string) ([]byte, int, error) {
 	if converter == "" || maintainer == "" || token == "" {
 		return nil, 0, errors.New("订阅转换器、维护者或 token 为空")
@@ -36,7 +43,7 @@ func fetchSubscriptionBody(parent context.Context, converter, maintainer, token 
 	client := &http.Client{
 		Timeout: time.Duration(subFetchTimeout) * time.Second,
 		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			if !strings.EqualFold(req.URL.Hostname(), parsed.Hostname()) {
+			if !allowHTTPSRedirect(req, parsed) {
 				return http.ErrUseLastResponse
 			}
 			return nil
