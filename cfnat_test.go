@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -405,5 +406,42 @@ func TestPipeConnectionsIdleTimeout(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("pipeConnections did not close idle connection")
+	}
+}
+
+func TestGetRandomIPv4sRejectsMalformed(t *testing.T) {
+	got := getRandomIPv4s([]string{"1.2.3.4.5/24", "a.b.c.d/24", "1.2.3.4/16", "1.2.3.0/24"})
+	if len(got) != 1 {
+		t.Fatalf("got %v, want exactly 1 valid address", got)
+	}
+	ip := net.ParseIP(got[0])
+	if ip == nil || ip.To4() == nil {
+		t.Fatalf("got %q, not a valid IPv4", got[0])
+	}
+	if got[0] == "1.2.3.0" || got[0] == "1.2.3.255" {
+		t.Fatalf("got network/broadcast address %q", got[0])
+	}
+	if !strings.HasPrefix(got[0], "1.2.3.") {
+		t.Fatalf("got %q, want 1.2.3.x", got[0])
+	}
+}
+
+func TestGetRandomIPv6sHandlesCompressed(t *testing.T) {
+	for _, cidr := range []string{"2400::/48", "2606:4700::/48"} {
+		got := getRandomIPv6s([]string{cidr})
+		if len(got) != 1 {
+			t.Fatalf("%s: got %v, want exactly 1 address", cidr, got)
+		}
+		ip := net.ParseIP(got[0])
+		if ip == nil {
+			t.Fatalf("%s: got %q, not a valid IPv6", cidr, got[0])
+		}
+		_, ipnet, _ := net.ParseCIDR(cidr)
+		if !ipnet.Contains(ip) {
+			t.Fatalf("%s: got %q, outside the /48", cidr, got[0])
+		}
+	}
+	if got := getRandomIPv6s([]string{"not-an-ip", "2001:db8::/32"}); len(got) != 0 {
+		t.Fatalf("invalid input: got %v, want none", got)
 	}
 }

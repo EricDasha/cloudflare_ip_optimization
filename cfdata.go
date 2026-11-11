@@ -782,40 +782,60 @@ func parseIPList(content string) []string {
 	return ipList
 }
 
-// getRandomIPv4s 从类似 "xxx.xxx.xxx.xxx/24" 的CIDR中随机生成一个IPv4地址（只替换最后一段）
+// getRandomIPv4s 从类似 "xxx.xxx.xxx.xxx/24" 的CIDR中随机生成一个IPv4地址（只替换最后一段）。
+// 非法输入直接跳过：旧写法只按 "." 切分，不校验数字合法性，且末段可取
+// .0（网络地址）与 .255（广播地址）。
 func getRandomIPv4s(ipList []string) []string {
 	rand.Seed(time.Now().UnixNano())
 	var randomIPs []string
 	for _, subnet := range ipList {
-		baseIP := strings.TrimSuffix(subnet, "/24")
-		octets := strings.Split(baseIP, ".")
-		if len(octets) != 4 {
+		_, ipnet, err := net.ParseCIDR(strings.TrimSpace(subnet))
+		if err != nil {
 			continue
 		}
-		octets[3] = fmt.Sprintf("%d", rand.Intn(256))
-		randomIP := strings.Join(octets, ".")
-		randomIPs = append(randomIPs, randomIP)
+		ones, bits := ipnet.Mask.Size()
+		if bits != 32 || ones != 24 {
+			continue
+		}
+		ip4 := ipnet.IP.To4()
+		if ip4 == nil {
+			continue
+		}
+		out := make(net.IP, net.IPv4len)
+		copy(out, ip4)
+		// 主机段取 1..254，避开 .0 网络地址与 .255 广播地址。
+		out[3] = byte(1 + rand.Intn(254))
+		randomIPs = append(randomIPs, out.String())
 	}
 	return randomIPs
 }
 
-// getRandomIPv6s 从类似 "xxxx:xxxx:xxxx::/48" 的CIDR中随机生成一个IPv6地址（保留前三组）
+// getRandomIPv6s 从类似 "xxxx:xxxx:xxxx::/48" 的CIDR中随机生成一个IPv6地址（保留前三组）。
+// 旧写法按 ":" 切分，`2400::/48` 这类压缩写法会切出空段，拼出 `2400:::`
+// 非法地址；非十六进制段也不校验。
 func getRandomIPv6s(ipList []string) []string {
 	rand.Seed(time.Now().UnixNano())
 	var randomIPs []string
 	for _, subnet := range ipList {
-		baseIP := strings.TrimSuffix(subnet, "/48")
-		sections := strings.Split(baseIP, ":")
-		if len(sections) < 3 {
+		_, ipnet, err := net.ParseCIDR(strings.TrimSpace(subnet))
+		if err != nil {
 			continue
 		}
-		sections = sections[:3]
-		// 生成后三组随机数据（使总组数达到8组）
-		for i := 3; i < 8; i++ {
-			sections = append(sections, fmt.Sprintf("%x", rand.Intn(65536)))
+		ones, bits := ipnet.Mask.Size()
+		if bits != 128 || ones != 48 {
+			continue
 		}
-		randomIP := strings.Join(sections, ":")
-		randomIPs = append(randomIPs, randomIP)
+		ip16 := ipnet.IP.To16()
+		if ip16 == nil {
+			continue
+		}
+		out := make(net.IP, net.IPv6len)
+		copy(out, ip16)
+		// 生成后 80 位随机数据（第 6 字节起）。
+		for i := 6; i < net.IPv6len; i++ {
+			out[i] = byte(rand.Intn(256))
+		}
+		randomIPs = append(randomIPs, out.String())
 	}
 	return randomIPs
 }

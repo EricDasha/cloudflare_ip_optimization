@@ -817,7 +817,9 @@ func nextRandomIntn(n int) int {
 	return randomGenerator.Intn(n)
 }
 
-// 从每个/24子网随机提取一个IPv4
+// 从每个/24子网随机提取一个IPv4。非法输入直接跳过：旧写法只按 "."
+// 切分，`1.2.3.4.5/24` 会拼出 5 段非法地址，`/16` 后缀去不掉也
+// 会原样残留；且末段可取 .0（网络地址）与 .255（广播地址）。
 func getRandomIPv4s(ipList []string) []string {
 	var randomIPs []string
 	for _, subnet := range ipList {
@@ -826,18 +828,31 @@ func getRandomIPv4s(ipList []string) []string {
 		if subnet == "" {
 			continue
 		}
-		baseIP := strings.TrimSuffix(subnet, "/24")
-		octets := strings.Split(baseIP, ".")
-		if len(octets) >= 4 {
-			octets[3] = fmt.Sprintf("%d", nextRandomIntn(256))
-			randomIP := strings.Join(octets, ".")
-			randomIPs = append(randomIPs, randomIP)
+		ip, ipnet, err := net.ParseCIDR(subnet)
+		if err != nil {
+			continue
 		}
+		ones, bits := ipnet.Mask.Size()
+		if bits != 32 || ones != 24 {
+			continue
+		}
+		ip4 := ip.To4()
+		if ip4 == nil {
+			continue
+		}
+		out := make(net.IP, net.IPv4len)
+		copy(out, ip4)
+		// 主机段取 1..254，避开 .0 网络地址与 .255 广播地址。
+		out[3] = byte(1 + nextRandomIntn(254))
+		randomIPs = append(randomIPs, out.String())
 	}
 	return randomIPs
 }
 
 // 从每个/48子网随机提取一个IPv6
+// 从每个/48子网随机提取一个IPv6（保留前三组）。旧写法按 ":" 切分，
+// `2400::/48` 这类压缩写法会切出空段，拼出 `2400:::` 非法地址；
+// 非十六进制段也不校验。
 func getRandomIPv6s(ipList []string) []string {
 	var randomIPs []string
 	for _, subnet := range ipList {
@@ -846,16 +861,24 @@ func getRandomIPv6s(ipList []string) []string {
 		if subnet == "" {
 			continue
 		}
-		baseIP := strings.TrimSuffix(subnet, "/48")
-		sections := strings.Split(baseIP, ":")
-		if len(sections) >= 3 {
-			sections = sections[:3]
-			for i := 3; i < 8; i++ {
-				sections = append(sections, fmt.Sprintf("%x", nextRandomIntn(65536)))
-			}
-			randomIP := strings.Join(sections, ":")
-			randomIPs = append(randomIPs, randomIP)
+		_, ipnet, err := net.ParseCIDR(subnet)
+		if err != nil {
+			continue
 		}
+		ones, bits := ipnet.Mask.Size()
+		if bits != 128 || ones != 48 {
+			continue
+		}
+		ip16 := ipnet.IP.To16()
+		if ip16 == nil {
+			continue
+		}
+		out := make(net.IP, net.IPv6len)
+		copy(out, ip16)
+		for i := 6; i < net.IPv6len; i++ {
+			out[i] = byte(nextRandomIntn(256))
+		}
+		randomIPs = append(randomIPs, out.String())
 	}
 	return randomIPs
 }
