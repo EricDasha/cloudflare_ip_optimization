@@ -587,21 +587,24 @@ func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) boo
 
 	a.domainQualityMu.Lock()
 	for domain, sample := range samples {
+		// 整轮无成绩（pathBroken）时，失败的样本连账都不入。
+		// 只挡住 ConsecutiveFailures 不够：SuccessRate 是按时段样本算的，
+		// 端点坏三轮就会把好域名拖成 unstable，随后被移出转发——
+		// 测速端点坏了，反倒把域名池清空。
+		// 没入账的样本也不建记录、不刷新 LastProbeAt：否则账本凭空多出
+		// 一批 state="" 的空记录（闸门对空状态一律放行，下轮照样回池），
+		// 已有记录的新鲜度还会被没测过的轮次刷新。
+		if !sample.OK && pathBroken {
+			continue
+		}
 		rec := a.domainQuality[domain]
 		if rec == nil {
 			rec = &domainQuality{Domain: domain}
 			a.domainQuality[domain] = rec
 		}
-		// 整轮无成绩（pathBroken）时，失败的样本连账都不入。
-		// 只挡住 ConsecutiveFailures 不够：SuccessRate 是按时段样本算的，
-		// 端点坏三轮就会把好域名拖成 unstable，随后被移出转发——
-		// 测速端点坏了，反倒把域名池清空。
-		entered := sample.OK || !pathBroken
-		if entered {
-			rec.Samples = append(rec.Samples, sample)
-			if len(rec.Samples) > domainQualitySampleCap {
-				rec.Samples = rec.Samples[len(rec.Samples)-domainQualitySampleCap:]
-			}
+		rec.Samples = append(rec.Samples, sample)
+		if len(rec.Samples) > domainQualitySampleCap {
+			rec.Samples = rec.Samples[len(rec.Samples)-domainQualitySampleCap:]
 		}
 		rec.LastProbeAt = now
 		if sample.OK {
@@ -612,9 +615,7 @@ func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) boo
 			rec.ConsecutiveFailures++
 			rec.ConsecutiveSuccesses = 0
 		}
-		if entered {
-			rec.recalculate()
-		}
+		rec.recalculate()
 	}
 	// 已移出池的域名不再占据成绩册。
 	for domain := range a.domainQuality {

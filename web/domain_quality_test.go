@@ -393,3 +393,33 @@ func TestDomainSpeedProbeConfigClamp(t *testing.T) {
 		t.Fatalf("越界值未回落默认: ReadLimit=%d Timeout=%v", cfg.ReadLimit, cfg.Timeout)
 	}
 }
+
+// 改动 A 的补漏：通路故障轮失败的样本连账都不入——不建空记录，
+// 已有记录的 LastProbeAt 也不被没测过的轮次刷新。旧实现先建记录再
+// 跳过入账，账本凭空多出 state="" 的空记录，闸门对空状态一律放行。
+func TestRecordDomainProbeBrokenRoundCreatesNoRecords(t *testing.T) {
+	a := newProbeTestApp(t)
+	old := freshRecord(domainStateHealthy)
+	oldAt := time.Now().Add(-time.Hour)
+	old.LastProbeAt = oldAt
+	a.domainQuality["old.example.com"] = old
+	samples := map[string]domainProbeSample{
+		"a.example.com":   failSample("dns"),
+		"b.example.com":   failSample("dns"),
+		"c.example.com":   failSample("dns"),
+		"old.example.com": failSample("tcp"),
+	}
+	if broken := a.recordDomainProbeResults(samples); !broken {
+		t.Fatal("4/4 解析+建连失败应判定为通路故障")
+	}
+	if got := len(a.domainQuality); got != 1 {
+		t.Fatalf("broken round ledger = %d records, want 1 (only pre-existing)", got)
+	}
+	if rec := a.domainQuality["old.example.com"]; rec == nil {
+		t.Fatal("pre-existing record pruned by broken round")
+	} else if !rec.LastProbeAt.Equal(oldAt) {
+		t.Fatalf("LastProbeAt = %v, want untouched %v", rec.LastProbeAt, oldAt)
+	} else if rec.State != domainStateHealthy {
+		t.Fatalf("state = %q, want healthy", rec.State)
+	}
+}
