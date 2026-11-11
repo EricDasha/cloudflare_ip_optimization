@@ -48,9 +48,12 @@ func classifyProbeError(err error) string {
 		return failureHandshake
 	}
 	// 兜底：文本匹配。注意大小写与常见变体，宁可归 other 也不乱归类。
+	// 中文「超时」也要认：探针自己产的报错是中文（VLESS 探针启动超时），
+	// 只认英文会把它归成 other，改动 B 的降级防线（ErrorClass != timeout
+	// 才准入）就被绕过——超时类失败照样进降级池。
 	msg := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(msg, "timeout"), strings.Contains(msg, "deadline exceeded"):
+	case strings.Contains(msg, "timeout"), strings.Contains(msg, "deadline exceeded"), strings.Contains(msg, "超时"):
 		return failureTimeout
 	case strings.Contains(msg, "connection refused"):
 		return failureRefused
