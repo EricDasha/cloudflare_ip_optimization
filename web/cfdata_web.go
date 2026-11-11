@@ -399,15 +399,46 @@ func (a *app) detailFiles() []detailFile {
 	return files
 }
 
-func readDetailCSV(path string) ([]detailRow, error) {
+// 明细 CSV 体积上限：data/ 里任意 .csv 都会被列表与详情接口读，
+// 无上限的 ReadAll 会让一个用户误放的大文件直接吃光内存。
+// 10 MiB / 10 万行远超正常详细测试结果（千级行）。
+const (
+	maxDetailCSVBytes = 10 << 20
+	maxDetailCSVRows  = 100_000
+)
+
+// readDetailCSVRecords 流式读明细 CSV：先按文件体积拒大文件，再逐
+// 行读、超行数即报错，不再一次性 ReadAll。
+func readDetailCSVRecords(path string) ([][]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return []detailRow{}, err
+		return nil, err
 	}
 	defer f.Close()
+	if info, err := f.Stat(); err == nil && info.Size() > maxDetailCSVBytes {
+		return nil, fmt.Errorf("detail csv too large: %d bytes (limit %d)", info.Size(), maxDetailCSVBytes)
+	}
 	reader := csv.NewReader(bufio.NewReader(f))
 	reader.FieldsPerRecord = -1
-	records, err := reader.ReadAll()
+	records := make([][]string, 0, 1024)
+	for {
+		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+		if len(records) > maxDetailCSVRows {
+			return nil, fmt.Errorf("detail csv too many rows (limit %d)", maxDetailCSVRows)
+		}
+	}
+	return records, nil
+}
+
+func readDetailCSV(path string) ([]detailRow, error) {
+	records, err := readDetailCSVRecords(path)
 	if err != nil {
 		return nil, err
 	}
@@ -434,14 +465,7 @@ func readDetailCSV(path string) ([]detailRow, error) {
 }
 
 func countCSVRows(path string) (int, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-	reader := csv.NewReader(bufio.NewReader(f))
-	reader.FieldsPerRecord = -1
-	records, err := reader.ReadAll()
+	records, err := readDetailCSVRecords(path)
 	if err != nil {
 		return 0, err
 	}
