@@ -681,10 +681,16 @@ func (a *app) reconcilePoolDomains() {
 		admitted = append(admitted, domain)
 	}
 	want = admitted
+	// 口径必须与 applyPoolLocked 完全一致，否则这里每轮都会「重算出一个池子→
+	// 交给 apply 被闸门剪掉→落盘的还是旧的」：日志里 0 -> 2 domains 之后紧跟
+	// delivered 0 个域名的 applied，就是这个死循环，每轮体检都白重启一次 cfnat。
+	// 先在本地过一遍同一道闸，算出的 want 就是 apply 会真正落盘的那一份。
+	pool := current
+	pool.Domains = want
+	want = a.gatePoolDomains(pool)
 	if sameStringSet(current.Domains, want) {
 		return
 	}
-	pool := current
 	pool.Domains = want
 	pool.UpdatedAt = time.Now()
 	if err := a.applyProxyPool(pool, current); err != nil {

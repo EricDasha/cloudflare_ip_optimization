@@ -294,3 +294,36 @@ func TestValidForwardHostname(t *testing.T) {
 		}
 	}
 }
+
+func TestCapFixedTargetsKeepsAllDomains(t *testing.T) {
+	results := []result{
+		{ip: "192.0.2.1"},
+		{ip: "a.example.com"},
+		{ip: "192.0.2.2"},
+		{ip: "b.example.com"},
+		{ip: "192.0.2.3"},
+	}
+	got := capFixedTargets(results, 1)
+	want := []string{"192.0.2.1", "a.example.com", "b.example.com"}
+	var targets []string
+	for _, r := range got {
+		targets = append(targets, r.ip)
+	}
+	if !reflect.DeepEqual(targets, want) {
+		t.Fatalf("capFixedTargets() = %v, want %v", targets, want)
+	}
+	if n := countIPTargets(got); n != 1 {
+		t.Fatalf("countIPTargets() = %d, want 1", n)
+	}
+	if ipN, domainN := countFixedKinds(got); ipN != 1 || domainN != 2 {
+		t.Fatalf("countFixedKinds() = (%d,%d), want (1,2)", ipN, domainN)
+	}
+}
+
+func TestCapFixedTargetsZeroIPKeepsDomains(t *testing.T) {
+	results := []result{{ip: "a.example.com"}, {ip: "b.example.com"}}
+	got := capFixedTargets(results, 20)
+	if len(got) != 2 {
+		t.Fatalf("capFixedTargets() dropped domains: %v", got)
+	}
+}

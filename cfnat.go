@@ -302,7 +302,8 @@ func main() {
 					fallbackManager.SetIPAddresses(fbTargets)
 				}
 			}
-			log.Printf("使用 %d 个固定转发目标（IP 或优选域名），跳过官方段扫描", len(results))
+			fixedIPs, fixedDomains := countFixedKinds(results)
+			log.Printf("使用 %d 个固定转发目标（%d IP + %d 域名），跳过官方段扫描", len(results), fixedIPs, fixedDomains)
 		} else {
 
 			// 使用函数处理 locations.json，确保 defer 正确执行
@@ -406,7 +407,11 @@ func main() {
 
 		// 只显示指定数量的 IP
 		if len(results) > *ipCount {
-			results = results[:*ipCount]
+			if fixedMode {
+				results = capFixedTargets(results, *ipCount)
+			} else {
+				results = results[:*ipCount]
+			}
 		}
 
 		fmt.Println("IP 地址 | 数据中心 | 地区 | 城市 | 延迟")
@@ -414,7 +419,11 @@ func main() {
 			fmt.Printf("%s | %s | %s | %s | %s\n", r.ip, r.dataCenter, r.region, r.city, r.latency)
 		}
 
-		fmt.Printf("成功提取 %d 个有效IP，耗时 %d秒\n", len(results), time.Since(startTime)/time.Second)
+		if domains := len(results) - countIPTargets(results); domains > 0 {
+			fmt.Printf("成功提取 %d 个有效IP + %d 个域名，耗时 %d秒\n", len(results)-domains, domains, time.Since(startTime)/time.Second)
+		} else {
+			fmt.Printf("成功提取 %d 个有效IP，耗时 %d秒\n", len(results), time.Since(startTime)/time.Second)
+		}
 
 		// 设置 IP 地址列表
 		var ips []string
@@ -698,6 +707,53 @@ func parseFixedTargets(value string) ([]string, error) {
 		return nil, fmt.Errorf("至少需要一个固定 IP 或域名")
 	}
 	return targets, nil
+}
+
+// countFixedKinds 分别统计固定目标里的 IP 与域名数量。
+func countFixedKinds(results []result) (ips, domains int) {
+	for _, r := range results {
+		if net.ParseIP(r.ip) == nil {
+			domains++
+		} else {
+			ips++
+		}
+	}
+	return ips, domains
+}
+
+// countIPTargets 统计列表里真正的 IP 条数（域名不计）。
+func countIPTargets(results []result) int {
+	n := 0
+	for _, r := range results {
+		if net.ParseIP(r.ip) != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// capFixedTargets 把 IP 数量限制在 limit 以内，域名全部保留。
+//
+// 固定模式下 -fixed 同时带 IP 和域名，-ipnum 的语义是「取多少个有效 IP」，
+// 不是「整个目标列表最多几项」。旧实现直接 results[:ipCount]，排序对全为 0
+// 的固定目标又不稳定，域名会被任意截掉——IP 池一空，域名也跟着消失。
+func capFixedTargets(results []result, limit int) []result {
+	if limit < 0 {
+		limit = 0
+	}
+	out := make([]result, 0, len(results))
+	ips := 0
+	for _, r := range results {
+		if net.ParseIP(r.ip) == nil {
+			out = append(out, r)
+			continue
+		}
+		if ips < limit {
+			out = append(out, r)
+			ips++
+		}
+	}
+	return out
 }
 
 // validForwardHostname 校验可作为转发目标的域名：仅 ASCII、含点、逐标签合法。

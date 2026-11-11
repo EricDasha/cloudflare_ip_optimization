@@ -656,16 +656,33 @@ func (a *app) poolDomainMembers() []string {
 	// 自动来源一律过质量闸：体检判 dead/unstable 的域名不再进 -fixed。
 	// 生产事故的形态就是 12 个 successRate≈0.2 的域名留在轮转池里，
 	// 每 4 次拨号有 3 次撞死目标，而 -num=1 时一次失败即断连。
+	//
+	// 观察期同在这道闸内判：在位验活刚把某个域名剔出去并压了 30 分钟观察期，
+	// 若这里不看观察期，自动换池就会在下一轮把它整批放回 -fixed——剔除与回池
+	// 各走各的口径，域名集合在两套算法之间来回摆动，每次摆动都是一次 cfnat 重启
+	// （生产日志 3 域名 ↔ 25 域名反复横跳）。观察期只在自动来源生效，
+	// PROXY_DOMAIN_FORWARD 是运营者担保，仍然放行。
+	now := time.Now()
 	for _, domain := range snapshot.ForwardDomains {
-		if a.domainUsableForForwarding(domain) {
-			add(domain)
+		if !a.domainUsableForForwarding(domain) {
+			continue
 		}
+		if a.domainQuarantined(domain, now) {
+			log.Printf("domain pool: %s 在观察期内，不进自动候选", domain)
+			continue
+		}
+		add(domain)
 	}
 	if envBool("PROXY_AUTO_DOMAINS", false) {
 		for _, domain := range snapshot.PreferredDomains {
-			if a.domainUsableForForwarding(domain) {
-				add(domain)
+			if !a.domainUsableForForwarding(domain) {
+				continue
 			}
+			if a.domainQuarantined(domain, now) {
+				log.Printf("domain pool: %s 在观察期内，不进自动候选", domain)
+				continue
+			}
+			add(domain)
 		}
 	}
 	// 兜底：闸门若把自动来源全拦下，转发池会退化成「只剩 IP」甚至空池，

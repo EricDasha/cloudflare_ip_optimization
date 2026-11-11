@@ -331,12 +331,55 @@ func TestRecordThroneProbeResultsRecheckSkipsSlowDomains(t *testing.T) {
 	if st := a.throneProbe["www.example.com"]; st == nil || !st.RecheckAt.IsZero() {
 		t.Fatalf("slow domain must not get a fast recheck, got %+v", st)
 	}
-	// 域名连败仍要排：死了是真要处置的。
+	// 域名连败仍要排：真死了是要处置的（用硬失败，超时按慢处理，见下一条测试）。
 	a.recordThroneProbeResults([]proxyScanResult{
-		{IP: "www.example.com", Error: "context deadline exceeded"},
+		{IP: "www.example.com", Error: "WS 状态码 403", ErrorClass: failureProtocol},
 	}, now)
 	if st := a.throneProbe["www.example.com"]; st.RecheckAt.IsZero() {
 		t.Fatalf("failed domain must get a fast recheck, got %+v", st)
+	}
+}
+
+// 域名超时不计连败：2026-11-11 线上 29 个可正常转发的域名只因握手 1.5–2.1s
+// 超过 2s 预算，在一轮里被全部判死摘除，池子 31→7 并触发重启。
+func TestRecordThroneProbeResultsDomainTimeoutIsSlowNotDead(t *testing.T) {
+	t.Setenv("PROXY_ACTIVE_PROBE_SLOW_MS", "1500")
+	a := &app{throneProbe: map[string]*throneProbeStat{}}
+	now := time.Now()
+	for range 3 {
+		a.recordThroneProbeResults([]proxyScanResult{
+			{IP: "www.example.com", Latency: 1980, Error: "context deadline exceeded", ErrorClass: failureTimeout},
+			{IP: "1.1.1.1", Latency: 1980, Error: "context deadline exceeded", ErrorClass: failureTimeout},
+		}, now)
+	}
+	domain := a.throneProbe["www.example.com"]
+	if domain == nil {
+		t.Fatal("domain stat missing")
+	}
+	if domain.ConsecutiveFailures != 0 {
+		t.Fatalf("domain timeouts must not count as failures, got %d", domain.ConsecutiveFailures)
+	}
+	if domain.SlowStrikes != 3 {
+		t.Fatalf("domain timeouts must count as slow strikes, got %d", domain.SlowStrikes)
+	}
+	// IP 照旧：超时就是连不通，必须进连败，否则死 IP 永远下不了台。
+	if ip := a.throneProbe["1.1.1.1"]; ip == nil || ip.ConsecutiveFailures != 3 {
+		t.Fatalf("IP timeouts must still count as failures, got %+v", ip)
+	}
+}
+
+// 域名的硬失败（403/拒绝/重置）仍然算连败，否则真死的域名会赖在池子里。
+func TestRecordThroneProbeResultsDomainHardFailureStillCounts(t *testing.T) {
+	t.Setenv("PROXY_ACTIVE_PROBE_SLOW_MS", "1500")
+	a := &app{throneProbe: map[string]*throneProbeStat{}}
+	now := time.Now()
+	for range 3 {
+		a.recordThroneProbeResults([]proxyScanResult{
+			{IP: "www.example.com", Latency: 380, Error: "WS 状态码 403", ErrorClass: failureProtocol},
+		}, now)
+	}
+	if st := a.throneProbe["www.example.com"]; st == nil || st.ConsecutiveFailures != 3 {
+		t.Fatalf("hard failure must count, got %+v", st)
 	}
 }
 

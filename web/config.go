@@ -8,8 +8,13 @@ import (
 )
 
 const (
-	defaultDataDir                = "/data"
-	maxLogBytes                   = 512 * 1024
+	defaultDataDir = "/data"
+	maxLogBytes    = 512 * 1024
+	// maxLogFileBytes / maxLogFileBackups 是磁盘日志的轮转上限。
+	// 内存里的 maxLogBytes 只管 Web 面板的日志窗口，管不到落盘文件；
+	// 落盘曾无上限增长到 639 MB。
+	maxLogFileBytes               = 100 * 1024 * 1024
+	maxLogFileBackups             = 3
 	proxyCandidateRefreshInterval = 6 * time.Hour
 	proxyCandidateCacheFile       = "proxy-candidates.json"
 	proxyActivePoolFile           = "proxy-active.json"

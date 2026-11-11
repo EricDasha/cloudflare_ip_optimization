@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -285,7 +286,14 @@ func (a *app) probeThroneOnce(parent context.Context) {
 		cfg.MaxLatency = 3000
 	}
 	targets := a.throneProbeTargets(members)
-	ctx, cancel := context.WithTimeout(parent, 40*time.Second)
+	// 整轮预算要盖得住「每个目标都摸到慢阈值」的最坏情况，否则排在尾部的那批
+	// 目标会在 ctx 已经到期后才开跑，连一个字节都没发出去就被记成失败——这和
+	// 2026-11-11 域名成批误判是同一个病：预算不够被当成了「成员死了」。
+	budget := 40 * time.Second
+	if need := time.Duration(len(targets)/cfg.Concurrency+1) * time.Duration(cfg.MaxLatency) * time.Millisecond; need > budget {
+		budget = need
+	}
+	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
 	results := scanProxyWebSockets(ctx, targets, cfg)
 	now := time.Now()
@@ -307,6 +315,19 @@ func (a *app) throneProbeTargets(members []string) []string {
 		return members
 	}
 	return suspects
+}
+
+// throneResultIsTimeout 判断一条探测失败是否属于「只是慢了」——超时/截止时间到。
+//
+// 用 ErrorClass 为首要判据（分类逻辑集中在 classifyProbeError），文本匹配只兜底：
+// 有些超时来自 context 包装，分类未必落到 timeout 上。硬失败（403/拒绝/重置/
+// 证书不对）一律返回 false，它们该走正常的连败计数。
+func throneResultIsTimeout(r proxyScanResult) bool {
+	if r.ErrorClass == failureTimeout {
+		return true
+	}
+	msg := strings.ToLower(r.Error)
+	return strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded")
 }
 
 // recordThroneProbeResults 把本轮成绩记入验活账本，并给嫌疑成员排上快速复检。
@@ -335,6 +356,23 @@ func (a *app) recordThroneProbeResults(results []proxyScanResult, now time.Time)
 			} else {
 				st.SlowStrikes = 0
 			}
+		} else if net.ParseIP(r.IP) == nil && throneResultIsTimeout(r) {
+			// 域名只认硬失败（拒绝/重置/状态码非 101/证书不对）。
+			//
+			// 2026-11-11 线上事故：29 个域名在同一轮被判死全部摘除，池子从 31 掉到 7，
+			// cfnat 随即重启。事后在 NAS 上逐个手工握手，那 29 个里 24 个正常返回 101，
+			// 只是耗时 1.5–2.1s；而本轮的握手预算 = slowMs+500 = 2000ms。域名走
+			// SNI 复用到同一个 Worker，天然比直连 IP 慢一档，被这 2 秒卡在了门槛外。
+			//
+			// 判死一个域名要重启一次 cfnat、断掉全部在途连接，代价与「一个慢域名多花
+			// 几百毫秒拨号」完全不对等。真死的域名由 30 分钟一轮的域名体检负责摘除
+			// （domain-quality.json，TCP + VLESS 三轮取样，dead 状态进闸门过滤），
+			// 那条链有足够样本量，不会因为一次 2 秒超时就把人赶走。
+			//
+			// 超时仍按「慢」记账，页面看得见，只是不触发处置。
+			st.SlowStrikes++
+			st.LastError = r.Error
+			st.LastLatencyMs = r.Latency
 		} else {
 			st.ConsecutiveFailures++
 			st.SlowStrikes = 0

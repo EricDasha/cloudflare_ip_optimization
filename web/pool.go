@@ -343,12 +343,32 @@ func (a *app) admittedPoolDomains(domains, guaranteed []string) []string {
 	return admitted
 }
 
+// gatePoolDomains 对生效池里的域名过质量闸，并保留「闸门只能筛目标、不能把
+// 服务拦死」这一条兜底。
+//
+// 单靠 admittedPoolDomains 会出现这种形态：IP 侧全灭或全被关闭，域名又都被体检
+// 判坏，planFixedMembers 拿到空集合直接报错，于是「池里有域名、1234 上一个目标
+// 都没有」。兜底只在「确实再也没有别的目标」时放行，体检结论仍留在账本上，
+// 下一轮照常复检。
+func (a *app) gatePoolDomains(pool proxyActivePool) []string {
+	original := pool.Domains
+	admitted := a.admittedPoolDomains(original, pool.Priority)
+	if len(admitted) > 0 || len(original) == 0 {
+		return admitted
+	}
+	if len(forwardingIPs(pool)) > 0 {
+		return admitted
+	}
+	log.Printf("domain gate DEGRADED: 无可用 IP 且域名全部未通过体检，按兜底放行 %d 个域名", len(original))
+	return original
+}
+
 // applyPoolLocked 在已持有 cfnatCtlMu 时执行换池（踢人/手动采用等已持锁路径复用）。
 func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 	// 落盘的生效池可能带着体检已判坏的域名（闸门上线前写入的历史遗留）。
 	// 启动、手动采用、立即优选都走这里，若不过闸，重启就是把坏域名重新塞回
 	// -fixed 的通道——闸门只在建池时生效、在重启时失效，等于没有。
-	pool.Domains = a.admittedPoolDomains(pool.Domains, pool.Priority)
+	pool.Domains = a.gatePoolDomains(pool)
 	// 关闭标记只对在位成员有意义：整批换 IP 时原样复制 Disabled 会留下
 	// 「已经离池、却永远显示为关闭」的幽灵，体检也不会再碰它们。
 	pool.Disabled = pruneDisabledMissingIPs(pool)
@@ -371,6 +391,28 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 	rollbackCfg.Fixed = strings.Join(rollbackFixed, ",")
 	rollbackCfg.Priority = strings.Join(rollbackPriority, ",")
 	rollbackCfg.Fallback = strings.TrimSpace(env("CFNAT_FALLBACK", ""))
+	// 同参不重启：自动换池、在位验活剔人、域名体检回池三条后台路径各自重算
+	// -fixed，同一轮里经常得出与正在运行的进程逐字相同的参数（生产日志里
+	// 16:21:12/16:21:16 连续三次 applied 的 -fixed 完全相同，每次都是一次
+	// stop()+start()）。对一模一样的参数重启 cfnat，唯一效果是把在途连接全部
+	// 掐断，然后拨向同一批目标。只有「进程确实在跑 + 参数逐字相同」才走落盘
+	// 通道；进程已退出时必须重建，否则池子改了却没人转发。
+	if shouldSkipCFnatRestart(a.cfnat.status(), cfnatCfg.args()) {
+		if err := a.commitPoolWithoutRestart(pool); err != nil {
+			return fmt.Errorf("保存生效池: %w", err)
+		}
+		// 参数未变但池记录变了（成员通道、体检结论等），状态要与 apply 路径一致。
+		a.poolGuardMu.Lock()
+		a.poolBlock, a.poolBlockAt, a.poolBlockBy = poolSwitchVerdict{}, time.Time{}, ""
+		a.poolGuardMu.Unlock()
+		if a.quality != nil {
+			if forwarding := forwardingIPs(pool); len(forwarding) > 0 {
+				a.quality.seedActive(forwarding[0], pool.UpdatedAt)
+			}
+		}
+		log.Printf("proxy active pool applied (unchanged, no restart): %s", strings.Join(fixedMembers, ","))
+		return nil
+	}
 	if err := a.cfnat.stop(); err != nil {
 		return fmt.Errorf("停止 cfnat: %w", err)
 	}
@@ -407,6 +449,33 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 	}
 	log.Printf("proxy active pool applied: %s", strings.Join(fixedMembers, ","))
 	return nil
+}
+
+// shouldSkipCFnatRestart 判定「这次换池能不能直接落盘、不重启 cfnat」。
+//
+// 判据只有一条：进程正跑着，且这次要用的参数与它启动时收到的逐字相同。
+// 参数相同意味着转发目标、优先级、回退深度全部没变，重启只是把在途连接
+// 掐断再拨回同一批目标。
+//
+// 进程没在跑时绝不能跳过：那些参数只存在于我们手里，不重启就等于池子改了
+// 却没人转发。参数有任何差异（哪怕只是顺序）也一律重启，宁可多断一次，
+// 不可让配置与实跑不一致。
+func shouldSkipCFnatRestart(st processStatus, want []string) bool {
+	return st.Running && sameCFnatArgs(st.Args, want)
+}
+
+// sameCFnatArgs 逐字比较两组 cfnat 命令行参数。用于判定「这次换池是否需要重启」。
+// 顺序敏感：args() 的输出顺序固定，不做集合比较。
+func sameCFnatArgs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // commitPoolWithoutRestart 落盘并替换内存中的生效池，但不重启 cfnat。
