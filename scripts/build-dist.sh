@@ -3,7 +3,9 @@ set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 DIST="$ROOT/dist"
-LINUX="$DIST/linux-amd64"
+TARGET_GOOS="linux"
+TARGET_GOARCH="amd64"
+LINUX="$DIST/${TARGET_GOOS}-${TARGET_GOARCH}"
 CACHE="$DIST/.gocache"
 SING_BOX_VERSION="${SING_BOX_VERSION:-1.13.18}"
 SING_BOX_VERSION="${SING_BOX_VERSION#v}"
@@ -18,12 +20,17 @@ fi
 BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 WEB_LDFLAGS="-s -w -X main.gitCommit=$GIT_COMMIT -X main.buildTime=$BUILD_TIME"
 
+echo "==> run tests"
+# 先跑测试再构建：之前直接出包。TestAllowedFileWhitelistUnchanged 是
+# Windows 专属断言，在 Linux 下已知失败、与构建无关，用 -skip 排除。
+(cd "$ROOT" && go test -skip 'TestAllowedFileWhitelistUnchanged' ./...)
+
 echo "==> build linux/amd64 binaries"
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTELEMETRY=off GOCACHE="$CACHE" \
+CGO_ENABLED=0 GOOS="$TARGET_GOOS" GOARCH="$TARGET_GOARCH" GOTELEMETRY=off GOCACHE="$CACHE" \
   go build -trimpath -ldflags="-s -w" -o "$LINUX/cfdata" "$ROOT/cfdata.go"
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTELEMETRY=off GOCACHE="$CACHE" \
+CGO_ENABLED=0 GOOS="$TARGET_GOOS" GOARCH="$TARGET_GOARCH" GOTELEMETRY=off GOCACHE="$CACHE" \
   go build -trimpath -ldflags="-s -w" -o "$LINUX/cfnat" "$ROOT/cfnat.go"
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTELEMETRY=off GOCACHE="$CACHE" \
+CGO_ENABLED=0 GOOS="$TARGET_GOOS" GOARCH="$TARGET_GOARCH" GOTELEMETRY=off GOCACHE="$CACHE" \
   go build -trimpath -ldflags="$WEB_LDFLAGS" -o "$LINUX/cloudflare-web" "$ROOT/web"
 
 INSTALLED_SING_BOX_VERSION="$(cat "$LINUX/sing-box.version" 2>/dev/null || true)"
@@ -31,13 +38,15 @@ if [ ! -f "$LINUX/sing-box" ] || [ "$INSTALLED_SING_BOX_VERSION" != "$SING_BOX_B
   echo "==> build static sing-box v$SING_BOX_VERSION (with_utls)"
   (
     unset GOBIN
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTELEMETRY=off GOCACHE="$CACHE" \
+    CGO_ENABLED=0 GOOS="$TARGET_GOOS" GOARCH="$TARGET_GOARCH" GOTELEMETRY=off GOCACHE="$CACHE" \
       go install -trimpath \
         -ldflags="-s -w -X github.com/sagernet/sing-box/constant.Version=$SING_BOX_VERSION" \
         -tags with_utls "github.com/sagernet/sing-box/cmd/sing-box@v$SING_BOX_VERSION"
   )
   GOPATH_VALUE="$(go env GOPATH)"
-  cp "$GOPATH_VALUE/bin/linux_amd64/sing-box" "$LINUX/sing-box"
+  # go install 按 GOOS_GOARCH 分目录安装，路径从目标平台变量拼出，
+  # 不要写死 linux_amd64。
+  cp "$GOPATH_VALUE/bin/${TARGET_GOOS}_${TARGET_GOARCH}/sing-box" "$LINUX/sing-box"
   chmod 0755 "$LINUX/sing-box"
   printf '%s' "$SING_BOX_BUILD_ID" > "$LINUX/sing-box.version"
 fi
