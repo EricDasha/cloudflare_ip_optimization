@@ -242,10 +242,6 @@ func (p *managedProcess) start(dataDir string, args []string, stdin string) erro
 		return fmt.Errorf("%s 已在运行", p.name)
 	}
 	p.logs.clear()
-	p.exitCode = nil
-	p.lastError = ""
-	p.exitedAt = time.Time{}
-	p.args = append([]string(nil), args...)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, p.bin, args...)
@@ -271,6 +267,10 @@ func (p *managedProcess) start(dataDir string, args []string, stdin string) erro
 			if logWriter != nil {
 				_ = logWriter.Close()
 			}
+			// 启动失败不得毒化进程状态：旧 cmd/exitCode/args 保持原样
+			// （已退出的进程仍有 exitCode，status() 不会误报 Running，
+			// 下一次 start() 也不会被「已在运行」挡回），只记 lastError。
+			p.lastError = err.Error()
 			return err
 		}
 	}
@@ -279,8 +279,14 @@ func (p *managedProcess) start(dataDir string, args []string, stdin string) erro
 		if logWriter != nil {
 			_ = logWriter.Close()
 		}
+		p.lastError = err.Error()
 		return err
 	}
+	// 只有成功启动后才替换状态。
+	p.exitCode = nil
+	p.lastError = ""
+	p.exitedAt = time.Time{}
+	p.args = append([]string(nil), args...)
 	if input != nil {
 		go func() {
 			_, _ = io.WriteString(input, stdin)

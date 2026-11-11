@@ -152,3 +152,35 @@ func readFile(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+// start() 失败不得毒化进程状态：旧实现先把 exitCode 清 nil 再调
+// cmd.Start()，失败后留下 cmd!=nil + exitCode==nil，status() 误报
+// Running（旧 PID），之后每次 start() 都被「已在运行」挡回。
+func TestManagedProcessFailedStartDoesNotPoisonState(t *testing.T) {
+	dir := t.TempDir()
+	p := newManagedProcess("proc", "/bin/true")
+	if err := p.start(dir, nil, ""); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !p.status().Running {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if p.status().Running {
+		t.Fatalf("/bin/true still reported Running")
+	}
+	p.bin = filepath.Join(dir, "missing-binary")
+	if err := p.start(dir, nil, ""); err == nil {
+		t.Fatalf("missing binary start: got nil error")
+	}
+	if st := p.status(); st.Running {
+		t.Fatalf("failed start reported Running with stale pid %d", st.PID)
+	}
+	p.bin = "/bin/true"
+	if err := p.start(dir, nil, ""); err != nil {
+		t.Fatalf("start after failure: %v", err)
+	}
+}
