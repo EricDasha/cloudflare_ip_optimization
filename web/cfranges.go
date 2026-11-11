@@ -153,14 +153,11 @@ func degradedSegmentDiversity(before, after []string) bool {
 
 // cloudflareIPv4CIDRs 是 Cloudflare 官方公布的 IPv4 边缘段（15 段）。
 //
-// 用途：候选池准入闸——入口 IP 必须是 Cloudflare 的 anycast 边缘，否则
-// cfnat -fixed 拨号时连上的是别人的 VPS。历史上 bestcf 生态里大量「优选 IP」
-// 实为第三方反代/ProxyIP（阿里云、DigitalOcean、OVH、M247 之类），混进入口
-// 候选后 TCP:443 必然能通、VLESS 终审必然全灭，白白烧掉探针预算与时间窗。
-// 此闸在源头掐断这类污染，让每一分探针预算都花在真正的边缘地址上。
-//
-// 注意：ProxyIP 有它自己的用途（Worker 出站中转），但那是另一条链路，
-// 不属于此处；本闸只判断「能不能作为 -fixed 入口」。
+// 用途：段标签与统计——2026-11-05 起不再作为候选池准入闸（实测：
+// 官方段外的反代 IP 同样可用，「像不像 Cloudflare 自己的地址」与
+// 「能不能把流量送到 Cloudflare」并不等价，后者由真实考试判定）。
+// 现仅用于：候选汇合时统计段外成员数（offEdgeCount）、池段分布
+// （poolSegmentStats）与降级多样性判断。
 var cloudflareIPv4CIDRs = []string{
 	"173.245.48.0/20",
 	"103.21.244.0/22",

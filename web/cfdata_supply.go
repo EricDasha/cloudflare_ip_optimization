@@ -88,7 +88,10 @@ func (a *app) readCFdataResultRows() ([]cfdataResultRow, error) {
 	return rows, nil
 }
 
-// cfdataCandidateIPs 返回 result.csv 中排序最靠前、且落在 Cloudflare 段内的前 limit 个 IP。
+// cfdataCandidateIPs 返回 result.csv 中排序最靠前的前 limit 个公网 IPv4。
+//
+// 注意：只要求公网 IPv4，不再过官方段闸（2026-11-05 实测：非官方段
+// 反代同样可用，段只作为标签统计，不作准入条件）。
 //
 // 这是整个候选体系里唯一「以本机网络为基准」的供给层：延迟与丢包是 cfdata
 // 在这台 NAS 上实测的，而不是别人在别的运营商线路上扫出来的。因而它排在
@@ -121,7 +124,7 @@ func (a *app) cfdataCandidateIPs(limit int) ([]string, error) {
 		out = append(out, key)
 	}
 	if len(out) == 0 {
-		return nil, errors.New("result.csv 中无可用 Cloudflare IP")
+		return nil, errors.New("result.csv 中无可用公网 IPv4")
 	}
 	return out, nil
 }
