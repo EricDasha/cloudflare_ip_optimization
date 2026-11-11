@@ -481,6 +481,11 @@ func probeVLESSCandidateMetricsOnce(ctx context.Context, candidateIP string, can
 		return metrics, fmt.Errorf("VLESS 数据面请求失败: %w", err)
 	}
 	defer resp.Body.Close()
+	// 状态码先验：403/404 的错误体不必读满预算才判失败，且读超时会
+	// 先于状态码返回、把报错原因写错。
+	if resp.StatusCode != cfg.ExpectedStatus {
+		return metrics, fmt.Errorf("VLESS 数据面状态码 %d，预期 %d", resp.StatusCode, cfg.ExpectedStatus)
+	}
 	started := time.Now()
 	sampler := newSpeedSampler(io.LimitReader(resp.Body, cfg.ReadLimit))
 	n, readErr := sampler.copyTo(io.Discard)
@@ -502,9 +507,6 @@ func probeVLESSCandidateMetricsOnce(ctx context.Context, candidateIP string, can
 			return metrics, nil
 		}
 		return metrics, fmt.Errorf("读取 VLESS 测试响应失败: %w", readErr)
-	}
-	if resp.StatusCode != cfg.ExpectedStatus {
-		return metrics, fmt.Errorf("VLESS 数据面状态码 %d，预期 %d", resp.StatusCode, cfg.ExpectedStatus)
 	}
 	if metrics.Bytes < cfg.MinBytes {
 		return metrics, fmt.Errorf("VLESS 下载数据不足: %d/%d bytes", metrics.Bytes, cfg.MinBytes)
