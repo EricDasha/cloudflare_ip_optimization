@@ -8,7 +8,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -31,10 +30,9 @@ const (
 )
 
 var (
-	activeConnections  int32 // 用于跟踪活跃连接的数量
-	validIPClientCache sync.Map
-	randomMu           sync.Mutex
-	randomGenerator    = rand.New(rand.NewSource(time.Now().UnixNano()))
+	activeConnections int32 // 用于跟踪活跃连接的数量
+	randomMu          sync.Mutex
+	randomGenerator   = rand.New(rand.NewSource(time.Now().UnixNano()))
 )
 
 // maxClientAssignments 设备钉位表的上限。
@@ -897,58 +895,6 @@ func generateTargets(ips []string, port int) []string {
 		targets[i] = fmt.Sprintf("%s:%d", address, port)
 	}
 	return targets
-}
-
-func checkValidIP(ip string, port int, useTLS bool, domain string, code int) bool {
-	address := ip
-	if strings.Contains(ip, ":") {
-		address = fmt.Sprintf("[%s]", ip)
-	}
-	targetURL := fmt.Sprintf("http://%s", domain)
-	if useTLS {
-		targetURL = fmt.Sprintf("https://%s", domain)
-	}
-
-	cacheKey := fmt.Sprintf("%s:%d", address, port)
-	clientAny, loaded := validIPClientCache.Load(cacheKey)
-	var client *http.Client
-	if loaded {
-		client = clientAny.(*http.Client)
-	} else {
-		transport := &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				log.Printf("尝试连接 IP: %s 端口: %d", ip, port)
-				dialer := &net.Dialer{Timeout: 2 * time.Second}
-				return dialer.DialContext(ctx, network, fmt.Sprintf("%s:%d", address, port))
-			},
-		}
-		newClient := &http.Client{
-			Timeout:   2 * time.Second,
-			Transport: transport,
-		}
-		actual, _ := validIPClientCache.LoadOrStore(cacheKey, newClient)
-		client = actual.(*http.Client)
-	}
-
-	log.Printf("向 URL %s 发送请求以检查 IP %s 是否有效", targetURL, ip)
-	resp, err := client.Get(targetURL)
-	if err != nil {
-		log.Printf("检查 IP %s 时发生错误: %v", ip, err)
-		return false
-	}
-	defer resp.Body.Close()
-
-	log.Printf("IP %s 的检查响应状态码: %d", ip, resp.StatusCode)
-
-	isValid := resp.StatusCode == code
-	if isValid {
-		log.Printf("IP %s 是有效的", ip)
-	} else {
-		log.Printf("IP %s 不是有效的", ip)
-	}
-
-	return isValid
 }
 
 // 处理客户端连接；仅在拨号失败时按顺序尝试下一个地址。
