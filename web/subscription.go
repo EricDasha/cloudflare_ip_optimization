@@ -322,7 +322,9 @@ func (a *app) probeSubscriptions(parent context.Context) (int, error) {
 		a.subInv.LastProbeErr = ""
 		a.subInv.LastProbed = 0
 		a.subInv.LastPassed = 0
-		_ = a.saveSubscriptionInventoryLocked()
+		if saveErr := a.saveSubscriptionInventoryLocked(); saveErr != nil {
+			log.Printf("subscription inventory save failed: %v", saveErr)
+		}
 		a.subMu.Unlock()
 		return 0, nil
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"os"
@@ -97,15 +98,27 @@ type subscriptionInventory struct {
 // （全部标为 pass），避免升级后第一次运行把已验证的候选全丢。
 func (a *app) loadSubscriptionInventory() {
 	inv := subscriptionInventory{Entries: make(map[string]*subEntry), Fetches: make(map[string][]subFetchRecord)}
-	data, err := os.ReadFile(filepath.Join(a.dataDir, subscriptionInventoryFile))
+	path := filepath.Join(a.dataDir, subscriptionInventoryFile)
+	data, err := os.ReadFile(path)
 	if err == nil {
 		var stored subscriptionInventory
-		if json.Unmarshal(data, &stored) == nil && stored.Entries != nil {
+		if uerr := json.Unmarshal(data, &stored); uerr != nil {
+			// 损坏文件改名备查：否则下次落盘会用空本子把它覆盖，
+			// 几千条候选的死因无从查（与 loadDomainQuality 同一做法）。
+			bad := path + ".corrupt-" + time.Now().Format("20060102-150405")
+			if rerr := os.Rename(path, bad); rerr != nil {
+				log.Printf("subscription inventory corrupt (%v), rename failed: %v", uerr, rerr)
+			} else {
+				log.Printf("subscription inventory corrupt (%v), moved to %s", uerr, bad)
+			}
+		} else if stored.Entries != nil {
 			inv = stored
 			if inv.Fetches == nil {
 				inv.Fetches = make(map[string][]subFetchRecord)
 			}
 		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		log.Printf("subscription inventory load failed, starting empty: %v", err)
 	}
 	if len(inv.Entries) == 0 {
 		inv = a.importLegacySubscriptionPool(inv)
