@@ -1,0 +1,442 @@
+{
+  "version": 1,
+  "updatedAt": "2026-11-11T17:52:58.933937462Z",
+  "records": {
+    "bluehost.com": {
+      "domain": "bluehost.com",
+      "samples": [
+        {
+          "at": "2026-11-11T16:56:36.453031338Z",
+          "ok": false,
+          "stage": "tcp",
+          "tcpMs": 3000,
+          "error": "dial tcp 104.18.41.208:443: i/o timeout"
+        }
+      ],
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 1,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": "testing"
+    },
+    "cdn.aneko.ink": {
+      "domain": "cdn.aneko.ink",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "cf-cname.xingpingcn.top": {
+      "domain": "cf-cname.xingpingcn.top",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "cf.legspcpd.top": {
+      "domain": "cf.legspcpd.top",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "cf.xreak.top": {
+      "domain": "cf.xreak.top",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "cfsaas.080112.xyz": {
+      "domain": "cfsaas.080112.xyz",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "cmcc.vvvv.ee": {
+      "domain": "cmcc.vvvv.ee",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "cookiebot.com": {
+      "domain": "cookiebot.com",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "glassdoor.com": {
+      "domain": "glassdoor.com",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "investor.apple.com": {
+      "domain": "investor.apple.com",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "markmonitor.com": {
+      "domain": "markmonitor.com",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "mycareer.verizon.com": {
+      "domain": "mycareer.verizon.com",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "nexusmods.com": {
+      "domain": "nexusmods.com",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "onetrust.com": {
+      "domain": "onetrust.com",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "openai.com": {
+      "domain": "openai.com",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "serviceshub.samsclub.com": {
+      "domain": "serviceshub.samsclub.com",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "store.epicgames.com": {
+      "domain": "store.epicgames.com",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "store.ubi.com": {
+      "domain": "store.ubi.com",
+      "samples": [
+        {
+          "at": "2026-11-11T16:08:59.157655686Z",
+          "ok": true,
+          "stage": "speed",
+          "tcpMs": 161,
+          "mbps": 1.0381297966079999,
+          "bytes": 262144
+        },
+        {
+          "at": "2026-11-11T16:47:11.775050306Z",
+          "ok": false,
+          "stage": "tcp",
+          "tcpMs": 3001,
+          "error": "dial tcp 172.64.147.104:443: i/o timeout"
+        },
+        {
+          "at": "2026-11-11T16:53:04.445156875Z",
+          "ok": true,
+          "stage": "speed",
+          "tcpMs": 1314,
+          "mbps": 3.302837022871676,
+          "bytes": 262144
+        },
+        {
+          "at": "2026-11-11T16:56:21.448800785Z",
+          "ok": false,
+          "stage": "tcp",
+          "tcpMs": 3000,
+          "error": "dial tcp 104.18.40.152:443: i/o timeout"
+        }
+      ],
+      "successRate": 0.5,
+      "averageMbps": 2.170483409739838,
+      "p50Mbps": 3.302837022871676,
+      "p95Mbps": 1.0381297966079999,
+      "jitterRatio": 0.3143145693896183,
+      "consecutiveFailures": 1,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "2026-11-11T16:53:11.103695006Z",
+      "state": "unstable"
+    },
+    "www.5h.com": {
+      "domain": "www.5h.com",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "www.affirm.com": {
+      "domain": "www.affirm.com",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "www.allianz.com": {
+      "domain": "www.allianz.com",
+      "samples": [
+        {
+          "at": "2026-11-11T16:56:33.451479372Z",
+          "ok": false,
+          "stage": "tcp",
+          "tcpMs": 3000,
+          "error": "dial tcp 104.18.41.67:443: i/o timeout"
+        }
+      ],
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 1,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": "testing"
+    },
+    "www.aneko.ink": {
+      "domain": "www.aneko.ink",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "www.asda.com": {
+      "domain": "www.asda.com",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "www.decathlon.com": {
+      "domain": "www.decathlon.com",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "www.jimdo.com": {
+      "domain": "www.jimdo.com",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "www.oopt.eu.cc": {
+      "domain": "www.oopt.eu.cc",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "www.sage.com": {
+      "domain": "www.sage.com",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "www.shopify.com": {
+      "domain": "www.shopify.com",
+      "samples": [
+        {
+          "at": "2026-11-11T16:47:11.774564293Z",
+          "ok": false,
+          "stage": "tcp",
+          "tcpMs": 3000,
+          "error": "dial tcp 172.64.145.93:443: i/o timeout"
+        },
+        {
+          "at": "2026-11-11T16:53:03.288447507Z",
+          "ok": true,
+          "stage": "speed",
+          "tcpMs": 158,
+          "mbps": 1.6712148479999998,
+          "bytes": 262144
+        },
+        {
+          "at": "2026-11-11T16:56:18.739690507Z",
+          "ok": true,
+          "stage": "speed",
+          "tcpMs": 291,
+          "mbps": 1.803335424,
+          "bytes": 262144
+        }
+      ],
+      "successRate": 0.6666666666666666,
+      "averageMbps": 1.7372751359999998,
+      "p50Mbps": 1.803335424,
+      "p95Mbps": 1.6712148479999998,
+      "jitterRatio": 0.9267354402061587,
+      "consecutiveFailures": 0,
+      "consecutiveSuccesses": 16,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "2026-11-11T16:56:54.46365887Z",
+      "state": "healthy"
+    },
+    "www.speedtest.net": {
+      "domain": "www.speedtest.net",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    },
+    "yg8.ygkkk.dpdns.org": {
+      "domain": "yg8.ygkkk.dpdns.org",
+      "successRate": 0,
+      "averageMbps": 0,
+      "p50Mbps": 0,
+      "p95Mbps": 0,
+      "jitterRatio": 0,
+      "consecutiveFailures": 0,
+      "lastProbeAt": "2026-11-11T17:52:58.933771441Z",
+      "lastOkAt": "0001-01-01T00:00:00Z",
+      "state": ""
+    }
+  }
+}
