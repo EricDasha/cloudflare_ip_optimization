@@ -227,12 +227,16 @@ func runIPScan(ipType int, scanMaxThreads int) {
 	var locations []location
 	if _, err := os.Stat("locations.json"); os.IsNotExist(err) {
 		fmt.Println("本地 locations.json 不存在，正在从 https://www.baipiao.eu.org/cloudflare/locations 下载")
-		resp, err := http.Get("https://www.baipiao.eu.org/cloudflare/locations")
+		resp, err := httpGetClient.Get("https://www.baipiao.eu.org/cloudflare/locations")
 		if err != nil {
 			fmt.Printf("无法下载 locations.json: %v\n", err)
 			return
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			fmt.Printf("下载 locations.json 失败，状态码: %d\n", resp.StatusCode)
+			return
+		}
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			fmt.Printf("无法读取响应体: %v\n", err)
@@ -693,8 +697,11 @@ func readLine() (string, error) {
 }
 
 // getURLContent 根据指定URL下载内容
+// httpGetClient 给裸 http.Get 加 10 秒超时：远端挂住时不再无限等。
+var httpGetClient = &http.Client{Timeout: 10 * time.Second}
+
 func getURLContent(url string) (string, error) {
-	resp, err := http.Get(url)
+	resp, err := httpGetClient.Get(url)
 	if err != nil {
 		return "", err
 	}

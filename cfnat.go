@@ -477,16 +477,22 @@ func main() {
 }
 
 // loadLocations 加载位置信息，使用函数封装确保 defer 正确执行
+// httpGetClient 给裸 http.Get 加 10 秒超时：远端挂住时启动不再无限等。
+var httpGetClient = &http.Client{Timeout: 10 * time.Second}
+
 func loadLocations() ([]location, error) {
 	var locations []location
 
 	if _, err := os.Stat("locations.json"); os.IsNotExist(err) {
 		fmt.Println("本地 locations.json 不存在\n正在从 https://www.baipiao.eu.org/cloudflare/locations 下载 locations.json")
-		resp, err := http.Get("https://www.baipiao.eu.org/cloudflare/locations")
+		resp, err := httpGetClient.Get("https://www.baipiao.eu.org/cloudflare/locations")
 		if err != nil {
 			return nil, fmt.Errorf("无法从URL中获取JSON: %v", err)
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("下载 locations.json 失败，状态码: %d", resp.StatusCode)
+		}
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
@@ -624,7 +630,7 @@ func scanIPs(ipList []string, locationMap map[string]location, maxThreads int) [
 
 // 获取URL内容
 func getURLContent(url string) (string, error) {
-	resp, err := http.Get(url)
+	resp, err := httpGetClient.Get(url)
 	if err != nil {
 		return "", err
 	}
