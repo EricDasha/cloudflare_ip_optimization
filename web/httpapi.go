@@ -477,6 +477,15 @@ func (a *app) handleProxyPromote(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
+	// 先占扫描锁再拿换池锁，与踢人同模式：后台漏斗持 proxyScanMu 跑
+	// 几分钟、最后才拿 cfnatCtlMu 落池，池是开考前的快照；这里若只拿
+	// 换池锁，刚做的顶替会在漏斗落池时被旧快照整批覆盖。锁序全局规范
+	// refresh → proxyScan → cfnatCtl。
+	if !a.proxyScanMu.TryLock() {
+		http.Error(w, "优选或补位正在运行，等它结束再顶替", http.StatusConflict)
+		return
+	}
+	defer a.proxyScanMu.Unlock()
 	// 只拿换池锁；与 kick 同链，等待而非立即拒绝。
 	if !lockTimeout(&a.cfnatCtlMu, 15*time.Second) {
 		http.Error(w, "换池操作正在运行，请稍后再试", http.StatusTooManyRequests)
