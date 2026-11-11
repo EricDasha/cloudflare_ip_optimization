@@ -395,8 +395,11 @@ func main() {
 			}
 		}
 
-		// 按 TCP 延迟排序
-		sort.Slice(results, func(i, j int) bool {
+		// 按 TCP 延迟排序。必须用 Stable：fixed 模式下全部 tcpDuration
+		// 都是 0，不稳定排序会打乱用户指定的 -fixed 顺序，再经
+		// capFixedTargets 截断，留谁全凭运气；扫描模式下延迟相同也
+		// 应保持扫描顺序。
+		sort.SliceStable(results, func(i, j int) bool {
 			return results[i].tcpDuration < results[j].tcpDuration
 		})
 
