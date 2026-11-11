@@ -850,12 +850,20 @@ func (a *app) qualitySnapshot() map[string]any {
 func (a *app) backgroundOptimizerStatus() map[string]any {
 	a.optimizerMu.RLock()
 	defer a.optimizerMu.RUnlock()
+	// 节拍读调度器运行时的真实配置（PROXY_SCHEDULER_*），不是写死的
+	// 5 分钟/12 个；调度器未初始化时回落默认值。concurrency 4 是
+	// runQualitySchedulerProbe 里硬编码的真实值，保持不动。
+	intervalMinutes, batchSize := 5, 12
+	if a.quality != nil {
+		interval, batch := a.quality.probeCadence()
+		intervalMinutes, batchSize = int(interval.Minutes()), batch
+	}
 	return map[string]any{
 		"enabled":         a.optimizerEnabled,
 		"lastRun":         a.optimizerLastRun,
 		"lastError":       a.optimizerLastError,
-		"intervalMinutes": 5,
-		"batchSize":       12,
+		"intervalMinutes": intervalMinutes,
+		"batchSize":       batchSize,
 		"concurrency":     4,
 	}
 }

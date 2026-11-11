@@ -246,3 +246,43 @@ func TestRefillGapCountsForwardingOnly(t *testing.T) {
 		t.Fatalf("full pool gap = %d, want 0", got)
 	}
 }
+
+// 换池成功后被动健康账只留当前转发成员：离池 IP 的旧记录被裁掉。
+func TestApplyPoolLockedPrunesStaleActiveHealth(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-cfnat.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 30\n"), 0755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	a := &app{
+		dataDir:      dir,
+		cfnat:        newManagedProcess("cfnat", script),
+		activeHealth: map[string]*activeHealthStat{"9.9.9.9": {Success: 5}, "1.1.1.1": {Success: 5}},
+	}
+	pool := proxyActivePool{IPs: []string{"1.1.1.1"}, UpdatedAt: time.Now()}
+	fixed, priority, err := planFixedMembers(pool)
+	if err != nil {
+		t.Fatalf("planFixedMembers: %v", err)
+	}
+	cfg := defaultCFnatConfig()
+	cfg.Fixed = strings.Join(fixed, ",")
+	cfg.Priority = strings.Join(priority, ",")
+	cfg.Fallback = strings.TrimSpace(env("CFNAT_FALLBACK", ""))
+	if err := a.cfnat.start(dir, cfg.args(), ""); err != nil {
+		t.Fatalf("seed start: %v", err)
+	}
+	defer a.cfnat.stop()
+	if err := a.applyPoolLocked(pool, pool); err != nil {
+		t.Fatalf("applyPoolLocked: %v", err)
+	}
+	a.activeHealthMu.Lock()
+	_, stale := a.activeHealth["9.9.9.9"]
+	_, kept := a.activeHealth["1.1.1.1"]
+	a.activeHealthMu.Unlock()
+	if stale {
+		t.Fatalf("stale activeHealth entry for 9.9.9.9 survived pool switch")
+	}
+	if !kept {
+		t.Fatalf("current member 1.1.1.1 pruned by mistake")
+	}
+}

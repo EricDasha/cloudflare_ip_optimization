@@ -480,6 +480,14 @@ func (r *qualitySchedulerRuntime) setError(message string) {
 	_ = r.saveLocked()
 }
 
+// probeCadence 返回调度器实际的探测节拍（环境变量配置值），供状态
+// 接口展示：硬编码 5 分钟/12 个会与 PROXY_SCHEDULER_* 的实际值脱节。
+func (r *qualitySchedulerRuntime) probeCadence() (interval time.Duration, batch int) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.interval, r.batch
+}
+
 func (r *qualitySchedulerRuntime) snapshot() map[string]any {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

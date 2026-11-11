@@ -517,20 +517,3 @@ func (c cfdataConfig) args() []string {
 		"-delay", strconv.Itoa(c.Delay),
 	}
 }
-
-func (a *app) cfdataInput(c cfdataConfig) string {
-	ipCSV := filepath.Join(a.dataDir, "ip.csv")
-	_, err := os.Stat(ipCSV)
-	lines := []string{}
-	if err == nil {
-		if c.ForceUpdate {
-			lines = append(lines, "y", strconv.Itoa(c.IPType))
-		} else {
-			lines = append(lines, "n")
-		}
-	} else {
-		lines = append(lines, strconv.Itoa(c.IPType))
-	}
-	lines = append(lines, strings.TrimSpace(c.DataCenter))
-	return strings.Join(lines, "\n") + "\n"
-}

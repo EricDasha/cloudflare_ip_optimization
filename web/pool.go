@@ -425,6 +425,7 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 				a.quality.seedActive(forwarding[0], pool.UpdatedAt)
 			}
 		}
+		a.pruneActiveHealth(forwardingIPs(pool))
 		log.Printf("proxy active pool applied (unchanged, no restart): %s", strings.Join(fixedMembers, ","))
 		return nil
 	}
@@ -468,6 +469,10 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 			a.quality.seedActive(forwarding[0], pool.UpdatedAt)
 		}
 	}
+	// 换池成功才裁健康账：离池 IP 的旧记录本来就不会再被读到
+	// （activePoolHealthy 只遍历当前成员），只占内存与 /api/status 体积。
+	// 失败路径不裁——旧池仍在跑，它的健康记录还得留着。
+	a.pruneActiveHealth(forwardingIPs(pool))
 	log.Printf("proxy active pool applied: %s", strings.Join(fixedMembers, ","))
 	return nil
 }
