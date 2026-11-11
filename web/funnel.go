@@ -502,13 +502,14 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 		Disabled: append([]string(nil), current.Disabled...),
 	}
 	if sameIPSet(current.IPs, passed) && sameStringSet(current.Domains, domains) {
-		if err := a.saveProxyActivePool(pool); err != nil {
-			a.setProxyPoolError("保存复验后的池失败: "+err.Error(), nil)
-			return
+		// 同池复验也要走统一落点：直接保存会绕过域名质量闸、
+		// planFixedMembers 校验、Disabled 清理、成员通道对齐与 poolBlock
+		// 清除。参数未变时 applyPoolLocked 走不重启通道（只落盘+播种），
+		// 不掐断在途连接。
+		if err := a.applyProxyPool(pool, current); err != nil {
+			a.setProxyPoolError("复验后落池失败，保留旧池: "+err.Error(), results)
+			return false
 		}
-		a.activeMu.Lock()
-		a.activePool = pool
-		a.activeMu.Unlock()
 		log.Printf("proxy active pool reverified: %d IPs", len(passed))
 		return true
 	}
