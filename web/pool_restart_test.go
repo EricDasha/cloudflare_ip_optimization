@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -88,5 +89,41 @@ func TestApplyPoolLockedRestartsWhenProcessDown(t *testing.T) {
 
 	if err := a.applyPoolLocked(pool, pool); err == nil {
 		t.Fatal("进程未运行时应尝试启动，期望启动失败并返回错误")
+	}
+}
+
+// 成功换池必须清掉粘滞的 pool.Error：调用方传 pool:=current，旧报错
+// 会一路带进落盘，GUI 在换池成功后仍挂着上一轮的拦截原因。
+func TestApplyPoolLockedClearsStalePoolError(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-cfnat.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 30\n"), 0755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	a := &app{dataDir: dir, cfnat: newManagedProcess("cfnat", script)}
+	pool := proxyActivePool{
+		IPs:       []string{"1.1.1.1"},
+		Error:     "上一轮拦截",
+		ErrorAt:   time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	fixed, priority, err := planFixedMembers(pool)
+	if err != nil {
+		t.Fatalf("planFixedMembers: %v", err)
+	}
+	cfg := defaultCFnatConfig()
+	cfg.Fixed = strings.Join(fixed, ",")
+	cfg.Priority = strings.Join(priority, ",")
+	cfg.Fallback = strings.TrimSpace(env("CFNAT_FALLBACK", ""))
+	if err := a.cfnat.start(dir, cfg.args(), ""); err != nil {
+		t.Fatalf("seed start: %v", err)
+	}
+	defer a.cfnat.stop()
+	if err := a.applyPoolLocked(pool, pool); err != nil {
+		t.Fatalf("applyPoolLocked: %v", err)
+	}
+	saved := a.proxyActivePoolSnapshot()
+	if saved.Error != "" || !saved.ErrorAt.IsZero() {
+		t.Fatalf("saved error = %q %v, want empty", saved.Error, saved.ErrorAt)
 	}
 }

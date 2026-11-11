@@ -365,6 +365,12 @@ func (a *app) gatePoolDomains(pool proxyActivePool) []string {
 
 // applyPoolLocked 在已持有 cfnatCtlMu 时执行换池（踢人/手动采用等已持锁路径复用）。
 func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
+	// 换池成功，历史报错随之作废——pool 是按值传的本地副本，这里清掉
+	// 只影响本次要落盘的那一份；失败路径不落盘，报错仍由调用方另行记录。
+	// 旧实现只清 poolBlock（内存态），Error/ErrorAt 从不清除：手动换池
+	// 成功后 GUI 仍挂着上一轮的拦截原因。
+	pool.Error = ""
+	pool.ErrorAt = time.Time{}
 	// 落盘的生效池可能带着体检已判坏的域名（闸门上线前写入的历史遗留）。
 	// 启动、手动采用、立即优选都走这里，若不过闸，重启就是把坏域名重新塞回
 	// -fixed 的通道——闸门只在建池时生效、在重启时失效，等于没有。
