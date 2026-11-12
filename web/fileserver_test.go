@@ -41,8 +41,16 @@ func TestAllowedFileWhitelistUnchanged(t *testing.T) {
 			t.Fatalf("%q must stay denied", name)
 		}
 	}
-	// 路径穿越仍被 Base 校验拦死
-	if allowedFile(`..\ip.csv`) {
-		t.Fatal("path traversal must be denied")
+	// 路径穿越仍被 Base 校验拦死。
+	// 必须用 filepath.Join 生成**当前平台**的分隔符：写死 `..\ip.csv` 在 Linux 上
+	// 只是一个含反斜杠的普通文件名（不是穿越路径），断言会误报失败。
+	for _, name := range []string{
+		filepath.Join("..", "ip.csv"),
+		filepath.Join("sub", "ip.csv"),
+		filepath.Join(string(filepath.Separator), "etc", "ip.csv"),
+	} {
+		if allowedFile(name) {
+			t.Fatalf("%q must be denied: 带路径分隔符或绝对路径不得进白名单", name)
+		}
 	}
 }
