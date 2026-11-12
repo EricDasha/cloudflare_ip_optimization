@@ -311,6 +311,8 @@ func degradedFromWSResults(results []proxyScanResult, existing []string, want in
 			adopted = append(adopted, result.IP)
 		case result.Stage == "VLESS_FAIL":
 			rejected = append(rejected, result.IP+": VLESS 失败（"+degradedRejectReason(result)+"），无数据面成功证据")
+		case result.Stage == "skipped":
+			rejected = append(rejected, result.IP+": 本轮未实际探测（预算耗尽跳过），不计入失败也不准入")
 		case result.Stage == "WS_PASS":
 			rejected = append(rejected, result.IP+": 仅 WS 通过，未验 VLESS 数据面")
 		default:
@@ -598,8 +600,18 @@ func scanProxyWebSockets(parent context.Context, ips []string, cfg proxyAutoConf
 		wg.Add(1)
 		go func(i int, ip string) {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-parent.Done():
+				// 预算耗尽时还没排上槽位：根本没开始测，不得记成超时失败。
+				// 此前这里死等槽位，拿到槽后 DialContext 立即报 deadline
+				// exceeded，与真实超时无法区分——订阅 WS 粗筛 batch 400、
+				// wsTimeout 60 秒时约 280 条尾部候选每轮被记一次失败，
+				// 3 次即判 fail。skipped 由各调用方跳过，不入失败账。
+				results[i] = proxyScanResult{IP: ip, Stage: "skipped", Error: "等待探测槽位时预算耗尽，未开始探测", ErrorClass: failureTimeout}
+				return
+			}
 			started := time.Now()
 			ctx, cancel := context.WithTimeout(parent, time.Duration(cfg.MaxLatency)*time.Millisecond)
 			defer cancel()
@@ -782,8 +794,16 @@ func scanProxyIPs(parent context.Context, ips []string, cfg proxyScanConfig) []p
 		wg.Add(1)
 		go func(i int, ip string) {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-parent.Done():
+				// 与 scanProxyWebSockets 同款：预算耗尽还没排上槽位即
+				// skipped，不记 TLS_FAIL。初筛只取 Error=="" 的进短名单，
+				// skipped 本轮不进名单，但不被当成失败候选。
+				results[i] = proxyScanResult{IP: ip, Stage: "skipped", Error: "等待探测槽位时预算耗尽，未开始探测", ErrorClass: failureTimeout}
+				return
+			}
 			started := time.Now()
 			timeout := time.Duration(cfg.MaxLatency+1000) * time.Millisecond
 			if timeout < 2*time.Second {

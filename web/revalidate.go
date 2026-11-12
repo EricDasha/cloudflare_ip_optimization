@@ -406,13 +406,19 @@ func (a *app) revalidateIPsByWS(parent context.Context, ips []string, cfg proxyA
 	results := scanProxyWebSockets(ctx, ips, cfg)
 	out := make([]revalidateMemberResult, 0, len(results))
 	for i, r := range results {
+		stage := "ws"
+		if r.Stage == "skipped" {
+			// 汇总处认 Stage=="skipped" 才保留成员：WS 排队耗尽的
+			// 必须原样透传，不能写成 "ws" 被当真失败剔除。
+			stage = "skipped"
+		}
 		out = append(out, revalidateMemberResult{
 			Member:     r.IP,
 			Kind:       "ip",
 			OK:         r.Error == "",
 			LatencyMs:  r.Latency,
 			Colo:       r.Colo,
-			Stage:      "ws",
+			Stage:      stage,
 			Error:      r.Error,
 			ErrorClass: r.ErrorClass,
 		})

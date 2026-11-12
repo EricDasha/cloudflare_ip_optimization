@@ -440,6 +440,11 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 		activeResults := scanProxyWebSockets(healthCtx, current.IPs, cfg)
 		healthCancel()
 		for _, result := range activeResults {
+			if result.Stage == "skipped" {
+				// 没排上槽位、根本没测：不得记成健康失败，否则尾部成员
+				// 每轮被刷新 LastFail，健康闸永久 fail-open。
+				continue
+			}
 			ok := result.Error == ""
 			a.recordActiveHealth(result.IP, ok, healthNow)
 			if result.IP == a.quality.activeIP() {
@@ -516,6 +521,12 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 		passedSet[ip] = struct{}{}
 	}
 	for _, result := range results {
+		if result.Stage == "skipped" {
+			// 没轮上探测（WS 排队预算耗尽，或 VLESS 终审预算耗尽）：
+			// 不是失败，不得进质量账。否则尾部候选每轮被记一次
+			// ConsecutiveFailures，3 次即进 lineFailed。
+			continue
+		}
 		_, ok := passedSet[result.IP]
 		a.quality.observe(result.IP, snapshot.SourceByIP[result.IP], result.DownloadMbps, result.Latency, ok, now)
 	}

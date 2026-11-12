@@ -332,6 +332,10 @@ func (a *app) recordThroneProbeResults(results []proxyScanResult, now time.Time)
 		a.throneProbe = make(map[string]*throneProbeStat)
 	}
 	for _, r := range results {
+		if r.Stage == "skipped" {
+			// 没排上槽位、根本没测：不得碰连败账与 LastProbe。
+			continue
+		}
 		st := a.throneProbe[r.IP]
 		if st == nil {
 			st = &throneProbeStat{}

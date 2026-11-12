@@ -386,6 +386,10 @@ func (a *app) probeSubscriptions(parent context.Context) (int, error) {
 	passed := 0
 	a.subMu.Lock()
 	for ip, result := range survivor {
+		if result.Stage == "skipped" {
+			// 没排上 WS 槽位、根本没测：不得记 ConsecutiveFails。
+			continue
+		}
 		if vlessReady && result.Error == "" {
 			// 真实数据面启用时，握手通过不算结论——真正取不回内容的地址
 			// 不该先被记成 pass。等 VLESS 结果出来再写，避免「先判能用、
