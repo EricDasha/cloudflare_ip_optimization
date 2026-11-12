@@ -1077,6 +1077,17 @@ func copyWithIdleTimeout(dst io.Writer, src net.Conn, timeout time.Duration) (in
 		}
 		nr, er := src.Read(buf)
 		if nr > 0 {
+			// 写方向也要设超时：两端同时停读时，两个拷贝 goroutine
+			// 同时卡在 Write 里，谁都不经过读超时，closeBoth 永不执行，
+			// wg.Wait 永不返回，handleConnectionWithDial 的 defer
+			// （减 activeConnections、关客户端连接）也永不执行。
+			// 单向堵写可自愈（另一方向 10 分钟读超时后 closeBoth 解开），
+			// 双向堵写不能。dst 是 io.Writer，类型断言后才设 deadline。
+			if wd, ok := dst.(interface{ SetWriteDeadline(time.Time) error }); ok {
+				if err := wd.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+					return written, err
+				}
+			}
 			nw, ew := dst.Write(buf[:nr])
 			written += int64(nw)
 			if ew != nil {
