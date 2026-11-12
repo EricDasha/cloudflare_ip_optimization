@@ -310,6 +310,40 @@ func probeVLESSPool(parent context.Context, results []proxyScanResult, candidate
 
 // probeVLESSPoolWithProbe 与 probeVLESSPool 相同，但探针函数可注入，
 // 便于单测钉死「数据面证据如何进结果、降级如何认」而不必真的起 sing-box。
+// isLocalProbeError 识别「探针自己坏了」而不是「候选坏了」。
+//
+// 本地故障包括：端口分配/配置生成/临时文件/sing-box 启动失败、
+// 绑定冲突 3 次重试耗尽、sing-box 迟迟起不来（启动超时）、
+// sing-box 中途死亡后本地代理拨号被拒（错误里出现 127.0.0.1——
+// 探针的 HTTP 入口永远只监听 127.0.0.1，对端的拒绝不会长这样）。
+//
+// 这类失败记到候选头上是误判：并发抢端口或 sing-box 崩一次，整批候选
+// 各背一次失败，3 轮即进 lineFailed；第一轮只修了「重试成功不记账」，
+// 耗尽分支仍归因。注意裸 "connection refused" 不算本地：只有带
+// 127.0.0.1 的才是拨本地入口被拒，对端的拒绝由 sing-box 在隧道内
+// 合成 502/503/504 响应，不会以 dial 错误出现。
+func isLocalProbeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "分配本地探针端口失败"),
+		strings.Contains(msg, "生成 sing-box 配置失败"),
+		strings.Contains(msg, "创建 sing-box 临时配置失败"),
+		strings.Contains(msg, "写入 sing-box 临时配置失败"),
+		strings.Contains(msg, "关闭 sing-box 临时配置失败"),
+		strings.Contains(msg, "保护 sing-box 临时配置失败"),
+		strings.Contains(msg, "启动 sing-box 失败"),
+		strings.Contains(msg, "sing-box 提前退出"),
+		strings.Contains(msg, "vless 探针启动超时"),
+		strings.Contains(msg, "address already in use"),
+		strings.Contains(msg, "127.0.0.1"):
+		return true
+	}
+	return false
+}
+
 func probeVLESSPoolWithProbe(parent context.Context, results []proxyScanResult, candidatePort, poolSize int, cfg vlessProbeConfig, template map[string]any, probe func(context.Context, string, int, vlessProbeConfig, map[string]any) (vlessProbeMetrics, error)) []string {
 	order := vlessProbeOrder(results)
 	attempts := 0
@@ -328,6 +362,16 @@ func probeVLESSPoolWithProbe(parent context.Context, results []proxyScanResult, 
 		// 失败候选有没有真的通根本无从知道，降级只能靠「非超时」瞎猜。
 		results[i].DataProven = metrics.Proven
 		if err != nil {
+			if isLocalProbeError(err) {
+				// 探针自己坏了（端口冲突耗尽、sing-box 提前退出等）：
+				// 不是候选的问题，记 skipped，不进质量账、不进降级。
+				// 降级准入已只认 DataProven（本轮 P1），这里再把账也摘掉，
+				// 否则整批候选各背一次连败。
+				results[i].Stage = "skipped"
+				results[i].Error = err.Error()
+				results[i].ErrorClass = failureLocal
+				continue
+			}
 			results[i].Stage = "VLESS_FAIL"
 			results[i].Error = err.Error()
 			// 失败必须归类：降级逻辑（degradedFromWSResults）靠 ErrorClass

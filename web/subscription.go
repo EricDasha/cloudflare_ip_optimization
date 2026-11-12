@@ -453,6 +453,11 @@ func (a *app) probeSubscriptions(parent context.Context) (int, error) {
 				ctx, cancel := context.WithTimeout(vlessCtx, probeCfg.Timeout)
 				metrics, err := probeVLESSCandidateMetrics(ctx, ip, probePort, probeCfg, vlessTemplate)
 				cancel()
+				if err != nil && isLocalProbeError(err) {
+					// 探针自己坏了（端口冲突耗尽、sing-box 提前退出等）：
+					// 不是候选的问题，不记失败账；否则整批候选各背一次连败。
+					return
+				}
 				mu.Lock()
 				defer mu.Unlock()
 				outcome := subscriptionProbeOutcome{

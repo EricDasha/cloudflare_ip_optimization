@@ -533,6 +533,14 @@ func (a *app) revalidateOneDomain(ctx context.Context, domain string, cfg vlessP
 	defer cancel()
 	metrics, err := probeVLESSCandidateMetrics(probeCtx, domain, 443, cfg, template)
 	if err != nil {
+		if isLocalProbeError(err) {
+			// 探针自己坏了（端口冲突、sing-box 提前退出）：不是域名死了，
+			// 记 skipped 保留，不得剔除。
+			out.Stage = "skipped"
+			out.Error = err.Error()
+			out.ErrorClass = failureLocal
+			return out
+		}
 		out.Stage = "vless"
 		out.Error = err.Error()
 		out.ErrorClass = classifyProbeError(err)
