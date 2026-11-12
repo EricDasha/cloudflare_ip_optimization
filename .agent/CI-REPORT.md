@@ -71,6 +71,12 @@ exec: "/bin/true": executable file not found in %PATH%
 
 合计 22 项，与主席指出的数字一致。
 
+> **重要区分**：这 22 项只在 **Windows** 上失败。在 Linux 上 `.sh`/`.py` 是合法可执行文件，
+> 所以原始 head 在 Linux CI 上只剩 `TestAllowedFileWhitelistUnchanged` 一项失败（见 §4）。
+> 也就是说：22 项是「Windows 开发者在本地跑不了测试」的问题，
+> 另 1 项是「Linux 上测试断言本身写错了」的问题。两者根因不同，都必须修。
+> 修完之后 Windows 和 Linux 都是全绿。
+
 ### 修法：测试二进制复执行自身
 
 新增 `web/fakebin_test.go`（218 行）。核心思路：假二进制不用外部脚本，
@@ -124,9 +130,10 @@ func TestMain(m *testing.M) {   // 在 web/segment_health_test.go
 | 指标 | 结果 |
 |---|---|
 | `go vet ./...` | **通过**（无输出） |
-| 测试总数 | 350 |
-| 通过 | 349 |
+| 顶层测试数 | 316 |
+| 通过 | 314 |
 | 失败 | **1** |
+| 跳过 | 1（`TestConfiguredVLESSProbeTemplate`，未设 `TEST_VLESS_TEMPLATE` 环境变量） |
 
 失败详情：
 
@@ -148,16 +155,17 @@ func TestMain(m *testing.M) {   // 在 web/segment_health_test.go
 | 指标 | 结果 |
 |---|---|
 | `go vet ./...` | **通过** |
-| 测试总数 | 414 |
-| 通过 | 413 |
+| 顶层测试数 | 353 |
+| 通过 | 351 |
 | 失败 | **1**（同上 `TestAllowedFileWhitelistUnchanged`） |
+| 跳过 | 1（同上） |
 
 ### 4.3 PR #3 `ci/github-actions-20261112`（本分支，含夹具修复）
 
 | 指标 | Windows 本机 | Linux CI |
 |---|---|---|
 | `go vet ./...` | 通过 | **通过** |
-| `go test ./... -count=1` | **413 通过 / 0 失败** | **通过** |
+| `go test ./... -count=1` | **352 通过 / 0 失败 / 1 跳过**（共 353 顶层 + 61 子测试） | **通过** |
 | `go test -race ./...` | 未跑（Windows 无 gcc） | **通过** |
 | linux build | — | **通过**（三个产物） |
 

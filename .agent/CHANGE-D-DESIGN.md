@@ -21,7 +21,7 @@ v4 已经加了"同参不重启"（`shouldSkipCFnatRestart`），但生产日志
 
 | 编号 | 振荡源 | 代码位置 | 特征 |
 |---|---|---|---|
-| R1 | 全量重挑无在位粘性 | `web/funnel.go:386` autoApplyProxyPool | IP 侧每 8-13 轮整批换（+5/-5、+6/-6…） |
+| R1 | 全量重挑无在位粘性 | `web/funnel.go:356` autoApplyProxyPool | IP 侧每 8-13 轮整批换（+5/-5、+6/-6…） |
 | R2 | 域名成员每轮重算 | `web/main.go:709` poolDomainMembers | 域名侧 ±1~±2 进出，几乎每轮都变 |
 | R3 | 三条后台路径各写各的 -fixed | `web/pool.go:414` applyPoolLocked 无条件 stop+start | 同一秒出现两次 applied，无合并 |
 
