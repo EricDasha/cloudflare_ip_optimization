@@ -604,14 +604,14 @@ func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) boo
 
 	a.domainQualityMu.Lock()
 	for domain, sample := range samples {
-		// 整轮无成绩（pathBroken）时，失败的样本连账都不入。
-		// 只挡住 ConsecutiveFailures 不够：SuccessRate 是按时段样本算的，
-		// 端点坏三轮就会把好域名拖成 unstable，随后被移出转发——
-		// 测速端点坏了，反倒把域名池清空。
-		// 没入账的样本也不建记录、不刷新 LastProbeAt：否则账本凭空多出
-		// 一批 state="" 的空记录（闸门对空状态一律放行，下轮照样回池），
-		// 已有记录的新鲜度还会被没测过的轮次刷新。
-		if !sample.OK && pathBroken {
+		// 通路故障轮整轮不入账，不只跳过失败样本：模板降级模式下，
+		// 8 个 DNS 失败 + 2 个 tcp-only 成功的轮次同样会被判通路故障，
+		// 那 2 个「成功」的 tcp-only 样本若入账，会给新域名凭空建记录
+		// （state="" 时闸门一律放行）并刷新已有记录的 LastProbeAt——
+		// 故障轮的结论不可信，账本一个字都不能写。
+		// 正常模式下通路故障轮本就没有成功样本（SpeedOK>0 即不判故障），
+		// 所以这条收紧不影响正常轮次。
+		if pathBroken {
 			continue
 		}
 		rec := a.domainQuality[domain]

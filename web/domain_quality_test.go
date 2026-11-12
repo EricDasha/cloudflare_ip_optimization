@@ -500,3 +500,44 @@ func TestRecordDomainProbeEmptyRoundIsNoop(t *testing.T) {
 		t.Fatalf("空轮次改动了既有记录: %+v", rec)
 	}
 }
+
+// 模板降级模式下的通路故障轮：8 个 DNS 失败 + 2 个 tcp-only 成功，
+// 整轮都不入账——成功的 tcp-only 样本也不能建记录或刷新 LastProbeAt，
+// 否则故障轮的结论会污染账本（新域名凭空建 state="" 的记录，
+// 闸门对空状态一律放行）。
+func TestRecordDomainProbeBrokenRoundSkipsOKSamplesToo(t *testing.T) {
+	a := newProbeTestApp(t)
+	old := freshRecord(domainStateHealthy)
+	oldAt := time.Now().Add(-time.Hour)
+	old.LastProbeAt = oldAt
+	a.domainQuality["old.example.com"] = old
+	samples := map[string]domainProbeSample{
+		"a.example.com": failSample("dns"),
+		"b.example.com": failSample("dns"),
+		"c.example.com": failSample("dns"),
+		"d.example.com": failSample("dns"),
+		"e.example.com": failSample("dns"),
+		"f.example.com": failSample("dns"),
+		"g.example.com": failSample("dns"),
+		"h.example.com": failSample("dns"),
+		// 模板降级：这两个 TCP 通了，只报可达性。
+		"i.example.com": {At: time.Now(), OK: true, Stage: "tcp-only", TCPMs: 30},
+		"j.example.com": {At: time.Now(), OK: true, Stage: "tcp-only", TCPMs: 35},
+		// 既有记录本轮同样 tcp-only 成功：它的 LastProbeAt 也不应被刷新。
+		"old.example.com": {At: time.Now(), OK: true, Stage: "tcp-only", TCPMs: 40},
+	}
+	if broken := a.recordDomainProbeResults(samples); !broken {
+		t.Fatal("8/10 解析失败应判定为通路故障")
+	}
+	if got := len(a.domainQuality); got != 1 {
+		t.Fatalf("broken round ledger = %d records, want 1 (only pre-existing)", got)
+	}
+	if _, ok := a.domainQuality["i.example.com"]; ok {
+		t.Fatal("通路故障轮给 tcp-only 成功的域名建了记录")
+	}
+	if rec := a.domainQuality["old.example.com"]; rec == nil {
+		t.Fatal("pre-existing record pruned by broken round")
+	} else if !rec.LastProbeAt.Equal(oldAt) {
+		t.Fatalf("LastProbeAt = %v, want untouched %v", rec.LastProbeAt, oldAt)
+	}
+}
