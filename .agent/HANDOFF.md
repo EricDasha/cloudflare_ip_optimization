@@ -1,16 +1,28 @@
 # cfnat 交接单：NAS 出口故障与三项待改
 
+> **⚠️ 本单写于 2026-11-12 20:20 CST，之后又发生了三件事，先读 `.agent/PROJECT-CONTEXT.md`。**
+>
+> 1. v4 的工作区改动已落成 commit `ddff7e6`，不再需要 `patches/` 里的 diff 作为基线。
+> 2. 改动 D 的 D1 部分（在位粘性）已实施并上线（`b1e5133+d1incumbent`）。
+> 3. 改动 A/B 已由 muse 在 PR #1 / #2 里实现，口径有争议，见 `CI-REPORT.md`。
+>
+> 本单保留作为**问题诊断的原始记录**，结论以 `PROJECT-CONTEXT.md` 为准。
+>
 > 接手者：muse。目标：按本单实施代码改动并发 PR。
 > 所有结论均有实测证据，证据文件在 `.agent/evidence/`。
-> **已上线版本 v4 的工作区改动不在 git 里，见 `.agent/patches/deployed-v4-working-tree.diff`，PR 必须基于它。**
 
 ---
 
-## 0. 当前状态（2026-11-12 02:30 UTC+8）
+## 0. 当前状态（**已过时，见 PROJECT-CONTEXT.md §9**）
 
-- NAS `192.168.1.50`，容器 `cloudflare-tools`，二进制版本 `b1e5133+thronefix4`。
-- 仓库 `g:/EricDasha.github.io/cloudflare`，分支 `main`，HEAD `b1e5133`。
-- **工作区有 527 行未提交改动，这些改动已经构建并跑在线上**（日志轮转、空池修复、重启防抖、域名观察期、慢握手不判死）。PR 第一步就是把它们提交。
+- NAS `192.168.1.50`，容器 `cloudflare-tools`，线上二进制版本 `b1e5133+d1incumbent`（健康）。
+- 当前生效池：**10 IP + 24 域名**，`proxy-active.json` updatedAt `2026-11-12T14:56:13Z`。
+  全部成员实测可用：10 个 IP 的 TCP:443 全通 58–137 ms；经 1234 端口真实请求
+  `www.cloudflare.com` / `www.shopify.com` / `www.aneko.ink` 各 3 次全 200；
+  60 秒内每 2 秒采样 30 次 **30/30 成功**。
+- **数据面是好的，问题在调度抖动**：cfnat 每天重启 30+ 次（详见改动 D）。
+- 仓库 `g:/EricDasha.github.io/cloudflare`。`main` = `b1e5133`；
+  分支 `handoff/20261112` 已推云端（本地 `324a8dd`、远端 `c67e482`，远端多 61 个提交来自 muse）。
 - 回滚镜像：`local/cloudflare-tools:rollback-20261111-203354`（`0050d1cabc49`）。
 - 备份：`/vol1/1000/Docker/CFNat/_backup/pre-thronefix4-20261112-0120/`。
 
@@ -18,9 +30,39 @@
 
 ## 1. 核心结论：问题不在池子，在 NAS 出口
 
-**P0｜NAS 出口对境外 IP 存在 TCP payload 黑洞。**
+**P0｜NAS 出口存在间歇性连坐丢包，但「TCP payload 黑洞」这个说法是错的 —— 已于 2026-11-12 20:00 CST 复测推翻。**
 
-证据链（务必按顺序读，这是整份审计最硬的一条）：
+> **修正说明（必读，别照着旧结论做事）**
+>
+> 本节初稿写于 2026-11-12 02:20 CST，当时 NAS 出口确实大面积不通。之后复测发现，
+> 当时那两条「决定性证据」都踩了方法论陷阱：
+>
+> 1. **拿 IP 当 SNI 打 TLS**。`ssl.wrap_socket(server_hostname="104.18.42.163")` 会得到
+>    `TypeError`/`SSLError`，因为 CF 边缘不认这个 SNI，跟网络通不通毫无关系。复测对照：
+>    同一 IP，`SNI=104.18.42.163` → `SSLError 313–329ms`；`SNI=www.shopify.com` →
+>    `HTTP/1.1 200 OK 327–367ms`。
+> 2. **只发 `\x16\x03\x01` 三个字节、不发 ClientHello body 就等回应**。这是半包，
+>    服务端在等握手剩余部分，当然不会回。所有目标都超时：`104.18.42.163` FAIL 6104ms、
+>    `151.101.1.140`(fastly) FAIL 6120ms、`185.115.207.82` FAIL 7156ms、
+>    **`223.5.5.5`(国内) 同样 0 字节 5052ms**。`evidence/syn_timing.txt` 第 7 行
+>    `== after-connect data test (send TLS ClientHello prefix) ==` 之后那批「全 FAIL 6.1s」
+>    就是这个假象。
+>
+> **复测（正确口径，2026-11-12 20:00 CST，两轮间隔 15s）**：
+> - CF 官方 `104.18.42.163` / `172.64.147.104` / `104.18.33.74` / `104.18.41.208`：
+>   **全部 OK**，tcp 106–116 ms、tls 329–362 ms。
+> - 12 轮 × 10 s 抖动采样：**零失败**，97–171 ms。超时窗口 3 s / 1 s 各 6 次：**6/6 通过**。
+> - 真实 HTTP GET（SNI `www.shopify.com`）经 `104.18.42.163` → **200 OK 673 ms**；
+>   经 `172.64.147.104` → **200 OK 661 ms**。
+> - 8 轮 × 8 s 连续 HTTP：CF 四个 IP **32/32 全 200**。
+>
+> **所以「payload 被黑洞」不成立，「CF 官方段被墙」也不成立。** 当下的真实结论是：
+> 出口会**成片间歇性失效**（同一时刻一批目标同时不通，几分钟后自行恢复），
+> 且失效时 CF 官方段与部分第三方站（github / google / shopify）**一起**断，
+> 而 fastly、`8.8.8.8`、国内 DNS 始终正常 —— 这更像出口链路/运营商侧的间歇问题，
+> 不是针对 CF 的定点封锁。
+
+以下为初稿证据（保留供对照，**结论部分已被上面推翻**，只保留「间歇性成片失效」这一层事实）：
 
 1. 同一批 IP、同一时刻，三个出口对照：
    - Windows `192.168.1.11`：全部 OK —— **但这是假数据**。对 TEST-NET 保留地址 `192.0.2.1:443`、`198.51.100.7:443` 也返回 CONNECT_OK 0–1 ms，说明被 ThroneCore TUN 接管，不能作为证据。
@@ -35,17 +77,19 @@
    ```
    建连不慢，只是 3 s 窗口内拿不到 SYN-ACK。建连成功后立刻发数据：
    ```
-   conn 成功 → send(TLS ClientHello) → 6.1 s 无任何回应
+   conn 成功 → send(TLS ClientHello 前 3 字节) → 6.1 s 无任何回应
    ```
-   → **SYN 能过，payload 被黑洞。**
+   ~~→ SYN 能过，payload 被黑洞。~~
+   → **⚠️ 这条推论已被复测推翻，见上方修正说明。半包不发 body 时所有目标（含国内 223.5.5.5）
+   都不回应，不能用来判断通断。**
 6. ICMP 到 `104.18.42.163` 0% 丢包 110 ms、TCP 443 超时；TCP traceroute 第 5 跳后全 `*`。
 7. 宿主 `enp1s0`：`rx_dropped 25,181,000 / rx_packets 399,672,850` = **6.3%**，全集中 CPU0 softnet；链路 100 Mbps。
 
-**这一条代码改不了。** 需要在基础设施层处理（查运营商路径、换出口、加隧道、查 QoS）。交给 muse 的代码改动只是为了在出口坏掉时不把系统带崩。
+**这一条代码改不了。** 间歇故障的成因在基础设施层（查运营商路径、换出口、加隧道、查 QoS）。交给 muse 的代码改动只是为了在出口坏掉时不把系统带崩。
 
 ---
 
-## 2. 待实施的代码改动（三项，按优先级）
+## 2. 待实施的代码改动（四项，按优先级。D 项是 2026-11-12 20:00 新增）
 
 ### 改动 A｜域名体检「通路不可用」与「域名真死」必须区分
 **文件**：`web/domain_latency.go`，函数 `recordDomainProbeResults`（约 :490）
@@ -78,6 +122,77 @@ domain probe: no domain produced a speed sample this round (30 domains), failure
 **文件**：`web/domain_latency.go` `probeOneDomain`
 **现状**：域名体检解析域名后直连得到的 CF 前置 IP，走的正是坏掉的出口，于是体检必然零样本。
 **要求**：评估是否可改为经 `PROXY_AUTO_HOST` 的 worker 路径做健康判定，而不是直连域名解析的 IP。**若改动面超过 30 行，放弃，留 TODO。** 不要为此重构。
+
+### 改动 D｜换池抖动：cfnat 每天重启 30+ 次，每次断掉全部在途连接
+
+> **这一项是 2026-11-12 20:00 CST 新查出来的，v4 的「同参不重启」没有解决它，PR #1 / PR #2 也都没碰。**
+
+**实测事实**（`cfnat.log` 里 `正在监听 0.0.0.0:1234` 行，北京时间 11-12）：
+
+| 时段 | 重启次数 |
+|---|---|
+| 03:00 | 2 |
+| 04:00 | 2 |
+| 05:00 | 4 |
+| 06:00 | 3 |
+| 07:00 | 3 |
+| 08:00 | 5 |
+| 09:00 | 5 |
+| 10:00 | 4 |
+| 11:00 | 6 |
+| 12:00 | 2 |
+
+9 小时事件统计（`docker logs --since 9h`）：
+
+```
+proxy active pool applied                36      ← 每次都 stop + start
+proxy active pool applied (unchanged...)  0      ← 同参不重启，一次都没命中
+domain pool reconciled                   12
+throne probe reaped                      13
+proxy auto apply skipped                 39
+pool switch blocked                      35
+```
+
+**根因**：把相邻两次 `proxy active pool applied` 的成员集合做差，**没有一次相同**（n 在 32–36 之间跳）：
+
+- 小数抖动：每 8–13 轮里有一批 ±1~±2 的域名进出（`cloudflare.468123.xyz`、
+  `best.hzample.kdns.fr`、`cloudflare.19931110.xyz`、`cf-cname.xingpingcn.top` 反复进出）。
+- 大抖动：每 8–13 轮来一次 IP 批量重挑（+5/-5、+6/-6、+7/-7、+8/-5），
+  因为 `autoApplyProxyPool`（`web/funnel.go:386`）每轮都 `passed := make([]string, 0, cfg.PoolSize)`
+  从零重挑，**没有「在位成员优先保留」**。
+- 域名侧每轮走 `a.poolDomainMembers()`，随质量账本、观察期、闸门结果浮动，
+  于是「域名集合变了」也能单独触发一次重启。
+
+**十二点零三分那轮的实际日志**（典型样本）：
+
+```
+12:03:43 domain gate: ping.ctrl.li 体检状态 dead（连败 28），不进转发池
+12:03:43 domain gate: cmcc.vvvv.ee 体检状态 dead（连败 31），不进转发池
+12:03:43 domain gate: cf.xreak.top 体检状态 dead（连败 31），不进转发池
+12:03:43 domain gate: best.hzample.kdns.fr 体检状态 dead（连败 3），不进转发池
+12:03:43 domain gate: china-mobile.cname.cloudflare.468123.xyz 体检状态 dead（连败 4），不进转发池
+12:03:43 domain pool: cloudflare.468123.xyz 在观察期内，不进自动候选
+12:03:43 proxy active pool applied: 172.64.229.143,34.92.1.142,43.155.82.88,...
+```
+
+**为什么值得修**：数据面本身是健康的（池内 10 个 IP TCP:443 全通 58–137 ms，
+经 1234 端口真实请求 `www.cloudflare.com` / `www.shopify.com` / `www.aneko.ink` 各 3 次全 200，
+60 秒内每 2 秒采样 30 次 **30/30 成功**）。重启是纯损耗：每次 `stop()` 掐断所有在途连接。
+
+**建议的最小修法（两处，都不碰调度核心）**：
+
+1. ~~`web/funnel.go` `autoApplyProxyPool`：全量重挑之后，把 `current.IPs` 里**本轮仍然通过**
+   的成员按原顺序提到 `passed` 前面（在位粘性），再截 `cfg.PoolSize`。~~
+   **→ 已实施并上线，见 `PROJECT-CONTEXT.md` §4「D1」。实际做的是两处：初筛留座 + 终审提权
+   `promoteIncumbents`。commit 待推送。**
+2. `web/pool.go` `applyPoolLocked` 入口加一个最小重启间隔（如 10 分钟）+ 合并窗口：
+   间隔内多次变更只落盘（已有现成通道 `commitPoolWithoutRestart`），
+   到点或变更幅度超过阈值（如 IP 变动 ≥ 3 个）才真重启。
+   注意：不要让「域名体检回池」被永久饿死，阈值要按 IP 变更算，域名可以让路。
+   **→ 未实施，设计见 `CHANGE-D-DESIGN.md` 的 D2 部分。**
+
+**验收**：部署后 2 小时内 `proxy active pool applied` 的真重启次数 ≤ 4 次，
+且 1234 端口连续采样 10 分钟无中断。
 
 ---
 
@@ -142,7 +257,7 @@ domain probe: no domain produced a speed sample this round (30 domains), failure
 | `evidence/status_20261111T1830Z.json` | `/api/status` 全量快照：activeProbe 32 成员、cfnat args、forward 计数 |
 | `evidence/weblog_1720-1823.txt` | 17:20–18:23 容器全量日志，含所有调度事件 |
 | `evidence/outbound_spacing_broad.txt` | NAS 间隔敏感性测试 + 18 目标 × 3 轮广谱 TCP 对照 |
-| `evidence/syn_timing.txt` | 10 s 超时建连测试（全成功）+ 建连后发数据黑洞测试 |
+| `evidence/syn_timing.txt` | 10 s 超时建连测试 + 建连后「半包」测试。**注意：后半段「发 3 字节就等回应」是无效测法，所有目标（含 223.5.5.5）都不回应，不能据此判断通断** |
 | `evidence/proxy-active.json` | 最近一轮 60 条探测明细：WS_FAIL 25 / WS_PASS 15 / VLESS_FAIL 13 / VLESS_PASS 7 |
 | `evidence/domain-quality.json` | 域名账本：26 条空记录、2 testing、1 unstable、1 healthy |
 | `patches/deployed-v4-working-tree.diff` | 已上线的 527 行未提交改动 |
