@@ -210,10 +210,17 @@ def cert_ok(host, port, sni, timeout=8):
 
     The subject CN is read from the parsed cert (exact match on
     commonName, or an exact DNS SAN) - no temp files, no pipelining.
+
+    The handshake itself verifies the chain and the hostname against
+    the system CA store (CERT_REQUIRED + check_hostname with the
+    config's SNI): a self-signed cert with a matching CN no longer
+    passes. The exact CN/SAN match below stays as a second layer -
+    it proves the endpoint is this node, not just any host with a
+    valid cert for the SNI.
     """
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
     try:
         with socket.create_connection((host, int(port)), timeout=timeout) as sock:
             with ctx.wrap_socket(sock, server_hostname=sni) as tls:
@@ -221,9 +228,9 @@ def cert_ok(host, port, sni, timeout=8):
     except (OSError, ssl.SSLError, ValueError):
         return False
     # 精确比对 subject CN（或 SAN DNS）：旧写法 `CN in der` 是 DER
-    # 子串匹配，证书任一字段含该字节串即通过；配 CERT_NONE 时，自签
-    # 证书嵌该串即可冒充节点。CERT_NONE 下 getpeercert() 字典为空，
-    # 故直接解析 DER，只认完整相等的值。
+    # 子串匹配，证书任一字段含该字节串即通过。链与主机名已由握手校验，
+    # 这里再精确比对一次，证明对端是本节点而非任意持有该 SNI 有效
+    # 证书的主机。DER 直接解析：getpeercert() 字典只在校验通过后可信。
     if not der:
         return False
     want = NODE_CERT_CN.decode("utf-8", "ignore")
