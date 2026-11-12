@@ -104,7 +104,14 @@ if not ok:
     sys.exit(1)
 
 # stash the pristine config (watchdog never touches this file name)
-run(SUDO + f"cp {CFG} {CFG_BAK}")
+bak = run(SUDO + f"cp {CFG} {CFG_BAK}")
+if bak.returncode != 0:
+    # 备份失败必须立即停下：未配 NAS_SUDO_PW 且无 NOPASSWD 时
+    # sudo -n cp 失败，旧代码照常破坏配置，而 finally 里的 restore()
+    # 因无备份文件直接跳过，演练以 FAIL 退出后，破坏配置留在磁盘上，
+    # 下次 sing-box 重启即加载，隧道中断。
+    print(f"ABORT: initial backup failed (rc={bak.returncode}), refusing to sabotage without a backup")
+    sys.exit(1)
 orig = json.load(open(CFG))
 ov = [o for o in orig["outbounds"] if o.get("type") == "vless"][0]
 orig_path = ov.get("transport", {}).get("path", "")
