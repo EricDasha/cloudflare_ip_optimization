@@ -610,6 +610,18 @@ func probeVLESSCandidateMetricsOnce(ctx context.Context, candidateIP string, can
 		conn, dialErr := net.DialTimeout("tcp4", address, 100*time.Millisecond)
 		if dialErr == nil {
 			_ = conn.Close()
+			// 拨通只说明「这个端口有人监听」，不说明是自己的 sing-box：
+			// 并发探针撞端口时，输家的 sing-box 绑定失败已退出，但拨号
+			// 恰好打通赢家的监听端口，直接 break 就会借赢家的隧道测——
+			// 输家的候选可能借赢家的隧道拿到通过，或背上赢家的错误。
+			// 拨通后先非阻塞确认本进程还没退出，退出了按绑定冲突
+			// 返回（调用方换端口重试）。
+			select {
+			case processErr := <-done:
+				processFinished = true
+				return metrics, formatSingBoxExit(processErr, output, template)
+			default:
+			}
 			break
 		}
 		select {

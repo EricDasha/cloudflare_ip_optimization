@@ -3,6 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -163,5 +167,56 @@ func TestProbeVLESSPoolWithProbeSkipsOverCap(t *testing.T) {
 		if r.Stage != "skipped" {
 			t.Errorf("over-cap result %s must be skipped, got stage=%q", r.IP, r.Stage)
 		}
+	}
+}
+
+// 撞端口时：别人的监听端口是通的，但自己的 sing-box 已绑定失败退出——
+// 就绪拨号不得直接 break 去用别人的隧道，必须发现进程已退出、
+// 按绑定冲突返回（调用方重试换端口）。
+//
+// 时序安排：假 sing-box 60ms 后退出；「赢家」监听在 100ms 后才出现，
+// 就绪循环前两次拨号失败、第三次拨通时进程已死。无修复时第三次拨通
+// 即 break，随后 HTTP 测试对着只接不回的监听空等到 ctx 到期。
+func TestProbeVLESSCandidateMetricsOnceDetectsDeadProcessOnDial(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-sing-box-dead.sh")
+	body := "#!/bin/sh\nsleep 0.06\necho 'FATAL: listen tcp 127.0.0.1: bind: address already in use' >&2\nexit 1\n"
+	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
+		t.Fatalf("write fake sing-box: %v", err)
+	}
+	cfg := probeTestConfig(t, dir, script)
+
+	// 先取一个空闲端口号（不占着），100ms 后再由「赢家」监听它。
+	ln0, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("allocate port: %v", err)
+	}
+	port := ln0.Addr().(*net.TCPAddr).Port
+	_ = ln0.Close()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+		if err != nil {
+			return
+		}
+		defer ln.Close()
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err = probeVLESSCandidateMetricsOnce(ctx, "1.2.3.4", 443, cfg, map[string]any{"type": "vless"}, port)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("probe took %v, expected a fast bind-conflict return", elapsed)
+	}
+	if err == nil || !isBindConflictError(err) {
+		t.Fatalf("err = %v, want bind conflict error", err)
 	}
 }
