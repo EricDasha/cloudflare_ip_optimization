@@ -220,3 +220,34 @@ func TestProbeVLESSCandidateMetricsOnceDetectsDeadProcessOnDial(t *testing.T) {
 		t.Fatalf("err = %v, want bind conflict error", err)
 	}
 }
+
+// 入口钳制：MaxCandidates 0 不得零次尝试，500 不得超 100 次；
+// Timeout 0 不得让每条探针 ctx 立即过期。
+func TestProbeVLESSPoolWithProbeClampsConfig(t *testing.T) {
+	calls := 0
+	stub := func(ctx context.Context, ip string, port int, cfg vlessProbeConfig, template map[string]any) (vlessProbeMetrics, error) {
+		calls++
+		if ctx.Err() != nil {
+			t.Errorf("probe ctx must not be expired at call time (ip %s)", ip)
+		}
+		return vlessProbeMetrics{}, errors.New("VLESS 数据面请求失败: context deadline exceeded")
+	}
+	results := []proxyScanResult{
+		{IP: "1.1.1.1", Stage: "WS_PASS"},
+		{IP: "2.2.2.2", Stage: "WS_PASS"},
+	}
+	probeVLESSPoolWithProbe(context.Background(), results, 443, 2, vlessProbeConfig{Timeout: 0, MaxCandidates: 0}, nil, stub)
+	if calls != 1 {
+		t.Errorf("MaxCandidates 0 should clamp to 1 attempt, got %d calls", calls)
+	}
+
+	calls = 0
+	many := make([]proxyScanResult, 150)
+	for i := range many {
+		many[i] = proxyScanResult{IP: "10.0.0." + strconv.Itoa(i+1), Stage: "WS_PASS"}
+	}
+	probeVLESSPoolWithProbe(context.Background(), many, 443, 150, vlessProbeConfig{Timeout: 5 * time.Second, MaxCandidates: 500}, nil, stub)
+	if calls != 100 {
+		t.Errorf("MaxCandidates 500 should clamp to 100 attempts, got %d calls", calls)
+	}
+}

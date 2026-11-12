@@ -388,11 +388,26 @@ func vlessReviewBudget(cfg vlessProbeConfig) time.Duration {
 }
 
 func probeVLESSPoolWithProbe(parent context.Context, results []proxyScanResult, candidatePort, poolSize int, cfg vlessProbeConfig, template map[string]any, probe func(context.Context, string, int, vlessProbeConfig, map[string]any) (vlessProbeMetrics, error)) []string {
+	// 入口钳制：validate() 只在漏斗路径调用，踢人补位与调度器不调；
+	// MaxCandidates≤0 时 attempts>=0 首轮即成立、零次尝试，补位/调度
+	// 静默无替补；Timeout≤0 时每条探针 ctx 立即过期、全部记失败。
+	// 订阅段的超时/预算另在 subscription.go 里钳制。
+	maxCandidates := cfg.MaxCandidates
+	if maxCandidates < 1 {
+		maxCandidates = 1
+	}
+	if maxCandidates > 100 {
+		maxCandidates = 100
+	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
 	order := vlessProbeOrder(results)
 	attempted := make(map[int]struct{}, len(order))
 	attempts := 0
 	for _, i := range order {
-		if attempts >= cfg.MaxCandidates {
+		if attempts >= maxCandidates {
 			break
 		}
 		if parent.Err() != nil {
@@ -404,7 +419,7 @@ func probeVLESSPoolWithProbe(parent context.Context, results []proxyScanResult, 
 		}
 		attempts++
 		attempted[i] = struct{}{}
-		ctx, cancel := context.WithTimeout(parent, cfg.Timeout)
+		ctx, cancel := context.WithTimeout(parent, timeout)
 		started := time.Now()
 		metrics, err := probe(ctx, results[i].IP, candidatePort, cfg, template)
 		cancel()

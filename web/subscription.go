@@ -424,7 +424,14 @@ func (a *app) probeSubscriptions(parent context.Context) (int, error) {
 
 	if vlessReady {
 		probeCfg := vlessCfg
-		probeCfg.Timeout = time.Duration(envInt("PROXY_SUBSCRIPTION_VLESS_TIMEOUT", 12)) * time.Second
+		// 超时与预算必须钳制：0 值会毒化本子——超时 0 让每条探针 ctx
+		// 立即过期、全部记失败，3 轮后好 IP 被 ConsecutiveFails 判 fail；
+		// 预算 0 让整轮 VLESS 直接跳过、通过数为 0。
+		vlessTimeoutSeconds := envInt("PROXY_SUBSCRIPTION_VLESS_TIMEOUT", 12)
+		if vlessTimeoutSeconds < 3 || vlessTimeoutSeconds > 60 {
+			vlessTimeoutSeconds = 12
+		}
+		probeCfg.Timeout = time.Duration(vlessTimeoutSeconds) * time.Second
 		probePort := cfg.Port
 		maxProbes := envInt("PROXY_SUBSCRIPTION_VLESS_MAX", 120)
 		if maxProbes < 1 || maxProbes > 1000 {
@@ -452,7 +459,11 @@ func (a *app) probeSubscriptions(parent context.Context) (int, error) {
 		sem := make(chan struct{}, concurrency)
 		var wg sync.WaitGroup
 		var mu sync.Mutex
-		vlessCtx, vlessCancel := context.WithTimeout(parent, time.Duration(envInt("PROXY_SUBSCRIPTION_VLESS_BUDGET", 900))*time.Second)
+		vlessBudgetSeconds := envInt("PROXY_SUBSCRIPTION_VLESS_BUDGET", 900)
+		if vlessBudgetSeconds < 60 || vlessBudgetSeconds > 1800 {
+			vlessBudgetSeconds = 900
+		}
+		vlessCtx, vlessCancel := context.WithTimeout(parent, time.Duration(vlessBudgetSeconds)*time.Second)
 		for _, ip := range wsPass {
 			wg.Add(1)
 			go func(ip string) {
