@@ -489,8 +489,17 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 		}
 		return applyErr
 	}
-	if err := a.saveProxyActivePool(pool); err != nil {
-		commitErr := fmt.Errorf("保存生效池: %w", err)
+	// 落盘与内存写回在同一把 activeMu 下完成（见 commitPoolWithoutRestart
+	// 的注释）：保存失败时内存不动、照旧回滚；成功时磁盘与内存同时换新，
+	// 窗口内 setProxyPoolError 不可能用旧副本把新池盖掉。
+	a.activeMu.Lock()
+	saveErr := a.saveProxyActivePool(pool)
+	if saveErr == nil {
+		a.activePool = pool
+	}
+	a.activeMu.Unlock()
+	if saveErr != nil {
+		commitErr := fmt.Errorf("保存生效池: %w", saveErr)
 		if stopErr := a.cfnat.stop(); stopErr != nil {
 			return fmt.Errorf("%w；回滚前停止新 cfnat 失败: %v", commitErr, stopErr)
 		}
@@ -502,9 +511,6 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 		}
 		return commitErr
 	}
-	a.activeMu.Lock()
-	a.activePool = pool
-	a.activeMu.Unlock()
 	// 换池成功，历史报错随之作废——粘滞字段不该继续挂着上一轮的拦截原因。
 	a.poolGuardMu.Lock()
 	a.poolBlock, a.poolBlockAt, a.poolBlockBy = poolSwitchVerdict{}, time.Time{}, ""
@@ -558,12 +564,15 @@ func sameCFnatArgs(a, b []string) bool {
 // 全部打断一次，代价与收益完全不成比例。调用方必须先证明前后 -fixed 一致。
 func (a *app) commitPoolWithoutRestart(pool proxyActivePool) error {
 	pool.Disabled = pruneDisabledMissingIPs(pool)
+	// 落盘与内存写回必须在同一把 activeMu 下完成：上一版先落盘、
+	// 再上锁写内存，窗口内 setProxyPoolError 可能用旧副本把新池从
+	// 磁盘上盖掉（反之亦然）。保存失败时内存不动，调用方按失败处理。
+	a.activeMu.Lock()
+	defer a.activeMu.Unlock()
 	if err := a.saveProxyActivePool(pool); err != nil {
 		return err
 	}
-	a.activeMu.Lock()
 	a.activePool = pool
-	a.activeMu.Unlock()
 	return nil
 }
 
@@ -571,18 +580,23 @@ func (a *app) setProxyPoolError(message string, results []proxyScanResult) {
 	// 快照-改-写回是竞态：promote/select 在 cfnatCtlMu 下落池的瞬间若
 	// 夹在快照与写回之间，刚落成的池会被这份旧快照原样盖掉；且只写内
 	// 存不落盘，重启后报错消失，与 Error/ErrorAt 的持久化结构自相矛
-	// 盾。改成在 activeMu 下直接读改写、解锁后再落盘。注意不能拿
-	// cfnatCtlMu：revalidate 在持双锁（proxyScanMu + cfnatCtlMu）时
-	// 调本函数，拿锁会死锁。
+	// 盾。改成在 activeMu 下直接读改写。注意不能拿 cfnatCtlMu：
+	// revalidate 在持双锁（proxyScanMu + cfnatCtlMu）时调本函数，
+	// 拿锁会死锁。
+	//
+	// 落盘必须在同一把 activeMu 下做：上一版「解锁后再落盘」留了窗口——
+	// 解锁后、落盘前若有别的路径换池并落盘，这份旧副本会把新池从磁盘
+	// 上盖掉（内存是对的，磁盘是旧的），重启后生效池静默回退到旧成员。
+	// 持锁做文件 IO 会短暂挡住快照读，但池文件很小，且本函数的调用方
+	// 都不持 activeMu，无死锁。
 	a.activeMu.Lock()
+	defer a.activeMu.Unlock()
 	a.activePool.Error = message
 	a.activePool.ErrorAt = time.Now()
 	if results != nil {
 		a.activePool.Results = results
 	}
-	pool := a.activePool
-	a.activeMu.Unlock()
-	if err := a.saveProxyActivePool(pool); err != nil {
+	if err := a.saveProxyActivePool(a.activePool); err != nil {
 		log.Printf("proxy pool error persist failed: %v", err)
 	}
 	log.Printf("proxy auto apply skipped: %s", message)
