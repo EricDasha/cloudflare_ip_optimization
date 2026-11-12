@@ -27,6 +27,24 @@ func allowHTTPSRedirect(req *http.Request, base *url.URL) bool {
 	return req.URL.Scheme == "https" && strings.EqualFold(req.URL.Hostname(), base.Hostname())
 }
 
+// subscriptionRedirectPolicy 是订阅与候选源共用的重定向策略：只跟同 host
+// 的 HTTPS 跳转，且最多 10 次。Go 的 10 次重定向上限只在默认
+// checkRedirect 里（CheckRedirect == nil 时才用）：一旦自定义
+// CheckRedirect，上限就不存在——被攻陷的订阅转换器返回自指 Location
+// 时，一轮采集会被拖成请求风暴（订阅 URL 里还带 token 查询串，
+// 反复发往同一 host）。
+func subscriptionRedirectPolicy(base *url.URL) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		if !allowHTTPSRedirect(req, base) {
+			return http.ErrUseLastResponse
+		}
+		return nil
+	}
+}
+
 func fetchSubscriptionBody(parent context.Context, converter, maintainer, token string) ([]byte, int, error) {
 	if converter == "" || maintainer == "" || token == "" {
 		return nil, 0, errors.New("订阅转换器、维护者或 token 为空")
@@ -41,13 +59,8 @@ func fetchSubscriptionBody(parent context.Context, converter, maintainer, token 
 		subFetchTimeout = 45
 	}
 	client := &http.Client{
-		Timeout: time.Duration(subFetchTimeout) * time.Second,
-		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			if !allowHTTPSRedirect(req, parsed) {
-				return http.ErrUseLastResponse
-			}
-			return nil
-		},
+		Timeout:       time.Duration(subFetchTimeout) * time.Second,
+		CheckRedirect: subscriptionRedirectPolicy(parsed),
 	}
 	request, err := http.NewRequestWithContext(parent, http.MethodGet, target, nil)
 	if err != nil {

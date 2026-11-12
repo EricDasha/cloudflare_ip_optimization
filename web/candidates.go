@@ -763,13 +763,8 @@ func fetchHTTPSBody(parent context.Context, rawURL string) ([]byte, error) {
 		return nil, errors.New("候选源 URL 必须是 HTTPS")
 	}
 	client := &http.Client{
-		Timeout: 8 * time.Second,
-		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			if !allowHTTPSRedirect(req, target) {
-				return http.ErrUseLastResponse
-			}
-			return nil
-		},
+		Timeout:       8 * time.Second,
+		CheckRedirect: subscriptionRedirectPolicy(target),
 	}
 	request, err := http.NewRequestWithContext(parent, http.MethodGet, target.String(), nil)
 	if err != nil {
