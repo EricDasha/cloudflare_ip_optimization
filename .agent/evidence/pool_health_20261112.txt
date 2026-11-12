@@ -1,0 +1,16 @@
+=== pool member TCP:443 reachability (2 rounds) ===
+172.64.158.25    OK 104ms
+104.18.42.245    OK 108ms
+43.165.135.8     OK 76ms
+13.114.101.22    OK 78ms
+43.155.82.88     OK 58ms
+175.41.232.194   OK 73ms
+13.231.221.179   OK 76ms
+13.158.71.221    OK 78ms
+35.78.243.103    OK 74ms
+193.134.209.165  OK 137ms
+=== data plane via 127.0.0.1:1234 ===
+www.cloudflare.com     200 200 200
+www.shopify.com        200 200 200
+www.aneko.ink          200 200 200
+openai.com             403 403 403
