@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -36,9 +37,16 @@ func TestForwardingIPsExcludesDisabled(t *testing.T) {
 func TestVerifyActivePoolAliveSkipsDisabled(t *testing.T) {
 	orig := probeTCPAlive
 	defer func() { probeTCPAlive = orig }()
-	var probed []string
+	// verifyActivePoolAlive 用 goroutine 池并发探测，假探针的闭包必须自己加锁，
+	// 否则 -race 会报「假探针内部」的数据竞争（与被测代码无关）。
+	var (
+		mu     sync.Mutex
+		probed []string
+	)
 	probeTCPAlive = func(_ context.Context, addr string, _ time.Duration) bool {
+		mu.Lock()
 		probed = append(probed, addr)
+		mu.Unlock()
 		return true
 	}
 	a := &app{dataDir: t.TempDir()}

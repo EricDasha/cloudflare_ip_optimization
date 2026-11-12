@@ -98,10 +98,7 @@ func TestApplyPoolLockedRestartsWhenProcessDown(t *testing.T) {
 // 会一路带进落盘，GUI 在换池成功后仍挂着上一轮的拦截原因。
 func TestApplyPoolLockedClearsStalePoolError(t *testing.T) {
 	dir := t.TempDir()
-	script := filepath.Join(dir, "fake-cfnat.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 30\n"), 0755); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
+	script := fakeCFnatBin(t, "")
 	a := &app{dataDir: dir, cfnat: newManagedProcess("cfnat", script)}
 	pool := proxyActivePool{
 		IPs:       []string{"1.1.1.1"},
@@ -136,10 +133,8 @@ func TestApplyPoolLockedClearsStalePoolError(t *testing.T) {
 func TestApplyPoolLockedRollbackRestoresRunningArgs(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "starts.log")
-	script := filepath.Join(dir, "fake-cfnat.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$@\" >> "+logPath+"\nexec sleep 30\n"), 0755); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
+	// 每次启动把 argv 追加到 logPath（夹具内实现，不再靠 shell 的 echo）。
+	script := fakeCFnatBin(t, logPath)
 	a := &app{dataDir: dir, cfnat: newManagedProcess("cfnat", script)}
 	seedCfg := defaultCFnatConfig()
 	seedCfg.Addr = "127.0.0.1:11234"
@@ -252,10 +247,7 @@ func TestRefillGapCountsForwardingOnly(t *testing.T) {
 // 换池成功后被动健康账只留当前转发成员：离池 IP 的旧记录被裁掉。
 func TestApplyPoolLockedPrunesStaleActiveHealth(t *testing.T) {
 	dir := t.TempDir()
-	script := filepath.Join(dir, "fake-cfnat.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 30\n"), 0755); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
+	script := fakeCFnatBin(t, "")
 	a := &app{
 		dataDir:      dir,
 		cfnat:        newManagedProcess("cfnat", script),

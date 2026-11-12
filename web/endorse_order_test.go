@@ -3,8 +3,6 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,10 +11,9 @@ import (
 // 扶持即置顶：新扶持的成员必须排在已有置顶成员之前。
 func TestHandleActiveEndorsePinsToFront(t *testing.T) {
 	dir := t.TempDir()
-	script := filepath.Join(dir, "fake-cfnat.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 30\n"), 0755); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
+	// 假 cfnat 用测试二进制自身复执行（见 fakebin_test.go）：
+	// 不再写 .sh 脚本，那在 Windows 上不是合法可执行文件。
+	script := fakeCFnatBin(t, "")
 	a := &app{dataDir: dir, cfnat: newManagedProcess("cfnat", script)}
 	a.activePool = proxyActivePool{
 		IPs:       []string{"1.1.1.1", "2.2.2.2"},

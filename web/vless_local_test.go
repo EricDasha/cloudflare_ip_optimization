@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"os"
-	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -179,11 +177,8 @@ func TestProbeVLESSPoolWithProbeSkipsOverCap(t *testing.T) {
 // 即 break，随后 HTTP 测试对着只接不回的监听空等到 ctx 到期。
 func TestProbeVLESSCandidateMetricsOnceDetectsDeadProcessOnDial(t *testing.T) {
 	dir := t.TempDir()
-	script := filepath.Join(dir, "fake-sing-box-dead.sh")
-	body := "#!/bin/sh\nsleep 0.06\necho 'FATAL: listen tcp 127.0.0.1: bind: address already in use' >&2\nexit 1\n"
-	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
-		t.Fatalf("write fake sing-box: %v", err)
-	}
+	// 60ms 后自报 bind conflict 退出（见 fakebin_test.go）。
+	script := fakeSingBoxBin(t, fakeModeSingBoxDead)
 	cfg := probeTestConfig(t, dir, script)
 
 	// 先取一个空闲端口号（不占着），100ms 后再由「赢家」监听它。

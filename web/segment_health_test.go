@@ -170,6 +170,11 @@ func TestScanResultsCarryErrorClass(t *testing.T) {
 	}
 }
 
-func TestMain(m *testing.M) { os.Exit(m.Run()) }
+// 测试二进制同时充当假 cfnat / sing-box 的宿主：被 exec 出来时先认领
+// 假身份、扮演完直接退出，否则照常跑测试。详见 fakebin_test.go。
+func TestMain(m *testing.M) {
+	runFakeBinaryIfChild()
+	os.Exit(m.Run())
+}
 
 var _ = net.ParseIP

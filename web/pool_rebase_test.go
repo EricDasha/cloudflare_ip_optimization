@@ -2,23 +2,19 @@ package main
 
 import (
 	"errors"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
 
-// startFakeCFnatWithPool 按给定池的参数启动假 cfnat（sleep 30），
+// startFakeCFnatWithPool 按给定池的参数启动假 cfnat（测试二进制复执行，
+// 常驻不退出），
 // 供 applyPoolRebased 测试：提交走真实的 stop/start/落盘路径。
 func startFakeCFnatWithPool(t *testing.T, a *app, pool proxyActivePool) {
 	t.Helper()
 	dir := a.dataDir
-	script := filepath.Join(dir, "fake-cfnat.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 30\n"), 0755); err != nil {
-		t.Fatalf("write fake cfnat: %v", err)
-	}
+	script := fakeCFnatBin(t, "")
 	a.cfnat = newManagedProcess("cfnat", script)
 	fixed, priority, err := planFixedMembers(pool)
 	if err != nil {
