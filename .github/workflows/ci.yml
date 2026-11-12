@@ -108,15 +108,22 @@ jobs:
           ls -l /tmp/dist
           file /tmp/dist/cloudflare-web /tmp/dist/cfnat /tmp/dist/cfdata
 
-  # pr-baseline 测的是两个 PR **原始 head** 的代码，不含本分支的夹具修复。
-  # 已知它会红，而且应该红：PR1 / PR2 的 fileserver_test.go 把路径分隔符
-  # 写死成 Windows 反斜杠（`..\ip.csv`），在 Linux 上只是一个含反斜杠的
-  # 普通文件名，按 .csv 放行，于是 `path traversal must be denied` 失败。
+  # pr-baseline 是「特征化断言」，不是「放水」：
   #
-  # 注意：GitHub 会忽略 job 级 continue-on-error 对 run 结论的影响（实测
-  # run 仍记 failure），所以这里不用它，改成「把原始输出当交付物」：
-  # 完整日志落 artifact + 摘要写进 step summary，job 本身如实转述结果。
-  # 这不是屏蔽测试——本分支自己的工作树跑的是真测试，红就是红。
+  # 它 checkout 两个 PR 的**原始 head**（不含本分支的夹具修复），跑全套测试，
+  # 然后断言「失败集合恰好等于已知那一项」。已知失败是
+  # `TestAllowedFileWhitelistUnchanged / path traversal must be denied`：
+  # 原始 head 的 fileserver_test.go 把分隔符写死成反斜杠（`..\ip.csv`），
+  # Linux 上它只是个含反斜杠的普通文件名，按 .csv 放行即可，于是断言失败。
+  #
+  # 判定规则：
+  #   * 失败集合 == 已知集合  → 通过，并注明「已知失败，无新增」
+  #   * 失败集合 ⊃  已知集合  → **失败**（原始 head 上出现了新问题）
+  #   * 失败集合 ⊂  已知集合  → **失败**（基线漂了，说明这个 job 已失去意义，
+  #                              或有人偷偷改了 raw head，需要人看一眼）
+  #
+  # 因此它既不会掩盖测试失败，也不会因为一个已知的、本分支已修的夹具 bug
+  # 把整个 CI 长期染红。夹具合入 PR1/PR2 后，预期集合要同步清空。
   pr-baseline:
     name: pr head raw / ${{ matrix.ref }}
     runs-on: ubuntu-latest
@@ -127,6 +134,11 @@ jobs:
         ref:
           - handoff/20261112
           - audit/round2-20261112
+        include:
+          - ref: handoff/20261112
+            expected: TestAllowedFileWhitelistUnchanged
+          - ref: audit/round2-20261112
+            expected: TestAllowedFileWhitelistUnchanged
     steps:
       - uses: actions/checkout@v4
         with:
@@ -136,34 +148,61 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: go vet ./...
-        run: go vet ./... 2>&1 | tee vet.txt
+        run: go vet ./...
       - name: go test ./... (count=1)
         id: rawtest
         run: |
           set +e
-          go test ./... -count=1 -v 2>&1 | tee test.txt
-          echo "exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
-      - name: summarize
+          go test ./... -count=1 -v > test.txt 2>&1
+          rc=$?
+          set -e
+          echo "exit=$rc" >> "$GITHUB_OUTPUT"
+          # 失败不算本 step 失败：真正的判定在下一步做集合比较。
+          echo "raw head exit code: $rc"
+      - name: assert failure set matches the known baseline
+        env:
+          EXPECTED: ${{ matrix.expected }}
         run: |
-          {
-            echo "## 原始 head 测试快照：${{ matrix.ref }}"
+          # 从 -v 输出里抽所有 --- FAIL: 行，取测试名，排序去重。
+          grep -E '^--- FAIL: ' test.txt | awk '{print $3}' | sed 's/(.*//' | sort -u > actual.txt || true
+          sort -u <<<"$EXPECTED" > expected.txt
+
+          echo "## 原始 head 基线：${{ matrix.ref }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '预期失败（已知，本分支已修）：' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat expected.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '实测失败：' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat actual.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          # 关键断言：两个集合必须逐字相同。
+          if ! diff -u expected.txt actual.txt > baseline.diff; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '**基线不匹配**：' >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            cat baseline.diff >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
             echo ""
-            echo '```'
-            grep -E '^(--- FAIL|FAIL|ok |panic)' test.txt | head -40
-            echo '```'
-            echo ""
-            if [ "${{ steps.rawtest.outputs.exit }}" != "0" ]; then
-              echo "结论：该 head 在 Linux 上测试未通过（见上）。"
-              echo "这是修复前的真实状态，用于给夹具修复提供对照基线；"
-              echo "合入本分支的夹具修复后应当转绿。"
-            else
-              echo "结论：该 head 在 Linux 上测试通过。"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo "基线不匹配，见 diff："
+            cat baseline.diff
+            exit 1
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "结论：失败集合与已知基线完全一致，无新增失败。" >> "$GITHUB_STEP_SUMMARY"
+          echo "这些失败由本分支的夹具修复合入 PR1/PR2 后消除；届时请同步清空 expected。" >> "$GITHUB_STEP_SUMMARY"
+
+          grep -E '^(--- FAIL|FAIL|ok |panic)' test.txt | head -40
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: raw-${{ strategy.job-index }}
           path: |
             test.txt
-            vet.txt
+            actual.txt
+            expected.txt
+            baseline.diff
