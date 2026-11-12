@@ -52,10 +52,7 @@ func rankVLESSPassesBySpeedWithProbe(
 	if speedBytes < 1048576 || speedBytes > 33554432 {
 		speedBytes = 2097152
 	}
-	speedTimeout := envInt("PROXY_VLESS_SPEED_TIMEOUT", 20)
-	if speedTimeout < 5 || speedTimeout > 120 {
-		speedTimeout = 20
-	}
+	speedTimeout := vlessSpeedTimeoutSeconds()
 	speedCfg.TestURL = vlessSpeedTestURL(speedBytes)
 	speedCfg.ExpectedStatus = http.StatusOK
 	speedCfg.ReadLimit = int64(speedBytes)

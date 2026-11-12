@@ -328,8 +328,15 @@ func (a *app) triggerCFdataScan() {
 const autoApplyBudget = 10 * time.Minute
 
 // newAutoApplyContext 每次漏斗都开一份全新预算，与刷新/请求 ctx 彻底解耦。
+// 预算按 VLESS 终审工作量算（见 vlessReviewBudget），下限 10 分钟：
+// 固定 10 分钟在 batch/Timeout/MaxCandidates 取大值时不够，尾部候选
+// 没验却被记失败进质量账。
 func newAutoApplyContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), autoApplyBudget)
+	budget := vlessReviewBudget(defaultProxyAutoConfig().VLESS)
+	if budget < autoApplyBudget {
+		budget = autoApplyBudget
+	}
+	return context.WithTimeout(context.Background(), budget)
 }
 
 // refreshCandidatesAfterCFdata 轮询等待 cfdata 退出，然后重算候选。
@@ -525,7 +532,9 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 		// 15 秒超时，12 个一批最坏 180 秒 + 测速 6×20 秒，45 秒一到
 		// 后面的尝试瞬间报 context 错误——不是 IP 死了，是预算没了，
 		// 降级逻辑（改动 B）还会把这些假超时当真失败采纳。与漏斗同款：
-		// 终审单独开一份 10 分钟预算，探测量不变，只是让它跑完。
+		// 终审单独开一份按工作量算的预算（见 vlessReviewBudget），
+		// 探测量不变，只是让它跑完；预算仍不够时没轮上的记 skipped，
+		// 不入失败账。
 		vlessCtx, vlessCancel := newAutoApplyContext()
 		defer vlessCancel()
 		passed = probeVLESSPool(vlessCtx, results, cfg.Port, len(results), cfg.VLESS, template)

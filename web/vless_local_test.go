@@ -78,3 +78,90 @@ func TestProbeVLESSPoolWithProbeSkipsLocalFailures(t *testing.T) {
 		}
 	}
 }
+
+func TestVLESSReviewBudget(t *testing.T) {
+	t.Setenv("PROXY_VLESS_SPEED_TIMEOUT", "20")
+	// 默认：20×15 秒 + 6×20 秒 + 60 秒 = 480 秒，不足 10 分钟下限。
+	if got := vlessReviewBudget(vlessProbeConfig{MaxCandidates: 20, Timeout: 15 * time.Second}); got != 10*time.Minute {
+		t.Errorf("default workload should get the 10m floor, got %v", got)
+	}
+	// batch 50×15 秒：750+120+60=930 秒。
+	if got := vlessReviewBudget(vlessProbeConfig{MaxCandidates: 50, Timeout: 15 * time.Second}); got != 930*time.Second {
+		t.Errorf("50x15s workload should need 930s, got %v", got)
+	}
+	// 100×60 秒：6000+120+60=6180 秒，封顶 30 分钟。
+	if got := vlessReviewBudget(vlessProbeConfig{MaxCandidates: 100, Timeout: 60 * time.Second}); got != 30*time.Minute {
+		t.Errorf("100x60s workload should cap at 30m, got %v", got)
+	}
+	// 非法值按最小工作量算，回落到 10 分钟下限。
+	if got := vlessReviewBudget(vlessProbeConfig{MaxCandidates: 0, Timeout: 0}); got != 10*time.Minute {
+		t.Errorf("zero config should get the 10m floor, got %v", got)
+	}
+}
+
+// 父预算已到期：一条都不该真测，全部记 skipped。
+func TestProbeVLESSPoolWithProbeSkipsBudgetExhaustion(t *testing.T) {
+	results := []proxyScanResult{
+		{IP: "1.1.1.1", Stage: "WS_PASS"},
+		{IP: "2.2.2.2", Stage: "WS_PASS"},
+	}
+	calls := 0
+	stub := func(ctx context.Context, ip string, port int, cfg vlessProbeConfig, template map[string]any) (vlessProbeMetrics, error) {
+		calls++
+		return vlessProbeMetrics{}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cfg := vlessProbeConfig{Timeout: 5 * time.Second, MaxCandidates: 10}
+	if passed := probeVLESSPoolWithProbe(ctx, results, 443, 2, cfg, nil, stub); len(passed) != 0 {
+		t.Fatalf("expected no passes with an expired budget, got %v", passed)
+	}
+	if calls != 0 {
+		t.Fatalf("probe must not be called with an expired budget, called %d times", calls)
+	}
+	for _, r := range results {
+		if r.Stage != "skipped" {
+			t.Errorf("result %s must be skipped, got stage=%q", r.IP, r.Stage)
+		}
+	}
+}
+
+// 本条正在跑时父预算到期：不是候选死了，是预算没了，记 skipped。
+func TestProbeVLESSPoolWithProbeSkipsTruncatedAttempt(t *testing.T) {
+	results := []proxyScanResult{{IP: "1.1.1.1", Stage: "WS_PASS"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	stub := func(ctx context.Context, ip string, port int, cfg vlessProbeConfig, template map[string]any) (vlessProbeMetrics, error) {
+		cancel()
+		return vlessProbeMetrics{}, errors.New("VLESS 数据面请求失败: context deadline exceeded")
+	}
+	cfg := vlessProbeConfig{Timeout: 5 * time.Second, MaxCandidates: 10}
+	probeVLESSPoolWithProbe(ctx, results, 443, 1, cfg, nil, stub)
+	if results[0].Stage != "skipped" {
+		t.Fatalf("truncated attempt must be skipped, got stage=%q class=%q", results[0].Stage, results[0].ErrorClass)
+	}
+}
+
+// 名额已满没轮上的不是失败：记 skipped，不进质量账。
+func TestProbeVLESSPoolWithProbeSkipsOverCap(t *testing.T) {
+	results := []proxyScanResult{
+		{IP: "1.1.1.1", Stage: "WS_PASS"},
+		{IP: "2.2.2.2", Stage: "WS_PASS"},
+		{IP: "3.3.3.3", Stage: "WS_PASS"},
+	}
+	stub := func(ctx context.Context, ip string, port int, cfg vlessProbeConfig, template map[string]any) (vlessProbeMetrics, error) {
+		return vlessProbeMetrics{Proven: true}, nil
+	}
+	cfg := vlessProbeConfig{Timeout: 5 * time.Second, MaxCandidates: 1}
+	passed := probeVLESSPoolWithProbe(context.Background(), results, 443, 3, cfg, nil, stub)
+	if len(passed) != 1 {
+		t.Fatalf("expected 1 pass, got %v", passed)
+	}
+	if results[0].Stage != "VLESS_PASS" {
+		t.Errorf("first result must be VLESS_PASS, got %q", results[0].Stage)
+	}
+	for _, r := range results[1:] {
+		if r.Stage != "skipped" {
+			t.Errorf("over-cap result %s must be skipped, got stage=%q", r.IP, r.Stage)
+		}
+	}
+}

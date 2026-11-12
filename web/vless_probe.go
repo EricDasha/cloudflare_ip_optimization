@@ -344,14 +344,66 @@ func isLocalProbeError(err error) bool {
 	return false
 }
 
+// vlessSpeedTimeoutSeconds 是 VLESS 测速单条超时（秒），与
+// rankVLESSPassesBySpeed 共用同一钳制，避免两处各写各的范围。
+func vlessSpeedTimeoutSeconds() int {
+	timeout := envInt("PROXY_VLESS_SPEED_TIMEOUT", 20)
+	if timeout < 5 || timeout > 120 {
+		timeout = 20
+	}
+	return timeout
+}
+
+// vlessReviewBudget 按可配工作量算 VLESS 终审预算：探针（单轮候选数×
+// 单条超时）+ 测速（最多 6 个×测速超时）+ 60 秒余量，下限 10 分钟、
+// 上限 30 分钟。此前终审固定 10 分钟，但工作量可配：batch 50×15 秒
+// =750 秒、Timeout 60 秒×12=720 秒、漏斗 MaxCandidates 60×15 秒
+// =900 秒，默认值（20×15+6×20=420 秒）刚好够用，属「默认够、允许值
+// 不够」——尾部候选没验却被记失败进质量账。
+func vlessReviewBudget(cfg vlessProbeConfig) time.Duration {
+	maxCandidates := cfg.MaxCandidates
+	if maxCandidates < 1 {
+		maxCandidates = 1
+	}
+	if maxCandidates > 100 {
+		maxCandidates = 100
+	}
+	timeout := cfg.Timeout
+	if timeout < 3*time.Second {
+		timeout = 3 * time.Second
+	}
+	if timeout > 60*time.Second {
+		timeout = 60 * time.Second
+	}
+	need := time.Duration(maxCandidates)*timeout +
+		time.Duration(maxVLESSSpeedProbes)*time.Duration(vlessSpeedTimeoutSeconds())*time.Second +
+		time.Minute
+	if need < 10*time.Minute {
+		need = 10 * time.Minute
+	}
+	if need > 30*time.Minute {
+		need = 30 * time.Minute
+	}
+	return need
+}
+
 func probeVLESSPoolWithProbe(parent context.Context, results []proxyScanResult, candidatePort, poolSize int, cfg vlessProbeConfig, template map[string]any, probe func(context.Context, string, int, vlessProbeConfig, map[string]any) (vlessProbeMetrics, error)) []string {
 	order := vlessProbeOrder(results)
+	attempted := make(map[int]struct{}, len(order))
 	attempts := 0
 	for _, i := range order {
 		if attempts >= cfg.MaxCandidates {
 			break
 		}
+		if parent.Err() != nil {
+			// 父预算已到期：这一条及之后都没验，不得记失败。
+			results[i].Stage = "skipped"
+			results[i].Error = "VLESS 终审预算耗尽，未开始探测"
+			results[i].ErrorClass = failureTimeout
+			continue
+		}
 		attempts++
+		attempted[i] = struct{}{}
 		ctx, cancel := context.WithTimeout(parent, cfg.Timeout)
 		started := time.Now()
 		metrics, err := probe(ctx, results[i].IP, candidatePort, cfg, template)
@@ -362,6 +414,13 @@ func probeVLESSPoolWithProbe(parent context.Context, results []proxyScanResult, 
 		// 失败候选有没有真的通根本无从知道，降级只能靠「非超时」瞎猜。
 		results[i].DataProven = metrics.Proven
 		if err != nil {
+			if parent.Err() != nil {
+				// 本条正在跑时父预算到期：不是候选死了，是预算没了。
+				results[i].Stage = "skipped"
+				results[i].Error = "VLESS 终审预算耗尽，探测被截断"
+				results[i].ErrorClass = failureTimeout
+				continue
+			}
 			if isLocalProbeError(err) {
 				// 探针自己坏了（端口冲突耗尽、sing-box 提前退出等）：
 				// 不是候选的问题，记 skipped，不进质量账、不进降级。
@@ -381,6 +440,15 @@ func probeVLESSPoolWithProbe(parent context.Context, results []proxyScanResult, 
 			continue
 		}
 		results[i].Stage = "VLESS_PASS"
+	}
+	// 名额已满没轮上的也不是失败：本轮只验 N 个，剩下的根本没测过，
+	// 不得进质量账（调度器 observe 会跳过 skipped）。
+	for _, i := range order {
+		if _, ok := attempted[i]; !ok && results[i].Stage == "WS_PASS" {
+			results[i].Stage = "skipped"
+			results[i].Error = "本轮 VLESS 终审名额已满，未开始探测"
+			results[i].ErrorClass = failureTimeout
+		}
 	}
 	return fastestVLESSPasses(results, poolSize)
 }
