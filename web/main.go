@@ -491,8 +491,15 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 			a.quality.setError(err.Error())
 			return
 		}
-		passed = probeVLESSPool(ctx, results, cfg.Port, len(results), cfg.VLESS, template)
-		passed = rankVLESSPassesBySpeed(ctx, passed, results, cfg.Port, cfg.VLESS, template)
+		// VLESS 终审不得与 WS 初筛共用 45 秒预算：终审是串行的，每 IP
+		// 15 秒超时，12 个一批最坏 180 秒 + 测速 6×20 秒，45 秒一到
+		// 后面的尝试瞬间报 context 错误——不是 IP 死了，是预算没了，
+		// 降级逻辑（改动 B）还会把这些假超时当真失败采纳。与漏斗同款：
+		// 终审单独开一份 10 分钟预算，探测量不变，只是让它跑完。
+		vlessCtx, vlessCancel := newAutoApplyContext()
+		defer vlessCancel()
+		passed = probeVLESSPool(vlessCtx, results, cfg.Port, len(results), cfg.VLESS, template)
+		passed = rankVLESSPassesBySpeed(vlessCtx, passed, results, cfg.Port, cfg.VLESS, template)
 	} else {
 		for _, result := range results {
 			if result.Error == "" {
@@ -656,16 +663,33 @@ func (a *app) poolDomainMembers() []string {
 	// 自动来源一律过质量闸：体检判 dead/unstable 的域名不再进 -fixed。
 	// 生产事故的形态就是 12 个 successRate≈0.2 的域名留在轮转池里，
 	// 每 4 次拨号有 3 次撞死目标，而 -num=1 时一次失败即断连。
+	//
+	// 观察期同在这道闸内判：在位验活刚把某个域名剔出去并压了 30 分钟观察期，
+	// 若这里不看观察期，自动换池就会在下一轮把它整批放回 -fixed——剔除与回池
+	// 各走各的口径，域名集合在两套算法之间来回摆动，每次摆动都是一次 cfnat 重启
+	// （生产日志 3 域名 ↔ 25 域名反复横跳）。观察期只在自动来源生效，
+	// PROXY_DOMAIN_FORWARD 是运营者担保，仍然放行。
+	now := time.Now()
 	for _, domain := range snapshot.ForwardDomains {
-		if a.domainUsableForForwarding(domain) {
-			add(domain)
+		if !a.domainUsableForForwarding(domain) {
+			continue
 		}
+		if a.domainQuarantined(domain, now) {
+			log.Printf("domain pool: %s 在观察期内，不进自动候选", domain)
+			continue
+		}
+		add(domain)
 	}
 	if envBool("PROXY_AUTO_DOMAINS", false) {
 		for _, domain := range snapshot.PreferredDomains {
-			if a.domainUsableForForwarding(domain) {
-				add(domain)
+			if !a.domainUsableForForwarding(domain) {
+				continue
 			}
+			if a.domainQuarantined(domain, now) {
+				log.Printf("domain pool: %s 在观察期内，不进自动候选", domain)
+				continue
+			}
+			add(domain)
 		}
 	}
 	// 兜底：闸门若把自动来源全拦下，转发池会退化成「只剩 IP」甚至空池，
@@ -676,9 +700,18 @@ func (a *app) poolDomainMembers() []string {
 	fallback := make([]string, 0, minFallbackForwardDomains)
 	if len(domains) == 0 && len(snapshot.ForwardDomains) > 0 {
 		before := len(domains)
-		for _, domain := range a.topDomainsByQuality(snapshot.ForwardDomains, minFallbackForwardDomains) {
+		for _, domain := range a.topDomainsByQuality(snapshot.ForwardDomains, len(snapshot.ForwardDomains)) {
 			if len(domains) >= minFallbackForwardDomains {
 				break
+			}
+			// 隔离期是体检当场给的「别放回」verdict：兜底也不该把它拉
+			// 回来，否则刚隔离的域名立刻回池、再被踢出，3 ↔ 25 域名横
+			// 跳、每摆一次重启一次 cfnat。只放行未隔离的（哪怕它体检
+			// 成绩差），兜底的本意就是「有总比没有强」。输入放宽到全部
+			// 候选、仍按成功率降序取前 3 个未隔离的，避免前 3 里有隔离
+			// 者时名额白白浪费。
+			if a.domainQuarantined(domain, now) {
+				continue
 			}
 			prev := len(domains)
 			add(domain)

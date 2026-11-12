@@ -258,34 +258,61 @@ func admitPassedUnderCeiling(passed []string, results []proxyScanResult, ceiling
 	return out
 }
 
-// degradedFromWSResults 从 WS 扫描结果里挑出「WS 101 已通过、但没进 VLESS
-// 终审通过名单」的候选，用于池子将要空掉时的降级兜底。
+// degradedFromWSResults 从 WS 扫描结果里挑出可降级采用的候选，用于池子
+// 将要空掉时的降级兜底。返回 (adopted, rejected)：rejected 是被拒绝的
+// 候选及原因（"ip: 原因"），调用方打日志，不要静默丢弃。
 //
 // 语义边界：只补到 want 为止，绝不越界扩池——降级是为了不空池，
 // 不是为了用未验证的候选把池子填满。
-func degradedFromWSResults(results []proxyScanResult, existing []string, want int) []string {
+//
+// 准入（改动 B）：候选必须真的进过 VLESS 终审（Stage=VLESS_FAIL，
+// DataLatency>0 说明探针跑完了）且失败归类不是 timeout——超时意味着
+// 数据面 15 秒静默，最能说明这条出口此刻不通。
+//
+// 拒绝的三类：
+//   - 纯 WS_PASS（未进 VLESS 终审）：WS 握手对数据面毫无预测力。实测：
+//     13 个 VLESS_FAIL 的 WS 握手仅 228–423ms，数据面却卡满 15s 超时，
+//     不能凭 WS 通过就进池；
+//   - VLESS_FAIL 且 errorClass=timeout：数据面超时；
+//   - WS_FAIL 或其他阶段失败：WS 阶段已失败。
+//
+// 注意：probeVLESSPool 里 DataLatency 是整次尝试的耗时（含 15s 超时），
+// 不是「连上过」的证明——不能只凭 DataLatency>0 就放行，必须同时看
+// errorClass。交接单原文「有 dataLatency 值（即真的连上过）」按字面
+// 理解会把 15s 超时也放进来（实测证据里超时项的 dataLatency 全是
+// 约 15005ms），此处按「已尝试 + 非超时失败」执行，并在 PR 说明里
+// 标出这一处与原文措辞的出入。
+func degradedFromWSResults(results []proxyScanResult, existing []string, want int) (adopted, rejected []string) {
 	if want <= len(existing) {
-		return nil
+		return nil, nil
 	}
 	seen := make(map[string]struct{}, len(existing))
 	for _, ip := range existing {
 		seen[ip] = struct{}{}
 	}
-	out := make([]string, 0, want-len(existing))
+	adopted = make([]string, 0, want-len(existing))
 	for _, result := range results {
-		if len(existing)+len(out) >= want {
+		if len(existing)+len(adopted) >= want {
 			break
-		}
-		if result.Error != "" {
-			continue
 		}
 		if _, ok := seen[result.IP]; ok {
 			continue
 		}
 		seen[result.IP] = struct{}{}
-		out = append(out, result.IP)
+		switch {
+		case result.Stage == "VLESS_FAIL" && result.DataLatency > 0 && result.ErrorClass != "" && result.ErrorClass != failureTimeout:
+			adopted = append(adopted, result.IP)
+		case result.Stage == "VLESS_FAIL" && result.ErrorClass == failureTimeout:
+			rejected = append(rejected, result.IP+": VLESS 数据面超时")
+		case result.Stage == "VLESS_FAIL":
+			rejected = append(rejected, result.IP+": VLESS 失败原因未归类或无数据面耗时")
+		case result.Stage == "WS_PASS":
+			rejected = append(rejected, result.IP+": 仅 WS 通过，未验 VLESS 数据面")
+		default:
+			rejected = append(rejected, result.IP+": WS 未通过")
+		}
 	}
-	return out
+	return adopted, rejected
 }
 
 // autoApplyProxyPool 跑一轮全量重挑并换池。
@@ -429,9 +456,27 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 		// 三层都通，失败点大概率在探测目标而非链路本身。池子空掉比用
 		// 「未完成终审」的候选严重得多，故降级采用并明确标记。
 		if cfg.VLESS.Enabled {
-			if extra := degradedFromWSResults(results, passed, cfg.MinPool); len(extra) > 0 {
+			extra, rejected := degradedFromWSResults(results, passed, cfg.MinPool)
+			if len(rejected) > 0 {
+				log.Printf("proxy pool DEGRADED: 拒绝降级 %d 个候选: %v", len(rejected), rejected)
+			}
+			// 降级候选同样要过入池上限与准入闸：直接 append 会把
+			// WS 2~5 秒的慢 IP 经后门塞进粘性转发的池子——800ms 上限
+			// 的注释写明「所有换池入口必须同一口径」。
+			if ceiling := poolEntryMaxLatencyMs(); len(extra) > 0 {
+				before := len(extra)
+				extra = admitPassedUnderCeiling(extra, results, ceiling)
+				if dropped := before - len(extra); dropped > 0 {
+					log.Printf("proxy pool DEGRADED: 拒绝降级 %d 个候选（超过 %dms 入池上限）", dropped, ceiling)
+				}
+			}
+			if admitted, rejected := filterPoolAdmissibleIPs(extra); len(rejected) > 0 {
+				log.Printf("proxy pool DEGRADED: 拒绝降级 %d 个候选（未通过准入闸）: %v", len(rejected), rejected)
+				extra = admitted
+			}
+			if len(extra) > 0 {
 				passed = append(passed, extra...)
-				message = fmt.Sprintf("%s；已降级采用 %d 个 WS 已通过但 VLESS 未验的候选", message, len(extra))
+				message = fmt.Sprintf("%s；已降级采用 %d 个 VLESS 非超时失败的候选", message, len(extra))
 				log.Printf("proxy pool DEGRADED: %s", message)
 			}
 		}
@@ -471,13 +516,14 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 		Disabled: append([]string(nil), current.Disabled...),
 	}
 	if sameIPSet(current.IPs, passed) && sameStringSet(current.Domains, domains) {
-		if err := a.saveProxyActivePool(pool); err != nil {
-			a.setProxyPoolError("保存复验后的池失败: "+err.Error(), nil)
-			return
+		// 同池复验也要走统一落点：直接保存会绕过域名质量闸、
+		// planFixedMembers 校验、Disabled 清理、成员通道对齐与 poolBlock
+		// 清除。参数未变时 applyPoolLocked 走不重启通道（只落盘+播种），
+		// 不掐断在途连接。
+		if err := a.applyProxyPool(pool, current); err != nil {
+			a.setProxyPoolError("复验后落池失败，保留旧池: "+err.Error(), results)
+			return false
 		}
-		a.activeMu.Lock()
-		a.activePool = pool
-		a.activeMu.Unlock()
 		log.Printf("proxy active pool reverified: %d IPs", len(passed))
 		return true
 	}
@@ -578,6 +624,11 @@ func coloFromCFRay(ray string) string {
 	return coloPattern.FindString(strings.TrimSpace(ray))
 }
 
+// probeTLSConfig 抽成变量便于测试注入（默认用系统根证书校验 SNI）。
+var probeTLSConfig = func(host string) *tls.Config {
+	return &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
+}
+
 func probeProxyWebSocket(ctx context.Context, ip string, cfg proxyAutoConfig) (string, error) {
 	dialer := &net.Dialer{}
 	raw, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(cfg.Port)))
@@ -585,7 +636,17 @@ func probeProxyWebSocket(ctx context.Context, ip string, cfg proxyAutoConfig) (s
 		return "", err
 	}
 	defer raw.Close()
-	tlsConn := tls.Client(raw, &tls.Config{ServerName: cfg.Host, MinVersion: tls.VersionTLS12})
+	// 握手后的读写是裸读：对端完成 TLS 握手后装死，req.Write /
+	// ReadResponse 会无限等下去，goroutine 与信号量槽位一起被占住，
+	// MaxLatency 形同虚设。DialContext/HandshakeContext 只管建连，
+	// 不管建连后的读写——建连成功就按 ctx 的 deadline 兜底，无
+	// deadline 时用 cfg.MaxLatency 算一个。
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = raw.SetDeadline(deadline)
+	} else if cfg.MaxLatency > 0 {
+		_ = raw.SetDeadline(time.Now().Add(time.Duration(cfg.MaxLatency) * time.Millisecond))
+	}
+	tlsConn := tls.Client(raw, probeTLSConfig(cfg.Host))
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		return "", err
 	}

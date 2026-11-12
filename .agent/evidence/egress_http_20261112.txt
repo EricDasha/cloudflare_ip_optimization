@@ -1,0 +1,9 @@
+round  CF(4)                                PRX(5)
+00  163=200 104=200 74=200 208=200         21=TimeoutE 31=TimeoutE 39=SSLZeroR 122=TimeoutE 82=200
+01  163=200 104=200 74=200 208=200         21=TimeoutE 31=TimeoutE 39=SSLZeroR 122=TimeoutE 82=200
+02  163=200 104=200 74=200 208=200         21=TimeoutE 31=TimeoutE 39=SSLZeroR 122=TimeoutE 82=200
+03  163=200 104=200 74=200 208=200         21=TimeoutE 31=TimeoutE 39=SSLZeroR 122=TimeoutE 82=200
+04  163=200 104=200 74=200 208=200         21=TimeoutE 31=TimeoutE 39=SSLZeroR 122=TimeoutE 82=200
+05  163=200 104=200 74=200 208=200         21=TimeoutE 31=TimeoutE 39=SSLZeroR 122=TimeoutE 82=200
+06  163=200 104=200 74=200 208=200         21=TimeoutE 31=TimeoutE 39=SSLZeroR 122=TimeoutE 82=200
+07  163=200 104=200 74=200 208=200         21=TimeoutE 31=TimeoutE 39=SSLZeroR 122=TimeoutE 82=200

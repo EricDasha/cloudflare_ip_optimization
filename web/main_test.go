@@ -536,6 +536,12 @@ func TestVLESSProbeCandidateLimit(t *testing.T) {
 	if results[0].Stage != "VLESS_FAIL" || results[1].Stage != "VLESS_FAIL" {
 		t.Fatalf("first two candidates were not attempted: %#v", results)
 	}
+	// 改动 B：VLESS 失败必须归类，否则降级逻辑无从区分超时与快速失败。
+	for _, r := range results[:2] {
+		if r.ErrorClass == "" {
+			t.Fatalf("VLESS_FAIL %s 缺少 ErrorClass 归类: %#v", r.IP, r)
+		}
+	}
 	if results[2].Stage != "WS_PASS" || results[2].Error != "" {
 		t.Fatalf("candidate limit was not enforced: %#v", results[2])
 	}
@@ -687,5 +693,22 @@ func TestEnvForwardDomainsParsesCommaAndWildcard(t *testing.T) {
 	want := []string{"youxuan.cf.090227.xyz", "www.visa.cn", "bestcf.030101.xyz"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("envForwardDomains() = %v, want %v", got, want)
+	}
+}
+
+// normalize 越界值一律回落默认值，不再透传到 cfnat/cfdata 命令行。
+func TestNormalizeClampsOutOfRange(t *testing.T) {
+	c := normalizeCFnat(cfnatConfig{Port: -1, Code: 99999, Delay: -5, Task: -5, IPNum: -2})
+	d := defaultCFnatConfig()
+	if c.Port != d.Port || c.Code != d.Code || c.Delay != d.Delay || c.Task != d.Task || c.IPNum != d.IPNum {
+		t.Fatalf("normalizeCFnat out-of-range not clamped: %+v", c)
+	}
+	if got := normalizeCFnat(cfnatConfig{Port: 8443, Code: 200, Delay: 100, Task: 50, IPNum: 5}); got.Port != 8443 || got.Code != 200 || got.Delay != 100 || got.Task != 50 || got.IPNum != 5 {
+		t.Fatalf("normalizeCFnat clamped valid values: %+v", got)
+	}
+	f := normalizeCFdata(cfdataConfig{Scan: -1, Test: 0, Port: 70000, Delay: -1})
+	fd := defaultCFdataConfig()
+	if f.Scan != fd.Scan || f.Test != fd.Test || f.Port != fd.Port || f.Delay != fd.Delay {
+		t.Fatalf("normalizeCFdata out-of-range not clamped: %+v", f)
 	}
 }

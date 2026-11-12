@@ -197,7 +197,7 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 |---|---|---|
 | `CFNAT_ADDR` | `-addr` | `0.0.0.0:1234` |
 | `CFNAT_COLO` | `-colo` | 空 |
-| `CFNAT_DELAY` | `-delay` | `2000` |
+| `CFNAT_DELAY` | `-delay` | `300` |
 | `CFNAT_DOMAIN` | `-domain` | `cloudflaremirrors.com/debian` |
 | `CFNAT_FIXED_IPS` | `-fixed` | 空 |
 | `CFNAT_FALLBACK` | `-fallback`（兜底目标，仅拨号失败时尝试） | 空 |

@@ -87,6 +87,15 @@ func (a *app) handleActiveEndorse(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
+	// 先占扫描锁再拿换池锁，与踢人同模式：后台漏斗持 proxyScanMu 跑
+	// 几分钟、最后才拿 cfnatCtlMu 落池，池是开考前的快照；这里若只拿
+	// 换池锁，刚扶持的成员会在漏斗落池时被旧快照整批覆盖。锁序全局规范
+	// refresh → proxyScan → cfnatCtl。
+	if !a.proxyScanMu.TryLock() {
+		http.Error(w, "优选或补位正在运行，等它结束再扶持", http.StatusConflict)
+		return
+	}
+	defer a.proxyScanMu.Unlock()
 	// 锁序全局规范 refresh → proxyScan → cfnatCtl；只拿换池锁，等待而非拒绝。
 	if !lockTimeout(&a.cfnatCtlMu, 15*time.Second) {
 		http.Error(w, "换池操作正在运行，请稍后再试", http.StatusTooManyRequests)
@@ -129,15 +138,20 @@ func (a *app) handleActiveEndorse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 扶持即置顶：已在位但尚未置顶的成员，同样要提到 -fixed 最前。
+	// 新扶持的插到 Priority 最前（保持本次扶持的顺序），不是 append
+	// 到尾部——planFixedMembers 按 Priority 顺序排 -fixed，append
+	// 会让新扶持的落在已有置顶成员之后，与「置顶」矛盾。
 	wanted := append(append([]string(nil), parsed.IPs...), parsed.Domains...)
 	priority := append([]string(nil), current.Priority...)
 	promoted := 0
+	newly := make([]string, 0, len(wanted))
 	for _, member := range wanted {
 		if !containsString(priority, member) {
-			priority = append(priority, member)
+			newly = append(newly, member)
 			promoted++
 		}
 	}
+	priority = append(newly, priority...)
 	disabled := make([]string, 0, len(current.Disabled))
 	for _, member := range current.Disabled {
 		if !containsString(wanted, member) {

@@ -20,6 +20,13 @@ var (
 
 // fetchSubscriptionBody 拉取单个维护者订阅内容：HTTPS 同 host 跳转、≤512KiB。
 // 返回值附带 HTTP 状态码，供留痕使用——「404」和「超时」是两种完全不同的故障。
+// allowHTTPSRedirect 判定是否跟进重定向：只认同 host 且仍为 HTTPS。
+// 只比 host 的旧写法会放行同 host https→http：订阅 URL 里带 token
+// 查询串（及候选源内容）会被明文发出。
+func allowHTTPSRedirect(req *http.Request, base *url.URL) bool {
+	return req.URL.Scheme == "https" && strings.EqualFold(req.URL.Hostname(), base.Hostname())
+}
+
 func fetchSubscriptionBody(parent context.Context, converter, maintainer, token string) ([]byte, int, error) {
 	if converter == "" || maintainer == "" || token == "" {
 		return nil, 0, errors.New("订阅转换器、维护者或 token 为空")
@@ -36,7 +43,7 @@ func fetchSubscriptionBody(parent context.Context, converter, maintainer, token 
 	client := &http.Client{
 		Timeout: time.Duration(subFetchTimeout) * time.Second,
 		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			if !strings.EqualFold(req.URL.Hostname(), parsed.Hostname()) {
+			if !allowHTTPSRedirect(req, parsed) {
 				return http.ErrUseLastResponse
 			}
 			return nil
@@ -212,7 +219,12 @@ func (a *app) harvestSubscriptions(parent context.Context) (int, error) {
 		}
 		text := string(f.body)
 		extracted := 0
+		// 直接 IP 与域名解析共用同一 perMaintainer 上限：旧代码只在解析
+		// 分支计数，一个维护者塞几千个直连 IP 能一次灌满整个本子。
 		for _, ip := range extractPublicIPv4(text) {
+			if extracted >= perMaintainer {
+				break
+			}
 			if _, ok := sources[ip]; !ok {
 				sources[ip] = f.maintainer
 				extracted++
@@ -223,19 +235,17 @@ func (a *app) harvestSubscriptions(parent context.Context) (int, error) {
 		// 溯源按主机名逐个回填：哪个域名解析到哪个 IP，就记哪个域名。
 		// 旧写法把平坦结果配给每个域名，同一维护者的多个域名全记成第一个，
 		// 排障时看到的来源是错的——比没有来源更坏。
-		resolvedCount := 0
 		for i, host := range hosts {
-			if i >= len(byHost) || resolvedCount >= perMaintainer {
+			if i >= len(byHost) || extracted >= perMaintainer {
 				break
 			}
 			for _, ip := range byHost[i] {
-				if resolvedCount >= perMaintainer {
+				if extracted >= perMaintainer {
 					break
 				}
 				if _, ok := sources[ip]; !ok {
 					sources[ip] = f.maintainer
 					extracted++
-					resolvedCount++
 					if via[ip] == "" {
 						via[ip] = host
 					}
@@ -282,7 +292,9 @@ func (a *app) harvestSubscriptions(parent context.Context) (int, error) {
 // 考试分两段，不是二选一：
 //
 //	① WS 101 粗筛——便宜（并发 4、单条 2 秒），只剔「连门都敲不开」的，
-//	   这一层不判死，失败照样记但不算最终结论；
+//	   单次失败不判死，但失败照样记入连败：3 次连败照样降为 fail。
+//	   若 WS 失败永远不计数，连门都敲不开的条目就永远赖在本子里——
+//	   淘汰要求 State==fail 且连败≥6，WS 不计数它永远达不到。
 //	② sing-box 真实数据面——真正取回内容，这才是裁判。
 //
 // 为什么不能全省成 ②：实测成本差七倍以上（15 秒/条 vs 2 秒/条），
@@ -317,7 +329,9 @@ func (a *app) probeSubscriptions(parent context.Context) (int, error) {
 		a.subInv.LastProbeErr = ""
 		a.subInv.LastProbed = 0
 		a.subInv.LastPassed = 0
-		_ = a.saveSubscriptionInventoryLocked()
+		if saveErr := a.saveSubscriptionInventoryLocked(); saveErr != nil {
+			log.Printf("subscription inventory save failed: %v", saveErr)
+		}
 		a.subMu.Unlock()
 		return 0, nil
 	}
@@ -506,9 +520,4 @@ func (a *app) sweepSubscriptions(parent context.Context) {
 	}
 	// 本子是候选来源，考完立刻刷新聚合快照，避免下一轮自动换池读到旧输入。
 	go a.refreshAndApplyProxyPool(context.Background())
-}
-
-// loadSubscriptionPool 兼容旧入口：载入本子（含旧池迁移）。
-func (a *app) loadSubscriptionPool() {
-	a.loadSubscriptionInventory()
 }

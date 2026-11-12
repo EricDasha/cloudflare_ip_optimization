@@ -552,6 +552,10 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 	forwardDomains := a.fetchBestcfForwardDomains(ctx)
 	if len(forwardDomains) == 0 {
 		sourceErrors = append(sourceErrors, "BestCF 优选域名表: 本次未获取到域名")
+		// 与 IP 为空分支同一口径：只记 error，沿用旧快照的域名，不清空。
+		// 目前因静态表 bestcfExtraForwardDomains 恒有 2 条而不可达，
+		// 是静态表被改空时的防线。
+		forwardDomains = a.proxyCandidateSnapshot().ForwardDomains
 	}
 	seen := make(map[string]struct{})
 	ips := make([]string, 0, len(resolved))
@@ -709,6 +713,12 @@ func isPublicIPv4(ip net.IP) bool {
 	return ip != nil && ip.To4() != nil && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsUnspecified() && !ip.IsMulticast() && !ip.IsLinkLocalUnicast()
 }
 
+// isPublicIPv6 与 isPublicIPv4 同口径的公网 IPv6 判定：To4() != nil 的
+// IPv4 映射地址不算 IPv6（由 isPublicIPv4 覆盖）。
+func isPublicIPv6(ip net.IP) bool {
+	return ip != nil && ip.To4() == nil && ip.To16() != nil && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsUnspecified() && !ip.IsMulticast() && !ip.IsLinkLocalUnicast()
+}
+
 const maxCandidateSourceBody = 512 * 1024
 
 func extractPublicIPv4(text string) []string {
@@ -755,7 +765,7 @@ func fetchHTTPSBody(parent context.Context, rawURL string) ([]byte, error) {
 	client := &http.Client{
 		Timeout: 8 * time.Second,
 		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			if !strings.EqualFold(req.URL.Hostname(), target.Hostname()) {
+			if !allowHTTPSRedirect(req, target) {
 				return http.ErrUseLastResponse
 			}
 			return nil

@@ -1,0 +1,599 @@
+2026/11/11 17:21:15 subscription inventory loaded: 2043 entries
+2026/11/11 17:21:15 cloudflare-tools web listening on 0.0.0.0:8080, data dir=/data
+2026/11/11 17:21:20 GET /api/health 0s
+2026/11/11 17:21:23 proxy candidate refresh: 184 of 348 candidates are outside the official Cloudflare CIDRs (kept; real probe decides)
+2026/11/11 17:21:39 proxy candidate cache refreshed: 348 IPv4, next=2026-11-11T23:21:39Z
+2026/11/11 17:21:50 GET /api/health 0s
+2026/11/11 17:21:57 tier3 prescreen: 348 candidates -> 60 shortlist (rtt<=5000ms)
+2026/11/11 17:22:10 domain probe: no domain produced a speed sample this round (4 domains), failures not counted toward dead
+2026/11/11 17:22:10 domain gate: store.ubi.com 体检状态 unstable（连败 1），不进转发池
+2026/11/11 17:22:10 proxy active pool applied: 207.57.125.21,15.164.118.107,108.160.135.122,www.shopify.com
+2026/11/11 17:22:10 domain pool reconciled: 2 -> 1 domains (www.shopify.com)
+2026/11/11 17:22:20 GET /api/health 0s
+2026/11/11 17:22:36 GET /api/health 0s
+2026/11/11 17:22:50 GET /api/health 0s
+2026/11/11 17:23:18 GET /api/status 43ms
+2026/11/11 17:23:20 GET /api/health 0s
+2026/11/11 17:23:50 GET /api/health 0s
+2026/11/11 17:24:00 subscription probe: 39 candidates -> 23 ws-pass -> 7 real-pass (); inventory pass=1531 pending=33 fail=479
+2026/11/11 17:24:08 proxy candidate refresh: 184 of 348 candidates are outside the official Cloudflare CIDRs (kept; real probe decides)
+2026/11/11 17:24:15 cfdata background scan started: update=false args=[-auto -no-wait -update=false -iptype 4 -dc  -scan 100 -test 50 -port 443 -delay 500]
+2026/11/11 17:24:20 GET /api/health 0s
+2026/11/11 17:24:24 proxy candidate cache refreshed: 348 IPv4, next=2026-11-11T23:24:24Z
+2026/11/11 17:24:51 GET /api/health 0s
+2026/11/11 17:25:03 GET /api/cfnat/upstreams 8ms
+2026/11/11 17:25:03 GET /api/cfnat/proxy-candidates 15ms
+2026/11/11 17:25:03 GET /api/cfnat/connections 9ms
+2026/11/11 17:25:03 GET /api/status 98ms
+2026/11/11 17:25:05 GET /api/cfnat/proxy-candidates 4ms
+2026/11/11 17:25:05 GET /api/cfnat/upstreams 9ms
+2026/11/11 17:25:05 GET /api/cfnat/connections 7ms
+2026/11/11 17:25:05 GET /api/status 76ms
+2026/11/11 17:25:08 GET /api/status 91ms
+2026/11/11 17:25:09 GET /api/cfnat/upstreams 5ms
+2026/11/11 17:25:11 GET /api/status 94ms
+2026/11/11 17:25:13 GET /api/cfnat/upstreams 5ms
+2026/11/11 17:25:14 GET /api/cfnat/proxy-candidates 4ms
+2026/11/11 17:25:14 GET /api/status 91ms
+2026/11/11 17:25:17 GET /api/cfnat/connections 5ms
+2026/11/11 17:25:17 GET /api/cfnat/upstreams 8ms
+2026/11/11 17:25:17 GET /api/status 102ms
+2026/11/11 17:25:20 GET /api/status 94ms
+2026/11/11 17:25:21 GET /api/health 0s
+2026/11/11 17:25:21 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:25:23 GET /api/cfnat/proxy-candidates 3ms
+2026/11/11 17:25:23 GET /api/status 67ms
+2026/11/11 17:25:24 proxy auto apply skipped: another proxy scan still running after 60s
+2026/11/11 17:25:24 proxy auto apply skipped: 已有优选在运行（等待 60 秒未结束），请稍后再试
+2026/11/11 17:25:25 GET /api/cfnat/upstreams 5ms
+2026/11/11 17:25:26 GET /api/status 85ms
+2026/11/11 17:25:29 GET /api/cfnat/connections 5ms
+2026/11/11 17:25:29 GET /api/cfnat/upstreams 8ms
+2026/11/11 17:25:29 GET /api/status 79ms
+2026/11/11 17:25:32 GET /api/cfnat/proxy-candidates 5ms
+2026/11/11 17:25:32 GET /api/status 80ms
+2026/11/11 17:25:33 GET /api/cfnat/upstreams 6ms
+2026/11/11 17:25:35 GET /api/status 76ms
+2026/11/11 17:25:37 GET /api/cfnat/upstreams 5ms
+2026/11/11 17:25:38 GET /api/status 77ms
+2026/11/11 17:25:41 GET /api/cfnat/proxy-candidates 10ms
+2026/11/11 17:25:41 GET /api/cfnat/connections 12ms
+2026/11/11 17:25:41 GET /api/cfnat/upstreams 14ms
+2026/11/11 17:25:41 GET /api/status 86ms
+2026/11/11 17:25:44 GET /api/status 75ms
+2026/11/11 17:25:45 disabled bench: proxy scan busy, deferring 2 members
+2026/11/11 17:25:45 GET /api/cfnat/upstreams 5ms
+2026/11/11 17:25:47 GET /api/status 79ms
+2026/11/11 17:25:49 GET /api/cfnat/upstreams 5ms
+2026/11/11 17:25:50 GET /api/cfnat/proxy-candidates 4ms
+2026/11/11 17:25:50 GET /api/status 81ms
+2026/11/11 17:25:51 GET /api/health 0s
+2026/11/11 17:25:53 GET /api/cfnat/connections 4ms
+2026/11/11 17:25:53 GET /api/cfnat/upstreams 5ms
+2026/11/11 17:25:53 GET /api/status 76ms
+2026/11/11 17:25:56 GET /api/status 77ms
+2026/11/11 17:25:57 GET /api/cfnat/upstreams 5ms
+2026/11/11 17:25:59 GET /api/cfnat/proxy-candidates 5ms
+2026/11/11 17:25:59 GET /api/status 79ms
+2026/11/11 17:26:01 GET /api/cfnat/upstreams 5ms
+2026/11/11 17:26:02 GET /api/status 62ms
+2026/11/11 17:26:19 GET /api/cfnat/upstreams 6ms
+2026/11/11 17:26:19 GET /api/cfnat/proxy-candidates 8ms
+2026/11/11 17:26:19 GET /api/cfnat/connections 7ms
+2026/11/11 17:26:19 GET /api/status 83ms
+2026/11/11 17:26:21 GET /api/health 0s
+2026/11/11 17:26:51 GET /api/health 0s
+2026/11/11 17:27:08 domain gate: store.ubi.com 体检状态 unstable（连败 1），不进转发池
+2026/11/11 17:27:08 pool switch blocked by cooldown (24m49s ago < 30m0s): auto-apply
+2026/11/11 17:27:08 proxy auto apply skipped: 自动换池被换池闸拦截（cooldown），下轮放行约 2026-11-11T17:32:20Z；保留旧池
+2026/11/11 17:27:18 subscription harvest: 8 maintainers, 0 extracted (0 new, 0 refreshed), pruned 0, inventory=2043
+2026/11/11 17:27:18 subscription harvest failed: owo.o00o.ooo: Get "https://vlesdy.trojanjd.dpdns.org/sub?token=<REDACTED>&sub=owo.o00o.ooo": dial tcp 104.26.6.221:443: i/o timeout | sub.keaeye.icu: Get "https://vlesdy.trojanjd.dpdns.org/sub?token=<REDACTED>&sub=sub.keaeye.icu": dial tcp 104.26.6.221:443: i/o timeout | sub.mot.cloudns.biz: Get "https://vlesdy.trojanjd.dpdns.org/sub?token=<REDACTED>&sub=sub.mot.cloudns.biz": dial tcp 172.67.73.176:443: i/o timeout | sub.mia.xx.kg: Get "https://vlesdy.trojanjd.dpdns.org/sub?token=<REDACTED>&sub=sub.mia.xx.kg": dial tcp 172.67.73.176:443: i/o timeout | sub.lzjbaby.com: Get "https://vlesdy.trojanjd.dpdns.org/sub?token=<REDACTED>&sub=sub.lzjbaby.com": dial tcp 172.67.73.176:443: i/o timeout | sub.xdu.qzz.io: Get "https://vlesdy.trojanjd.dpdns.org/sub?token=<REDACTED>&sub=sub.xdu.qzz.io": dial tcp 172.67.73.176:443: i/o timeout | zrf.zrf.me: Get "https://vlesdy.trojanjd.dpdns.org/sub?token=<REDACTED>&sub=zrf.zrf.me": dial tcp 172.67.73.176:443: i/o timeout | sub.danfeng.eu.org: Get "https://vlesdy.trojanjd.dpdns.org/sub?token=<REDACTED>&sub=sub.danfeng.eu.org": dial tcp 172.67.73.176:443: i/o timeout
+2026/11/11 17:27:19 GET /api/cfnat/upstreams 5ms
+2026/11/11 17:27:19 GET /api/cfnat/connections 4ms
+2026/11/11 17:27:19 GET /api/cfnat/proxy-candidates 6ms
+2026/11/11 17:27:19 GET /api/status 86ms
+2026/11/11 17:27:21 GET /api/health 0s
+2026/11/11 17:27:51 GET /api/health 0s
+2026/11/11 17:27:56 proxy candidate refresh: 335 of 992 candidates are outside the official Cloudflare CIDRs (kept; real probe decides)
+2026/11/11 17:27:58 proxy candidate cache refreshed: 992 IPv4, next=2026-11-11T23:27:58Z
+2026/11/11 17:28:19 GET /api/cfnat/proxy-candidates 13ms
+2026/11/11 17:28:19 GET /api/cfnat/connections 39ms
+2026/11/11 17:28:19 GET /api/cfnat/upstreams 48ms
+2026/11/11 17:28:19 GET /api/status 106ms
+2026/11/11 17:28:21 GET /api/health 0s
+2026/11/11 17:28:52 GET /api/health 0s
+2026/11/11 17:28:55 tier3 prescreen: 992 candidates -> 60 shortlist (rtt<=5000ms)
+2026/11/11 17:29:19 GET /api/cfnat/proxy-candidates 19ms
+2026/11/11 17:29:19 GET /api/cfnat/upstreams 23ms
+2026/11/11 17:29:19 GET /api/cfnat/connections 21ms
+2026/11/11 17:29:19 GET /api/status 101ms
+2026/11/11 17:29:22 GET /api/health 0s
+2026/11/11 17:29:52 GET /api/health 0s
+2026/11/11 17:30:09 disabled bench: replacement scan busy, keeping 1 weak members
+2026/11/11 17:30:22 GET /api/health 0s
+2026/11/11 17:30:52 GET /api/health 0s
+2026/11/11 17:31:22 GET /api/health 0s
+2026/11/11 17:31:41 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:31:41 GET /api/cfnat/connections 1ms
+2026/11/11 17:31:41 GET /api/cfnat/proxy-candidates 7ms
+2026/11/11 17:31:41 GET /api/status 117ms
+2026/11/11 17:31:44 GET /api/status 83ms
+2026/11/11 17:31:45 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:31:47 GET /api/status 87ms
+2026/11/11 17:31:49 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:31:50 GET /api/cfnat/proxy-candidates 7ms
+2026/11/11 17:31:50 GET /api/status 91ms
+2026/11/11 17:31:52 GET /api/health 0s
+2026/11/11 17:31:53 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:31:53 GET /api/cfnat/connections 3ms
+2026/11/11 17:31:53 GET /api/status 88ms
+2026/11/11 17:31:56 GET /api/status 88ms
+2026/11/11 17:31:57 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:31:59 GET /api/cfnat/proxy-candidates 12ms
+2026/11/11 17:31:59 GET /api/status 91ms
+2026/11/11 17:32:01 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:32:02 GET /api/status 74ms
+2026/11/11 17:32:05 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:32:05 GET /api/cfnat/connections 3ms
+2026/11/11 17:32:05 GET /api/status 79ms
+2026/11/11 17:32:08 GET /api/cfnat/proxy-candidates 13ms
+2026/11/11 17:32:08 GET /api/status 79ms
+2026/11/11 17:32:09 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:32:11 GET /api/status 72ms
+2026/11/11 17:32:13 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:32:14 GET /api/status 78ms
+2026/11/11 17:32:17 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:32:17 GET /api/cfnat/connections 3ms
+2026/11/11 17:32:17 GET /api/cfnat/proxy-candidates 10ms
+2026/11/11 17:32:17 GET /api/status 75ms
+2026/11/11 17:32:20 GET /api/status 77ms
+2026/11/11 17:32:21 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:32:22 GET /api/health 0s
+2026/11/11 17:32:23 GET /api/status 77ms
+2026/11/11 17:32:25 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:32:26 GET /api/cfnat/proxy-candidates 7ms
+2026/11/11 17:32:26 GET /api/status 77ms
+2026/11/11 17:32:29 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:32:29 GET /api/cfnat/connections 3ms
+2026/11/11 17:32:29 GET /api/status 80ms
+2026/11/11 17:32:32 GET /api/status 84ms
+2026/11/11 17:32:33 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:32:35 GET /api/cfnat/proxy-candidates 11ms
+2026/11/11 17:32:35 GET /api/status 82ms
+2026/11/11 17:32:37 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:32:38 GET /api/status 85ms
+2026/11/11 17:32:41 GET /api/cfnat/connections 3ms
+2026/11/11 17:32:41 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:32:41 GET /api/status 78ms
+2026/11/11 17:32:48 proxy pool DEGRADED: VLESS 终审仅 1 个通过，低于最小池 3；已降级采用 2 个 WS 已通过但 VLESS 未验的候选
+2026/11/11 17:32:48 domain gate: store.ubi.com 体检状态 unstable（连败 1），不进转发池
+2026/11/11 17:32:48 pool switch blocked: active pool healthy, keep working IPs (auto-apply)
+2026/11/11 17:32:48 proxy auto apply skipped: 自动换池被换池闸拦截（healthy）；保留旧池
+2026/11/11 17:32:48 post-cfdata candidate refresh done: ok=true
+2026/11/11 17:32:52 GET /api/health 0s
+2026/11/11 17:33:19 GET /api/cfnat/upstreams 5ms
+2026/11/11 17:33:19 GET /api/cfnat/connections 3ms
+2026/11/11 17:33:19 GET /api/cfnat/proxy-candidates 12ms
+2026/11/11 17:33:19 GET /api/status 83ms
+2026/11/11 17:33:23 GET /api/health 0s
+2026/11/11 17:33:53 GET /api/health 0s
+2026/11/11 17:34:19 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:34:19 GET /api/cfnat/connections 3ms
+2026/11/11 17:34:19 GET /api/cfnat/proxy-candidates 8ms
+2026/11/11 17:34:19 GET /api/status 87ms
+2026/11/11 17:34:23 GET /api/health 0s
+2026/11/11 17:34:44 subscription probe: 21 candidates -> 8 ws-pass -> 3 real-pass (); inventory pass=1530 pending=33 fail=480
+2026/11/11 17:34:52 proxy candidate refresh: 185 of 550 candidates are outside the official Cloudflare CIDRs (kept; real probe decides)
+2026/11/11 17:34:53 GET /api/health 0s
+2026/11/11 17:35:08 proxy candidate cache refreshed: 550 IPv4, next=2026-11-11T23:35:08Z
+2026/11/11 17:35:19 GET /api/cfnat/upstreams 7ms
+2026/11/11 17:35:19 GET /api/cfnat/proxy-candidates 6ms
+2026/11/11 17:35:19 GET /api/cfnat/connections 8ms
+2026/11/11 17:35:19 GET /api/status 96ms
+2026/11/11 17:35:23 GET /api/health 0s
+2026/11/11 17:35:34 tier3 prescreen: 550 candidates -> 60 shortlist (rtt<=5000ms)
+2026/11/11 17:35:53 GET /api/health 0s
+2026/11/11 17:36:16 GET /api/cfnat/status 0s
+2026/11/11 17:36:19 GET /api/cfnat/upstreams 6ms
+2026/11/11 17:36:19 GET /api/cfnat/proxy-candidates 7ms
+2026/11/11 17:36:19 GET /api/cfnat/connections 6ms
+2026/11/11 17:36:19 GET /api/status 98ms
+2026/11/11 17:36:23 GET /api/health 0s
+2026/11/11 17:36:53 GET /api/health 0s
+2026/11/11 17:37:24 GET /api/health 0s
+2026/11/11 17:37:54 GET /api/health 0s
+2026/11/11 17:38:11 GET /api/health 0s
+2026/11/11 17:38:12 GET /api/status 47ms
+2026/11/11 17:38:19 GET /api/health 0s
+2026/11/11 17:38:19 GET /api/status 53ms
+2026/11/11 17:38:24 GET /api/health 0s
+2026/11/11 17:38:35 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:38:35 GET /api/cfnat/connections 3ms
+2026/11/11 17:38:35 GET /api/cfnat/proxy-candidates 3ms
+2026/11/11 17:38:35 GET /api/status 77ms
+2026/11/11 17:38:37 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:38:38 GET /api/status 84ms
+2026/11/11 17:38:41 GET /api/cfnat/upstreams 5ms
+2026/11/11 17:38:41 GET /api/cfnat/connections 4ms
+2026/11/11 17:38:41 GET /api/status 89ms
+2026/11/11 17:38:44 GET /api/cfnat/proxy-candidates 7ms
+2026/11/11 17:38:44 GET /api/status 85ms
+2026/11/11 17:38:45 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:38:47 GET /api/status 73ms
+2026/11/11 17:38:49 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:38:50 GET /api/status 86ms
+2026/11/11 17:38:53 GET /api/cfnat/upstreams 4ms
+2026/11/11 17:38:53 GET /api/cfnat/connections 3ms
+2026/11/11 17:38:53 GET /api/cfnat/proxy-candidates 12ms
+2026/11/11 17:38:53 GET /api/status 94ms
+2026/11/11 17:38:54 GET /api/health 0s
+2026/11/11 17:38:56 GET /api/status 84ms
+2026/11/11 17:38:57 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:38:59 GET /api/status 92ms
+2026/11/11 17:39:01 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:39:02 GET /api/cfnat/proxy-candidates 7ms
+2026/11/11 17:39:02 GET /api/status 92ms
+2026/11/11 17:39:05 GET /api/cfnat/upstreams 4ms
+2026/11/11 17:39:05 GET /api/cfnat/connections 7ms
+2026/11/11 17:39:05 GET /api/status 93ms
+2026/11/11 17:39:08 GET /api/status 83ms
+2026/11/11 17:39:09 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:39:11 GET /api/cfnat/proxy-candidates 10ms
+2026/11/11 17:39:11 GET /api/status 89ms
+2026/11/11 17:39:13 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:39:14 GET /api/status 78ms
+2026/11/11 17:39:17 GET /api/cfnat/connections 2ms
+2026/11/11 17:39:17 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:39:17 GET /api/status 59ms
+2026/11/11 17:39:20 GET /api/cfnat/proxy-candidates 5ms
+2026/11/11 17:39:20 GET /api/status 70ms
+2026/11/11 17:39:20 GET /api/status 45ms
+2026/11/11 17:39:21 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:39:23 GET /api/status 69ms
+2026/11/11 17:39:24 GET /api/health 0s
+2026/11/11 17:39:25 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:39:25 domain gate: store.ubi.com 体检状态 unstable（连败 1），不进转发池
+2026/11/11 17:39:25 pool switch blocked: active pool healthy, keep working IPs (auto-apply)
+2026/11/11 17:39:25 proxy auto apply skipped: 自动换池被换池闸拦截（healthy）；保留旧池
+2026/11/11 17:39:26 GET /api/status 69ms
+2026/11/11 17:39:29 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:39:29 GET /api/cfnat/connections 3ms
+2026/11/11 17:39:29 GET /api/cfnat/proxy-candidates 5ms
+2026/11/11 17:39:29 GET /api/status 72ms
+2026/11/11 17:39:32 GET /api/status 66ms
+2026/11/11 17:39:33 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:39:35 GET /api/status 64ms
+2026/11/11 17:39:49 GET /api/status 31ms
+2026/11/11 17:39:54 GET /api/health 0s
+2026/11/11 17:40:19 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:40:19 GET /api/cfnat/connections 3ms
+2026/11/11 17:40:19 GET /api/cfnat/proxy-candidates 5ms
+2026/11/11 17:40:19 GET /api/status 94ms
+2026/11/11 17:40:24 GET /api/health 0s
+2026/11/11 17:40:54 GET /api/health 0s
+2026/11/11 17:41:09 GET /api/status 53ms
+2026/11/11 17:41:19 GET /api/cfnat/upstreams 2ms
+2026/11/11 17:41:19 GET /api/cfnat/connections 2ms
+2026/11/11 17:41:19 GET /api/cfnat/proxy-candidates 7ms
+2026/11/11 17:41:19 GET /api/status 88ms
+2026/11/11 17:41:25 GET /api/health 0s
+2026/11/11 17:41:55 GET /api/health 0s
+2026/11/11 17:42:19 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:42:19 GET /api/cfnat/connections 3ms
+2026/11/11 17:42:19 GET /api/cfnat/proxy-candidates 6ms
+2026/11/11 17:42:19 GET /api/status 85ms
+2026/11/11 17:42:25 GET /api/health 0s
+2026/11/11 17:42:55 GET /api/health 0s
+2026/11/11 17:43:19 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:43:19 GET /api/cfnat/proxy-candidates 6ms
+2026/11/11 17:43:19 GET /api/cfnat/connections 4ms
+2026/11/11 17:43:19 GET /api/status 76ms
+2026/11/11 17:43:25 GET /api/health 0s
+2026/11/11 17:43:55 GET /api/health 0s
+2026/11/11 17:44:25 GET /api/health 0s
+2026/11/11 17:44:55 GET /api/health 0s
+2026/11/11 17:45:25 GET /api/health 0s
+2026/11/11 17:45:28 subscription probe: 82 candidates -> 24 ws-pass -> 24 real-pass (); inventory pass=1530 pending=17 fail=496
+2026/11/11 17:45:31 proxy candidate refresh: 338 of 992 candidates are outside the official Cloudflare CIDRs (kept; real probe decides)
+2026/11/11 17:45:31 proxy candidate cache refreshed: 992 IPv4, next=2026-11-11T23:45:31Z
+2026/11/11 17:45:56 GET /api/health 0s
+2026/11/11 17:45:57 GET /api/cfnat/upstreams 21ms
+2026/11/11 17:45:57 GET /api/cfnat/proxy-candidates 17ms
+2026/11/11 17:45:57 GET /api/cfnat/connections 18ms
+2026/11/11 17:45:57 GET /api/status 92ms
+2026/11/11 17:45:58 GET /api/status 85ms
+2026/11/11 17:46:01 GET /api/cfnat/upstreams 13ms
+2026/11/11 17:46:02 GET /api/status 74ms
+2026/11/11 17:46:05 GET /api/cfnat/proxy-candidates 12ms
+2026/11/11 17:46:05 GET /api/cfnat/connections 11ms
+2026/11/11 17:46:05 GET /api/cfnat/upstreams 18ms
+2026/11/11 17:46:05 GET /api/status 69ms
+2026/11/11 17:46:08 GET /api/status 66ms
+2026/11/11 17:46:09 GET /api/cfnat/upstreams 11ms
+2026/11/11 17:46:10 tier3 prescreen: 992 candidates -> 60 shortlist (rtt<=5000ms)
+2026/11/11 17:46:11 GET /api/status 71ms
+2026/11/11 17:46:13 GET /api/cfnat/upstreams 10ms
+2026/11/11 17:46:14 GET /api/cfnat/proxy-candidates 17ms
+2026/11/11 17:46:14 GET /api/status 95ms
+2026/11/11 17:46:17 GET /api/cfnat/connections 8ms
+2026/11/11 17:46:17 GET /api/cfnat/upstreams 11ms
+2026/11/11 17:46:17 GET /api/status 78ms
+2026/11/11 17:46:20 GET /api/status 78ms
+2026/11/11 17:46:21 GET /api/cfnat/upstreams 10ms
+2026/11/11 17:46:23 GET /api/cfnat/proxy-candidates 10ms
+2026/11/11 17:46:23 GET /api/status 83ms
+2026/11/11 17:46:25 GET /api/cfnat/upstreams 16ms
+2026/11/11 17:46:26 GET /api/health 0s
+2026/11/11 17:46:26 GET /api/status 81ms
+2026/11/11 17:46:29 GET /api/cfnat/connections 7ms
+2026/11/11 17:46:29 GET /api/cfnat/upstreams 11ms
+2026/11/11 17:46:29 GET /api/status 79ms
+2026/11/11 17:46:32 GET /api/cfnat/proxy-candidates 7ms
+2026/11/11 17:46:32 GET /api/status 78ms
+2026/11/11 17:46:33 GET /api/cfnat/upstreams 13ms
+2026/11/11 17:46:35 GET /api/status 80ms
+2026/11/11 17:46:37 GET /api/cfnat/upstreams 8ms
+2026/11/11 17:46:38 GET /api/status 79ms
+2026/11/11 17:46:41 GET /api/cfnat/proxy-candidates 7ms
+2026/11/11 17:46:41 GET /api/cfnat/upstreams 10ms
+2026/11/11 17:46:41 GET /api/cfnat/connections 12ms
+2026/11/11 17:46:41 GET /api/status 86ms
+2026/11/11 17:46:44 GET /api/status 79ms
+2026/11/11 17:46:45 GET /api/cfnat/upstreams 9ms
+2026/11/11 17:46:47 GET /api/status 80ms
+2026/11/11 17:46:49 GET /api/cfnat/upstreams 7ms
+2026/11/11 17:46:49 disabled bench: replacement scan busy, keeping 2 weak members
+2026/11/11 17:46:50 GET /api/cfnat/proxy-candidates 10ms
+2026/11/11 17:46:50 GET /api/status 81ms
+2026/11/11 17:46:53 GET /api/cfnat/connections 5ms
+2026/11/11 17:46:53 GET /api/cfnat/upstreams 8ms
+2026/11/11 17:46:53 GET /api/status 61ms
+2026/11/11 17:46:56 GET /api/health 0s
+2026/11/11 17:46:56 GET /api/status 52ms
+2026/11/11 17:46:57 GET /api/cfnat/upstreams 6ms
+2026/11/11 17:47:19 GET /api/cfnat/connections 3ms
+2026/11/11 17:47:19 GET /api/cfnat/proxy-candidates 7ms
+2026/11/11 17:47:19 GET /api/cfnat/upstreams 7ms
+2026/11/11 17:47:19 GET /api/status 65ms
+2026/11/11 17:47:26 GET /api/health 0s
+2026/11/11 17:47:56 GET /api/health 0s
+2026/11/11 17:48:19 GET /api/cfnat/upstreams 5ms
+2026/11/11 17:48:19 GET /api/cfnat/connections 4ms
+2026/11/11 17:48:19 GET /api/cfnat/proxy-candidates 8ms
+2026/11/11 17:48:19 GET /api/status 73ms
+2026/11/11 17:48:26 GET /api/health 0s
+2026/11/11 17:48:56 GET /api/health 0s
+2026/11/11 17:49:19 GET /api/cfnat/upstreams 4ms
+2026/11/11 17:49:19 GET /api/cfnat/connections 3ms
+2026/11/11 17:49:19 GET /api/cfnat/proxy-candidates 9ms
+2026/11/11 17:49:19 GET /api/status 82ms
+2026/11/11 17:49:26 GET /api/health 0s
+2026/11/11 17:49:57 GET /api/health 0s
+2026/11/11 17:50:19 GET /api/cfnat/upstreams 3ms
+2026/11/11 17:50:19 GET /api/cfnat/connections 3ms
+2026/11/11 17:50:19 GET /api/cfnat/proxy-candidates 7ms
+2026/11/11 17:50:19 GET /api/status 93ms
+2026/11/11 17:50:27 GET /api/health 0s
+2026/11/11 17:50:57 GET /api/health 0s
+2026/11/11 17:51:13 domain gate: store.ubi.com 体检状态 unstable（连败 1），不进转发池
+2026/11/11 17:51:13 pool switch blocked: active pool healthy, keep working IPs (auto-apply)
+2026/11/11 17:51:13 proxy auto apply skipped: 自动换池被换池闸拦截（healthy）；保留旧池
+2026/11/11 17:51:27 GET /api/health 0s
+2026/11/11 17:51:57 GET /api/health 0s
+2026/11/11 17:52:27 GET /api/health 0s
+2026/11/11 17:52:57 GET /api/health 0s
+2026/11/11 17:52:58 domain probe: no domain produced a speed sample this round (30 domains), failures not counted toward dead
+2026/11/11 17:52:58 domain gate: store.ubi.com 体检状态 unstable（连败 1），不进转发池
+2026/11/11 17:52:59 proxy active pool applied: 207.57.125.21,15.164.118.107,108.160.135.122,cmcc.vvvv.ee,www.oopt.eu.cc,cf.xreak.top,cfsaas.080112.xyz,cdn.aneko.ink,www.5h.com,yg8.ygkkk.dpdns.org,www.aneko.ink,cf.legspcpd.top,cf-cname.xingpingcn.top,www.shopify.com,serviceshub.samsclub.com,www.allianz.com,www.decathlon.com,www.asda.com,cookiebot.com,bluehost.com,nexusmods.com,glassdoor.com,www.jimdo.com,openai.com,www.sage.com,www.speedtest.net,investor.apple.com,markmonitor.com,store.epicgames.com,mycareer.verizon.com,onetrust.com,www.affirm.com
+2026/11/11 17:52:59 domain pool reconciled: 1 -> 29 domains (cmcc.vvvv.ee,www.oopt.eu.cc,cf.xreak.top,cfsaas.080112.xyz,cdn.aneko.ink,www.5h.com,yg8.ygkkk.dpdns.org,www.aneko.ink,cf.legspcpd.top,cf-cname.xingpingcn.top,www.shopify.com,serviceshub.samsclub.com,www.allianz.com,www.decathlon.com,www.asda.com,cookiebot.com,bluehost.com,nexusmods.com,glassdoor.com,www.jimdo.com,openai.com,www.sage.com,www.speedtest.net,investor.apple.com,markmonitor.com,store.epicgames.com,mycareer.verizon.com,onetrust.com,www.affirm.com)
+2026/11/11 17:53:27 GET /api/health 0s
+2026/11/11 17:53:58 GET /api/health 0s
+2026/11/11 17:54:28 GET /api/health 0s
+2026/11/11 17:54:58 GET /api/health 0s
+2026/11/11 17:55:28 GET /api/health 0s
+2026/11/11 17:55:58 GET /api/health 0s
+2026/11/11 17:56:28 GET /api/health 0s
+2026/11/11 17:56:36 subscription probe: 62 candidates -> 54 ws-pass -> 54 real-pass (); inventory pass=1530 pending=17 fail=496
+2026/11/11 17:56:38 proxy candidate refresh: 338 of 992 candidates are outside the official Cloudflare CIDRs (kept; real probe decides)
+2026/11/11 17:56:38 proxy candidate cache refreshed: 992 IPv4, next=2026-11-11T23:56:38Z
+2026/11/11 17:56:58 GET /api/health 0s
+2026/11/11 17:57:10 tier3 prescreen: 992 candidates -> 60 shortlist (rtt<=5000ms)
+2026/11/11 17:57:28 GET /api/health 0s
+2026/11/11 17:57:59 GET /api/health 0s
+2026/11/11 17:58:29 GET /api/health 0s
+2026/11/11 17:58:59 GET /api/health 0s
+2026/11/11 17:59:29 GET /api/health 0s
+2026/11/11 17:59:59 GET /api/health 0s
+2026/11/11 18:00:01 GET /api/health 0s
+2026/11/11 18:00:01 GET /api/status 34ms
+2026/11/11 18:00:29 GET /api/health 0s
+2026/11/11 18:00:37 proxy pool DEGRADED: VLESS 终审仅 1 个通过，低于最小池 3；已降级采用 2 个 WS 已通过但 VLESS 未验的候选
+2026/11/11 18:00:37 domain gate: store.ubi.com 体检状态 unstable（连败 1），不进转发池
+2026/11/11 18:00:37 pool switch blocked: active pool healthy, keep working IPs (auto-apply)
+2026/11/11 18:00:37 proxy auto apply skipped: 自动换池被换池闸拦截（healthy）；保留旧池
+2026/11/11 18:00:59 GET /api/health 0s
+2026/11/11 18:01:29 GET /api/health 0s
+2026/11/11 18:01:59 GET /api/health 0s
+2026/11/11 18:02:30 GET /api/health 0s
+2026/11/11 18:03:00 GET /api/health 0s
+2026/11/11 18:03:30 GET /api/health 0s
+2026/11/11 18:03:37 proxy active pool applied: 207.57.125.21,15.164.118.107,108.160.135.122,cmcc.vvvv.ee,www.oopt.eu.cc,cf.xreak.top,cfsaas.080112.xyz,cdn.aneko.ink,www.5h.com,yg8.ygkkk.dpdns.org,www.aneko.ink,cf-cname.xingpingcn.top,www.shopify.com,serviceshub.samsclub.com,www.allianz.com,www.decathlon.com,www.asda.com,cookiebot.com,bluehost.com,nexusmods.com,glassdoor.com,www.jimdo.com,openai.com,www.sage.com,www.speedtest.net,investor.apple.com,markmonitor.com,store.epicgames.com,mycareer.verizon.com,onetrust.com,www.affirm.com
+2026/11/11 18:03:37 throne probe reaped [cf.legspcpd.top] (swapped [], held []): 5 IPs + 28 domains remain
+2026/11/11 18:04:00 GET /api/health 0s
+2026/11/11 18:04:30 GET /api/health 0s
+2026/11/11 18:05:00 GET /api/health 0s
+2026/11/11 18:05:05 GET /api/status 44ms
+2026/11/11 18:05:30 GET /api/health 0s
+2026/11/11 18:06:00 GET /api/health 0s
+2026/11/11 18:06:31 GET /api/health 0s
+2026/11/11 18:07:01 GET /api/health 0s
+2026/11/11 18:07:31 GET /api/health 0s
+2026/11/11 18:07:50 subscription probe: 106 candidates -> 54 ws-pass -> 53 real-pass (); inventory pass=1530 pending=17 fail=496
+2026/11/11 18:07:58 proxy candidate refresh: 399 of 992 candidates are outside the official Cloudflare CIDRs (kept; real probe decides)
+2026/11/11 18:07:58 proxy candidate cache refreshed: 992 IPv4, next=2026-11-12T00:07:58Z
+2026/11/11 18:08:01 GET /api/health 0s
+2026/11/11 18:08:31 GET /api/health 0s
+2026/11/11 18:09:01 GET /api/health 0s
+2026/11/11 18:09:06 tier3 prescreen: 992 candidates -> 60 shortlist (rtt<=5000ms)
+2026/11/11 18:09:31 GET /api/health 0s
+2026/11/11 18:09:42 GET /api/cfnat/upstreams 9ms
+2026/11/11 18:09:42 GET /api/cfnat/connections 7ms
+2026/11/11 18:09:42 GET /api/cfnat/proxy-candidates 10ms
+2026/11/11 18:09:42 GET /api/status 119ms
+2026/11/11 18:09:43 GET /api/status 93ms
+2026/11/11 18:09:44 GET /api/cfnat/upstreams 9ms
+2026/11/11 18:09:46 GET /api/cfnat/proxy-candidates 7ms
+2026/11/11 18:09:46 GET /api/status 105ms
+2026/11/11 18:09:49 GET /api/cfnat/upstreams 7ms
+2026/11/11 18:09:50 GET /api/status 106ms
+2026/11/11 18:09:53 GET /api/cfnat/connections 4ms
+2026/11/11 18:09:53 GET /api/cfnat/upstreams 6ms
+2026/11/11 18:09:53 GET /api/status 86ms
+2026/11/11 18:09:56 GET /api/cfnat/proxy-candidates 8ms
+2026/11/11 18:09:56 GET /api/status 107ms
+2026/11/11 18:09:57 GET /api/cfnat/upstreams 7ms
+2026/11/11 18:09:59 GET /api/status 102ms
+2026/11/11 18:10:01 GET /api/cfnat/upstreams 7ms
+2026/11/11 18:10:01 GET /api/health 0s
+2026/11/11 18:10:02 GET /api/status 104ms
+2026/11/11 18:10:05 GET /api/cfnat/upstreams 7ms
+2026/11/11 18:10:05 GET /api/cfnat/connections 6ms
+2026/11/11 18:10:05 GET /api/cfnat/proxy-candidates 9ms
+2026/11/11 18:10:05 GET /api/status 110ms
+2026/11/11 18:10:08 GET /api/status 101ms
+2026/11/11 18:10:09 GET /api/cfnat/upstreams 7ms
+2026/11/11 18:10:11 GET /api/status 91ms
+2026/11/11 18:10:13 GET /api/cfnat/upstreams 7ms
+2026/11/11 18:10:14 GET /api/cfnat/proxy-candidates 11ms
+2026/11/11 18:10:14 GET /api/status 84ms
+2026/11/11 18:10:17 GET /api/cfnat/connections 4ms
+2026/11/11 18:10:17 GET /api/cfnat/upstreams 7ms
+2026/11/11 18:10:17 GET /api/status 94ms
+2026/11/11 18:10:20 GET /api/status 94ms
+2026/11/11 18:10:21 GET /api/cfnat/upstreams 6ms
+2026/11/11 18:10:23 GET /api/cfnat/proxy-candidates 8ms
+2026/11/11 18:10:23 GET /api/status 91ms
+2026/11/11 18:10:25 GET /api/cfnat/upstreams 6ms
+2026/11/11 18:10:26 GET /api/status 87ms
+2026/11/11 18:10:29 GET /api/cfnat/connections 4ms
+2026/11/11 18:10:29 GET /api/cfnat/upstreams 6ms
+2026/11/11 18:10:29 GET /api/status 92ms
+2026/11/11 18:10:32 GET /api/health 0s
+2026/11/11 18:10:32 GET /api/cfnat/proxy-candidates 6ms
+2026/11/11 18:10:32 GET /api/status 81ms
+2026/11/11 18:10:33 GET /api/cfnat/upstreams 6ms
+2026/11/11 18:10:35 GET /api/status 89ms
+2026/11/11 18:10:37 GET /api/cfnat/upstreams 6ms
+2026/11/11 18:10:38 GET /api/status 100ms
+2026/11/11 18:10:41 GET /api/cfnat/proxy-candidates 6ms
+2026/11/11 18:10:41 GET /api/cfnat/connections 7ms
+2026/11/11 18:10:41 GET /api/cfnat/upstreams 8ms
+2026/11/11 18:10:41 GET /api/status 88ms
+2026/11/11 18:10:44 GET /api/status 97ms
+2026/11/11 18:10:45 GET /api/cfnat/upstreams 6ms
+2026/11/11 18:10:47 GET /api/status 94ms
+2026/11/11 18:11:02 GET /api/health 0s
+2026/11/11 18:11:19 GET /api/cfnat/connections 5ms
+2026/11/11 18:11:19 GET /api/cfnat/upstreams 10ms
+2026/11/11 18:11:19 GET /api/cfnat/proxy-candidates 13ms
+2026/11/11 18:11:19 GET /api/status 107ms
+2026/11/11 18:11:32 GET /api/health 0s
+2026/11/11 18:12:02 GET /api/health 0s
+2026/11/11 18:12:19 GET /api/cfnat/upstreams 5ms
+2026/11/11 18:12:19 GET /api/cfnat/connections 4ms
+2026/11/11 18:12:19 GET /api/cfnat/proxy-candidates 17ms
+2026/11/11 18:12:19 GET /api/status 102ms
+2026/11/11 18:12:32 GET /api/health 0s
+2026/11/11 18:13:02 GET /api/health 0s
+2026/11/11 18:13:19 GET /api/cfnat/connections 9ms
+2026/11/11 18:13:19 GET /api/cfnat/upstreams 12ms
+2026/11/11 18:13:19 GET /api/cfnat/proxy-candidates 14ms
+2026/11/11 18:13:19 GET /api/status 96ms
+2026/11/11 18:13:32 GET /api/health 0s
+2026/11/11 18:13:55 domain pool: cf.legspcpd.top 在观察期内，不进自动候选
+2026/11/11 18:13:55 domain gate: store.ubi.com 体检状态 unstable（连败 1），不进转发池
+2026/11/11 18:13:55 proxy active pool applied: 207.57.123.31,47.244.225.39,207.57.121.243,123.111.169.70,cmcc.vvvv.ee,www.oopt.eu.cc,cf.xreak.top,cfsaas.080112.xyz,cdn.aneko.ink,www.5h.com,yg8.ygkkk.dpdns.org,www.aneko.ink,cf-cname.xingpingcn.top,www.shopify.com,serviceshub.samsclub.com,www.allianz.com,www.decathlon.com,www.asda.com,cookiebot.com,bluehost.com,nexusmods.com,glassdoor.com,www.jimdo.com,openai.com,www.sage.com,www.speedtest.net,investor.apple.com,markmonitor.com,store.epicgames.com,mycareer.verizon.com,onetrust.com,www.affirm.com
+2026/11/11 18:14:02 GET /api/health 0s
+2026/11/11 18:14:19 GET /api/cfnat/upstreams 6ms
+2026/11/11 18:14:19 GET /api/cfnat/connections 4ms
+2026/11/11 18:14:19 GET /api/cfnat/proxy-candidates 13ms
+2026/11/11 18:14:19 GET /api/status 106ms
+2026/11/11 18:14:33 GET /api/health 0s
+2026/11/11 18:15:03 GET /api/health 0s
+2026/11/11 18:15:11 GET /api/status 34ms
+2026/11/11 18:15:19 GET /api/cfnat/upstreams 3ms
+2026/11/11 18:15:19 GET /api/cfnat/connections 4ms
+2026/11/11 18:15:19 GET /api/cfnat/proxy-candidates 13ms
+2026/11/11 18:15:19 GET /api/status 80ms
+2026/11/11 18:15:33 GET /api/health 0s
+2026/11/11 18:16:03 GET /api/health 0s
+2026/11/11 18:16:19 GET /api/cfnat/upstreams 2ms
+2026/11/11 18:16:19 GET /api/cfnat/connections 3ms
+2026/11/11 18:16:19 GET /api/cfnat/proxy-candidates 17ms
+2026/11/11 18:16:19 GET /api/status 85ms
+2026/11/11 18:16:33 GET /api/health 0s
+2026/11/11 18:17:03 GET /api/health 0s
+2026/11/11 18:17:19 GET /api/cfnat/upstreams 4ms
+2026/11/11 18:17:19 GET /api/cfnat/connections 5ms
+2026/11/11 18:17:19 GET /api/cfnat/proxy-candidates 16ms
+2026/11/11 18:17:19 GET /api/status 89ms
+2026/11/11 18:17:33 GET /api/health 0s
+2026/11/11 18:18:03 GET /api/health 0s
+2026/11/11 18:18:19 GET /api/cfnat/upstreams 7ms
+2026/11/11 18:18:19 GET /api/cfnat/connections 10ms
+2026/11/11 18:18:19 GET /api/cfnat/proxy-candidates 17ms
+2026/11/11 18:18:19 GET /api/status 89ms
+2026/11/11 18:18:26 subscription probe: 35 candidates -> 31 ws-pass -> 31 real-pass (); inventory pass=1530 pending=17 fail=496
+2026/11/11 18:18:27 proxy candidate refresh: 335 of 992 candidates are outside the official Cloudflare CIDRs (kept; real probe decides)
+2026/11/11 18:18:27 proxy candidate cache refreshed: 992 IPv4, next=2026-11-12T00:18:27Z
+2026/11/11 18:18:34 GET /api/health 0s
+2026/11/11 18:19:03 tier3 prescreen: 992 candidates -> 60 shortlist (rtt<=5000ms)
+2026/11/11 18:19:04 GET /api/health 0s
+2026/11/11 18:19:19 GET /api/cfnat/proxy-candidates 8ms
+2026/11/11 18:19:19 GET /api/cfnat/upstreams 13ms
+2026/11/11 18:19:19 GET /api/cfnat/connections 12ms
+2026/11/11 18:19:19 GET /api/status 103ms
+2026/11/11 18:19:34 GET /api/health 0s
+2026/11/11 18:20:04 GET /api/health 0s
+2026/11/11 18:20:19 GET /api/cfnat/connections 9ms
+2026/11/11 18:20:19 GET /api/cfnat/upstreams 11ms
+2026/11/11 18:20:19 GET /api/cfnat/proxy-candidates 14ms
+2026/11/11 18:20:19 GET /api/status 109ms
+2026/11/11 18:20:34 GET /api/health 0s
+2026/11/11 18:21:04 GET /api/health 0s
+2026/11/11 18:21:19 GET /api/cfnat/upstreams 8ms
+2026/11/11 18:21:19 GET /api/cfnat/proxy-candidates 11ms
+2026/11/11 18:21:19 GET /api/cfnat/connections 9ms
+2026/11/11 18:21:19 GET /api/status 103ms
+2026/11/11 18:21:34 GET /api/health 0s
+2026/11/11 18:22:04 GET /api/health 0s
+2026/11/11 18:22:19 GET /api/cfnat/upstreams 12ms
+2026/11/11 18:22:19 GET /api/cfnat/connections 12ms
+2026/11/11 18:22:19 GET /api/cfnat/proxy-candidates 17ms
+2026/11/11 18:22:19 GET /api/status 116ms
+2026/11/11 18:22:34 GET /api/health 0s
+2026/11/11 18:23:05 GET /api/health 0s
+2026/11/11 18:23:06 proxy pool DEGRADED: VLESS 终审仅 2 个通过，低于最小池 3；已降级采用 1 个 WS 已通过但 VLESS 未验的候选
+2026/11/11 18:23:06 domain pool: cf.legspcpd.top 在观察期内，不进自动候选
+2026/11/11 18:23:06 domain gate: store.ubi.com 体检状态 unstable（连败 1），不进转发池
+2026/11/11 18:23:06 pool switch blocked by cooldown (9m11s ago < 30m0s): auto-apply
+2026/11/11 18:23:06 proxy auto apply skipped: 自动换池被换池闸拦截（cooldown），下轮放行约 2026-11-11T18:43:55Z；保留旧池
+2026/11/11 18:23:19 GET /api/cfnat/connections 8ms
+2026/11/11 18:23:19 GET /api/cfnat/upstreams 12ms
+2026/11/11 18:23:19 GET /api/cfnat/proxy-candidates 20ms
+2026/11/11 18:23:19 GET /api/status 110ms
+2026/11/11 18:23:35 GET /api/health 0s
+2026/11/11 18:23:50 domain speed path suspect: 3 consecutive rounds TCP-reachable but zero speed samples (endpoint https://proof.ovh.net/files/10Mb.dat)
+2026/11/11 18:23:50 domain probe: no domain produced a speed sample this round (30 domains), failures not counted toward dead
+2026/11/11 18:23:50 domain pool: cf.legspcpd.top 在观察期内，不进自动候选
+2026/11/11 18:23:50 domain gate: store.ubi.com 体检状态 unstable（连败 1），不进转发池
+2026/11/11 18:24:05 GET /api/health 0s
+2026/11/11 18:24:19 GET /api/cfnat/upstreams 6ms
+2026/11/11 18:24:19 GET /api/cfnat/connections 14ms
+2026/11/11 18:24:19 GET /api/cfnat/proxy-candidates 22ms
+2026/11/11 18:24:19 GET /api/status 115ms
+2026/11/11 18:24:35 GET /api/health 0s
+2026/11/11 18:25:05 GET /api/health 0s
+2026/11/11 18:25:35 GET /api/health 0s
+2026/11/11 18:26:05 GET /api/health 0s
+2026/11/11 18:26:36 GET /api/health 0s

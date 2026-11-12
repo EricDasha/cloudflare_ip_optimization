@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -169,8 +170,10 @@ func main() {
 	fmt.Println("\n程序执行结束，请按 CTRL+C 或 回车键退出程序。")
 	exitChan := make(chan struct{})
 	go func() {
-		reader := bufio.NewReader(os.Stdin)
-		_, _ = reader.ReadString('\n')
+		// 必须复用全局 stdinReader：另建一个 bufio.Reader 会各建
+		// 4096 字节缓冲，先读的那个可能把回车吞进自己缓冲里，另
+		// 一个永远等不到，只能 Ctrl+C 退出。
+		_, _ = stdinReader.ReadString('\n')
 		exitChan <- struct{}{}
 	}()
 	signalChan := make(chan os.Signal, 1)
@@ -184,7 +187,22 @@ func main() {
 // ----------------------- 功能模块 -----------------------
 
 // runIPScan 根据用户选择的IPv4/IPv6，从指定URL获取CIDR列表、生成随机IP，然后扫描测试数据中心信息，最终写入 ip.csv
+// clampThreads 把用户传的并发数钳到 [1,1000]，越界时打印提示并回落。
+func clampThreads(n int, flagName string) int {
+	if n < 1 {
+		fmt.Printf("-%s %d 无效，并发数钳到 1\n", flagName, n)
+		return 1
+	}
+	if n > 1000 {
+		fmt.Printf("-%s %d 过大，并发数钳到 1000\n", flagName, n)
+		return 1000
+	}
+	return n
+}
+
 func runIPScan(ipType int, scanMaxThreads int) {
+	// -scan 0 或负数会让 make(chan,<=0) 后第一次发送即永久阻塞。
+	scanMaxThreads = clampThreads(scanMaxThreads, "scan")
 	var filename, url string
 	if ipType == 6 {
 		filename = "ips-v6.txt"
@@ -226,12 +244,16 @@ func runIPScan(ipType int, scanMaxThreads int) {
 	var locations []location
 	if _, err := os.Stat("locations.json"); os.IsNotExist(err) {
 		fmt.Println("本地 locations.json 不存在，正在从 https://www.baipiao.eu.org/cloudflare/locations 下载")
-		resp, err := http.Get("https://www.baipiao.eu.org/cloudflare/locations")
+		resp, err := httpGetClient.Get("https://www.baipiao.eu.org/cloudflare/locations")
 		if err != nil {
 			fmt.Printf("无法下载 locations.json: %v\n", err)
 			return
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			fmt.Printf("下载 locations.json 失败，状态码: %d\n", resp.StatusCode)
+			return
+		}
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			fmt.Printf("无法读取响应体: %v\n", err)
@@ -276,7 +298,7 @@ func runIPScan(ipType int, scanMaxThreads int) {
 	wg.Add(len(ipList))
 	resultChan := make(chan ScanResult, len(ipList))
 	thread := make(chan struct{}, scanMaxThreads)
-	var count int
+	var count int32
 	total := len(ipList)
 
 	for _, ip := range ipList {
@@ -285,10 +307,10 @@ func runIPScan(ipType int, scanMaxThreads int) {
 			defer func() {
 				<-thread
 				wg.Done()
-				count++
-				percentage := float64(count) / float64(total) * 100
-				fmt.Printf("扫描进度: %d/%d (%.2f%%)\r", count, total, percentage)
-				if count == total {
+				current := atomic.AddInt32(&count, 1)
+				percentage := float64(current) / float64(total) * 100
+				fmt.Printf("扫描进度: %d/%d (%.2f%%)\r", current, total, percentage)
+				if int(current) == total {
 					fmt.Println("")
 				}
 			}()
@@ -519,12 +541,34 @@ func writeIPsToFile(filename string, ips []string) error {
 
 // runDetailedTest 对选中的IP列表进行详细测试（10次TCP连接测试443端口），统计延迟和丢包率，结果写入CSV文件
 // 同时增加对测试结果的统计分析，并输出横向柱状图（基于 ip.txt 中的 IP 总数）
+// safeDCFilename 把数据中心名洗成安全文件名：只留字母数字 - _，其余
+// 字符变下划线。DC 名来自 ip.csv 第 2 列（外部数据），不洗的话
+// DC="../../x" 会让 os.Create 写到工作目录之外，DC="result" 会
+// 覆盖 result.csv。
+func safeDCFilename(dc string) string {
+	var b strings.Builder
+	for _, r := range dc {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	name := b.String()
+	if name == "" {
+		return "result.csv"
+	}
+	return name + ".csv"
+}
+
 func runDetailedTest(ipList []string, selectedDC string, port int, delay int, testThreads int) {
+	// -test 0 或负数同理死锁。
+	testThreads = clampThreads(testThreads, "test")
 	var wg sync.WaitGroup
 	wg.Add(len(ipList))
 	resultChan := make(chan TestResult, len(ipList))
 	thread := make(chan struct{}, testThreads)
-	var count int
+	var count int32
 	total := len(ipList)
 	for _, ip := range ipList {
 		thread <- struct{}{}
@@ -532,10 +576,10 @@ func runDetailedTest(ipList []string, selectedDC string, port int, delay int, te
 			defer func() {
 				<-thread
 				wg.Done()
-				count++
-				perc := float64(count) / float64(total) * 100
-				fmt.Printf("详细测试进度: %d/%d (%.2f%%)\r", count, total, perc)
-				if count == total {
+				current := atomic.AddInt32(&count, 1)
+				perc := float64(current) / float64(total) * 100
+				fmt.Printf("详细测试进度: %d/%d (%.2f%%)\r", current, total, perc)
+				if int(current) == total {
 					fmt.Println("")
 				}
 			}()
@@ -607,7 +651,7 @@ func runDetailedTest(ipList []string, selectedDC string, port int, delay int, te
 
 	outFilename := "result.csv"
 	if selectedDC != "" {
-		outFilename = selectedDC + ".csv"
+		outFilename = safeDCFilename(selectedDC)
 	}
 	file, err := os.Create(outFilename)
 	if err != nil {
@@ -692,8 +736,11 @@ func readLine() (string, error) {
 }
 
 // getURLContent 根据指定URL下载内容
+// httpGetClient 给裸 http.Get 加 10 秒超时：远端挂住时不再无限等。
+var httpGetClient = &http.Client{Timeout: 10 * time.Second}
+
 func getURLContent(url string) (string, error) {
-	resp, err := http.Get(url)
+	resp, err := httpGetClient.Get(url)
 	if err != nil {
 		return "", err
 	}
@@ -735,40 +782,60 @@ func parseIPList(content string) []string {
 	return ipList
 }
 
-// getRandomIPv4s 从类似 "xxx.xxx.xxx.xxx/24" 的CIDR中随机生成一个IPv4地址（只替换最后一段）
+// getRandomIPv4s 从类似 "xxx.xxx.xxx.xxx/24" 的CIDR中随机生成一个IPv4地址（只替换最后一段）。
+// 非法输入直接跳过：旧写法只按 "." 切分，不校验数字合法性，且末段可取
+// .0（网络地址）与 .255（广播地址）。
 func getRandomIPv4s(ipList []string) []string {
 	rand.Seed(time.Now().UnixNano())
 	var randomIPs []string
 	for _, subnet := range ipList {
-		baseIP := strings.TrimSuffix(subnet, "/24")
-		octets := strings.Split(baseIP, ".")
-		if len(octets) != 4 {
+		_, ipnet, err := net.ParseCIDR(strings.TrimSpace(subnet))
+		if err != nil {
 			continue
 		}
-		octets[3] = fmt.Sprintf("%d", rand.Intn(256))
-		randomIP := strings.Join(octets, ".")
-		randomIPs = append(randomIPs, randomIP)
+		ones, bits := ipnet.Mask.Size()
+		if bits != 32 || ones != 24 {
+			continue
+		}
+		ip4 := ipnet.IP.To4()
+		if ip4 == nil {
+			continue
+		}
+		out := make(net.IP, net.IPv4len)
+		copy(out, ip4)
+		// 主机段取 1..254，避开 .0 网络地址与 .255 广播地址。
+		out[3] = byte(1 + rand.Intn(254))
+		randomIPs = append(randomIPs, out.String())
 	}
 	return randomIPs
 }
 
-// getRandomIPv6s 从类似 "xxxx:xxxx:xxxx::/48" 的CIDR中随机生成一个IPv6地址（保留前三组）
+// getRandomIPv6s 从类似 "xxxx:xxxx:xxxx::/48" 的CIDR中随机生成一个IPv6地址（保留前三组）。
+// 旧写法按 ":" 切分，`2400::/48` 这类压缩写法会切出空段，拼出 `2400:::`
+// 非法地址；非十六进制段也不校验。
 func getRandomIPv6s(ipList []string) []string {
 	rand.Seed(time.Now().UnixNano())
 	var randomIPs []string
 	for _, subnet := range ipList {
-		baseIP := strings.TrimSuffix(subnet, "/48")
-		sections := strings.Split(baseIP, ":")
-		if len(sections) < 3 {
+		_, ipnet, err := net.ParseCIDR(strings.TrimSpace(subnet))
+		if err != nil {
 			continue
 		}
-		sections = sections[:3]
-		// 生成后三组随机数据（使总组数达到8组）
-		for i := 3; i < 8; i++ {
-			sections = append(sections, fmt.Sprintf("%x", rand.Intn(65536)))
+		ones, bits := ipnet.Mask.Size()
+		if bits != 128 || ones != 48 {
+			continue
 		}
-		randomIP := strings.Join(sections, ":")
-		randomIPs = append(randomIPs, randomIP)
+		ip16 := ipnet.IP.To16()
+		if ip16 == nil {
+			continue
+		}
+		out := make(net.IP, net.IPv6len)
+		copy(out, ip16)
+		// 生成后 80 位随机数据（第 6 字节起）。
+		for i := 6; i < net.IPv6len; i++ {
+			out[i] = byte(rand.Intn(256))
+		}
+		randomIPs = append(randomIPs, out.String())
 	}
 	return randomIPs
 }

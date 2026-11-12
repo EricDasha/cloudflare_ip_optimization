@@ -364,6 +364,23 @@ func (h *debugAPI) lock(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "lock": req.Locked})
 }
 
+// debugProbeTimeoutMs 把 probe 的 timeoutMs 夹到 [1s, 60s]：未填/非正
+// 沿用 6s 默认；不夹上界时一次请求可挂数小时（timeoutMs 是 int，
+// 2^31-1ms 约 24 天）。
+func debugProbeTimeoutMs(ms int) time.Duration {
+	if ms <= 0 {
+		return 6 * time.Second
+	}
+	d := time.Duration(ms) * time.Millisecond
+	if d < time.Second {
+		return time.Second
+	}
+	if d > 60*time.Second {
+		return 60 * time.Second
+	}
+	return d
+}
+
 func (h *debugAPI) probe(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		IP      string `json:"ip"`
@@ -378,10 +395,7 @@ func (h *debugAPI) probe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := defaultProxyAutoConfig()
-	timeout := time.Duration(req.Timeout) * time.Millisecond
-	if timeout <= 0 {
-		timeout = 6 * time.Second
-	}
+	timeout := debugProbeTimeoutMs(req.Timeout)
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 	started := time.Now()

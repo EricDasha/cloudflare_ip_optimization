@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -302,5 +304,25 @@ func TestSubscriptionInventorySummaryCounts(t *testing.T) {
 	classes := summary["errorClasses"].(map[string]int)
 	if classes[failureTimeout] != 2 {
 		t.Fatalf("errorClasses = %v", classes)
+	}
+}
+
+// 本子损坏不得静默丢弃：文件改名备查，内存用空本子启动。
+func TestLoadSubscriptionInventoryRenamesCorruptFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, subscriptionInventoryFile), []byte("{not json"), 0600); err != nil {
+		t.Fatalf("write corrupt file: %v", err)
+	}
+	a := &app{dataDir: dir}
+	a.loadSubscriptionInventory()
+	if _, err := os.Stat(filepath.Join(dir, subscriptionInventoryFile)); !os.IsNotExist(err) {
+		t.Fatalf("corrupt file still in place")
+	}
+	entries, err := filepath.Glob(filepath.Join(dir, subscriptionInventoryFile+".corrupt-*"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("corrupt backups = %v, want 1", entries)
+	}
+	if len(a.subInv.Entries) != 0 {
+		t.Fatalf("subInv.Entries = %d, want 0", len(a.subInv.Entries))
 	}
 }

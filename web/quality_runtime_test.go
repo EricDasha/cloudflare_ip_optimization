@@ -202,3 +202,42 @@ func TestCommitSwitchKeepsNormalDemotionReason(t *testing.T) {
 		t.Fatalf("normal demotion reason overwritten: %q", got)
 	}
 }
+
+// 恢复的 Active 必须捡回 ACTIVE：3 次健康失败判 FAILED 后一次成功，
+// 状态应回 ACTIVE，且 decide 不得再判 FAILOVER。
+func TestQualityRuntimeActiveRecoversToActiveAfterHealthFailure(t *testing.T) {
+	r := testQualityRuntime(t)
+	now := time.Date(2026, 8, 21, 10, 0, 0, 0, time.UTC)
+	r.seedActive("1.1.1.1", now)
+	r.observe("8.8.8.8", "official", 600, 40, true, now)
+	r.observeActiveHealth(false, 80, now.Add(time.Minute))
+	r.observeActiveHealth(false, 80, now.Add(2*time.Minute))
+	r.observeActiveHealth(false, 80, now.Add(3*time.Minute))
+	if got := r.data.Records["1.1.1.1"].State; got != lineFailed {
+		t.Fatalf("after 3 failures state = %q, want FAILED", got)
+	}
+	r.observeActiveHealth(true, 80, now.Add(4*time.Minute))
+	if got := r.data.Records["1.1.1.1"].State; got != lineActive {
+		t.Fatalf("recovered active = %q, want ACTIVE", got)
+	}
+	if got := r.decide(now.Add(4 * time.Minute)); got.Event != switchNone {
+		t.Fatalf("recovered active still fails over: %#v", got)
+	}
+}
+
+// observe() 收到 Active 的成功样本时，同样要把它从 PROBING 捡回 ACTIVE。
+func TestQualityRuntimeObserveRestoresActiveAfterFailure(t *testing.T) {
+	r := testQualityRuntime(t)
+	now := time.Date(2026, 8, 21, 10, 0, 0, 0, time.UTC)
+	r.seedActive("1.1.1.1", now)
+	r.observe("1.1.1.1", "active_pool", 100, 60, false, now.Add(time.Minute))
+	r.observe("1.1.1.1", "active_pool", 100, 60, false, now.Add(2*time.Minute))
+	r.observe("1.1.1.1", "active_pool", 100, 60, false, now.Add(3*time.Minute))
+	if got := r.data.Records["1.1.1.1"].State; got != lineFailed {
+		t.Fatalf("after 3 failures state = %q, want FAILED", got)
+	}
+	r.observe("1.1.1.1", "active_pool", 100, 60, true, now.Add(4*time.Minute))
+	if got := r.data.Records["1.1.1.1"].State; got != lineActive {
+		t.Fatalf("recovered active = %q, want ACTIVE", got)
+	}
+}

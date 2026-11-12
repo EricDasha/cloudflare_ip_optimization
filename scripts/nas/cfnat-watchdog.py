@@ -10,9 +10,14 @@ Every run (cron, 1/min):
   2. healthy + pool mode          -> done
      healthy + fallback mode      -> probe pool directly (cert check);
                                      2 consecutive OK -> switch back + TG alert
-  3. dead   -> probe the NODE itself (direct www.ox.ac.uk:443 cert check)
-     node dead                    -> TG "node down" (cooldown-guarded), no churn
-     node alive                  -> rotate fallbacks until tunnel OK -> TG alert
+  3. dead   -> debounce (2 consecutive dead runs), then rotate fallback
+     entries directly; trying a fallback IS the node liveness test
+     (it only succeeds if the node is up) -> TG alert on switch
+     (30 min cooldown). There is no separate "node down" alert:
+     the old "probe the node first" gate was removed — when the tunnel
+     is down this host's direct path to Cloudflare is blocked as well,
+     so the gate could never pass, and scanning the candidates cost
+     minutes and overran the 1-minute cron window.
 
 TG alerts go through the SAME bot openclaw uses (token read at runtime from
 openclaw.json, never logged). The proxy is restored BEFORE sending, so the
@@ -106,7 +111,13 @@ def load_state():
 
 
 def save_state(st):
-    json.dump(st, open(STATE_F, "w"), indent=2)
+    # 原子写：先写临时文件再 rename。直接 open(STATE_F, "w") 写一半崩了，
+    # 状态文件损坏，下次 load_state 回落默认值，mode/fb_idx 全丢。
+    # 与 cf_inspect.py 的 _queue_save 同一做法。
+    tmp = STATE_F + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(st, f, indent=2)
+    os.replace(tmp, STATE_F)
 
 
 def read_cfg():
@@ -131,15 +142,23 @@ def current_target():
 
 
 def probe_tunnel(timeout=PROBE_TIMEOUT):
-    r = run(["curl", "-s", "-o", "/dev/null", "-m", str(timeout), "-x", PROXY,
-             "-w", "%{http_code}", PROBE_URL], timeout=timeout + 6)
+    try:
+        r = run(["curl", "-s", "-o", "/dev/null", "-m", str(timeout), "-x", PROXY,
+                 "-w", "%{http_code}", PROBE_URL], timeout=timeout + 6)
+    except subprocess.TimeoutExpired:
+        # 超时即探针失败：旧代码让 TimeoutExpired 一路抛到 cron 主流程，
+        # 整轮崩掉，本轮 dead_consec 白计。
+        return False
     return r.stdout.strip() == "204"
 
 
 def egress_ip(timeout=PROBE_TIMEOUT):
     """Exit IP as seen through the tunnel; empty on failure."""
-    r = run(["curl", "-s", "-m", str(timeout), "-x", PROXY, TRACE_URL],
-            timeout=timeout + 6)
+    try:
+        r = run(["curl", "-s", "-m", str(timeout), "-x", PROXY, TRACE_URL],
+                timeout=timeout + 6)
+    except subprocess.TimeoutExpired:
+        return ""
     for line in r.stdout.splitlines():
         if line.startswith("ip="):
             return line[3:].strip()
@@ -155,7 +174,10 @@ def direct_ip(timeout=10):
     global _DIRECT_IP
     if _DIRECT_IP is not None:
         return _DIRECT_IP
-    r = run(["curl", "-s", "-m", str(timeout), TRACE_URL], timeout=timeout + 6)
+    try:
+        r = run(["curl", "-s", "-m", str(timeout), TRACE_URL], timeout=timeout + 6)
+    except subprocess.TimeoutExpired:
+        return ""
     for line in r.stdout.splitlines():
         if line.startswith("ip="):
             _DIRECT_IP = line[3:].strip()
@@ -186,8 +208,8 @@ def cert_ok(host, port, sni, timeout=8):
     wedged on it for minutes, so the pool was never seen as recovered.
     A socket with a hard timeout cannot do that.
 
-    The subject CN is read straight out of the DER bytes (ASN.1 string
-    contents, UTF8String/PrintableString) - no temp files, no pipelining.
+    The subject CN is read from the parsed cert (exact match on
+    commonName, or an exact DNS SAN) - no temp files, no pipelining.
     """
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
@@ -198,7 +220,117 @@ def cert_ok(host, port, sni, timeout=8):
                 der = tls.getpeercert(binary_form=True)
     except (OSError, ssl.SSLError, ValueError):
         return False
-    return bool(der) and NODE_CERT_CN in der
+    # 精确比对 subject CN（或 SAN DNS）：旧写法 `CN in der` 是 DER
+    # 子串匹配，证书任一字段含该字节串即通过；配 CERT_NONE 时，自签
+    # 证书嵌该串即可冒充节点。CERT_NONE 下 getpeercert() 字典为空，
+    # 故直接解析 DER，只认完整相等的值。
+    if not der:
+        return False
+    want = NODE_CERT_CN.decode("utf-8", "ignore")
+    cns, sans = _cert_names(der)
+    return want in cns or want in sans
+
+
+def _der_read(data, pos):
+    """读一个 DER TLV 头，返回 (tag, value_start, value_len)。"""
+    tag = data[pos]
+    pos += 1
+    if tag & 0x1F == 0x1F:  # 多字节 tag（本处用不到，防御性处理）
+        while True:
+            b = data[pos]
+            pos += 1
+            if not b & 0x80:
+                break
+    length = data[pos]
+    pos += 1
+    if length & 0x80:
+        n = length & 0x7F
+        if n == 0 or n > 4:
+            raise ValueError("bad DER length")
+        length = int.from_bytes(data[pos:pos + n], "big")
+        pos += n
+    if pos + length > len(data):
+        raise ValueError("DER overrun")
+    return tag, pos, length
+
+
+def _der_children(data, start, end):
+    pos = start
+    while pos < end:
+        tag, vs, ln = _der_read(data, pos)
+        yield tag, vs, vs + ln
+        pos = vs + ln
+
+
+def _cert_names(der):
+    """从 DER 证书里精确取出 (subject CN 列表, SAN DNS 列表)。解析失败返回 ([], [])。"""
+    try:
+        tag, vs, ln = _der_read(der, 0)
+        if tag != 0x30:  # Certificate SEQUENCE
+            return [], []
+        tbs_tag, tbs_vs, tbs_ln = _der_read(der, vs)
+        if tbs_tag != 0x30:
+            return [], []
+        kids = list(_der_children(der, tbs_vs, tbs_vs + tbs_ln))
+        idx = 0
+        if kids and kids[0][0] == 0xA0:  # [0] version
+            idx = 1
+        # serial, signature, issuer, validity, subject
+        if len(kids) < idx + 5:
+            return [], []
+        _, subj_vs, subj_end = kids[idx + 4]
+        cns = []
+        for stag, svs, send in _der_children(der, subj_vs, subj_end):
+            if stag != 0x31:  # SET
+                continue
+            for atag, avs, aend in _der_children(der, svs, send):
+                if atag != 0x30:  # AttributeTypeAndValue SEQUENCE
+                    continue
+                parts = list(_der_children(der, avs, aend))
+                if len(parts) != 2:
+                    continue
+                otag, ovs, oend = parts[0]
+                vtag, vvs, vend = parts[1]
+                if otag == 0x06 and der[ovs:oend] == b"\x55\x04\x03":  # OID 2.5.4.3 commonName
+                    cns.append(_der_decode_string(vtag, der[vvs:vend]))
+        sans = []
+        for tag, evs, eend in kids:
+            if tag != 0xA3:  # [3] extensions
+                continue
+            # [3] 的内容本身是一个 SEQUENCE，扩展是它的子项。
+            stag, svs, sln = _der_read(der, evs)
+            if stag != 0x30:
+                continue
+            for xtag, xvs, xend in _der_children(der, svs, svs + sln):
+                if xtag != 0x30:
+                    continue
+                xparts = list(_der_children(der, xvs, xend))
+                if not xparts or xparts[0][0] != 0x06:
+                    continue
+                otag, ovs, oend = xparts[0]
+                if der[ovs:oend] != b"\x55\x1d\x11":  # OID 2.5.29.17 subjectAltName
+                    continue
+                val_tag, val_vs, val_end = xparts[-1]  # OCTET STRING
+                if val_tag != 0x04:
+                    continue
+                inner = der[val_vs:val_end]
+                itag, ivs, iln = _der_read(inner, 0)
+                if itag != 0x30:
+                    continue
+                for gtag, gvs, gend in _der_children(inner, ivs, ivs + iln):
+                    if gtag == 0x82:  # [2] dNSName IA5String
+                        sans.append(inner[gvs:gend].decode("ascii", "ignore"))
+        return cns, sans
+    except (ValueError, IndexError):
+        return [], []
+
+
+def _der_decode_string(tag, raw):
+    if tag == 0x1E:  # BMPString
+        return raw.decode("utf-16-be", "ignore")
+    if tag in (0x0C, 0x16):  # UTF8String, IA5String
+        return raw.decode("utf-8", "ignore")
+    return raw.decode("ascii", "ignore")
 
 
 def set_target(server, port):

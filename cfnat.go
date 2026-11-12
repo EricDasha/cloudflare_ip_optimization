@@ -8,7 +8,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -31,10 +30,9 @@ const (
 )
 
 var (
-	activeConnections  int32 // 用于跟踪活跃连接的数量
-	validIPClientCache sync.Map
-	randomMu           sync.Mutex
-	randomGenerator    = rand.New(rand.NewSource(time.Now().UnixNano()))
+	activeConnections int32 // 用于跟踪活跃连接的数量
+	randomMu          sync.Mutex
+	randomGenerator   = rand.New(rand.NewSource(time.Now().UnixNano()))
 )
 
 // maxClientAssignments 设备钉位表的上限。
@@ -302,7 +300,8 @@ func main() {
 					fallbackManager.SetIPAddresses(fbTargets)
 				}
 			}
-			log.Printf("使用 %d 个固定转发目标（IP 或优选域名），跳过官方段扫描", len(results))
+			fixedIPs, fixedDomains := countFixedKinds(results)
+			log.Printf("使用 %d 个固定转发目标（%d IP + %d 域名），跳过官方段扫描", len(results), fixedIPs, fixedDomains)
 		} else {
 
 			// 使用函数处理 locations.json，确保 defer 正确执行
@@ -386,27 +385,31 @@ func main() {
 
 		// 应用数据中心筛选
 		if *coloFilter != "" && !fixedMode {
-			filters := strings.Split(*coloFilter, ",")
-			var filteredResults []result
-			for _, r := range results {
-				for _, filter := range filters {
-					if strings.EqualFold(r.dataCenter, filter) {
-						filteredResults = append(filteredResults, r)
-						break
-					}
-				}
+			results = applyColoFilter(results, *coloFilter)
+			if len(results) == 0 {
+				// 过滤后为空不能进 accept 循环：否则 SetIPAddresses(nil)
+				// 后每个连接都无上游可转、且永远不再重扫。
+				fmt.Println("数据中心筛选后无可用IP")
+				time.Sleep(3 * time.Second)
+				continue
 			}
-			results = filteredResults
 		}
 
-		// 按 TCP 延迟排序
-		sort.Slice(results, func(i, j int) bool {
+		// 按 TCP 延迟排序。必须用 Stable：fixed 模式下全部 tcpDuration
+		// 都是 0，不稳定排序会打乱用户指定的 -fixed 顺序，再经
+		// capFixedTargets 截断，留谁全凭运气；扫描模式下延迟相同也
+		// 应保持扫描顺序。
+		sort.SliceStable(results, func(i, j int) bool {
 			return results[i].tcpDuration < results[j].tcpDuration
 		})
 
 		// 只显示指定数量的 IP
 		if len(results) > *ipCount {
-			results = results[:*ipCount]
+			if fixedMode {
+				results = capFixedTargets(results, *ipCount)
+			} else {
+				results = results[:*ipCount]
+			}
 		}
 
 		fmt.Println("IP 地址 | 数据中心 | 地区 | 城市 | 延迟")
@@ -414,7 +417,11 @@ func main() {
 			fmt.Printf("%s | %s | %s | %s | %s\n", r.ip, r.dataCenter, r.region, r.city, r.latency)
 		}
 
-		fmt.Printf("成功提取 %d 个有效IP，耗时 %d秒\n", len(results), time.Since(startTime)/time.Second)
+		if domains := len(results) - countIPTargets(results); domains > 0 {
+			fmt.Printf("成功提取 %d 个有效IP + %d 个域名，耗时 %d秒\n", len(results)-domains, domains, time.Since(startTime)/time.Second)
+		} else {
+			fmt.Printf("成功提取 %d 个有效IP，耗时 %d秒\n", len(results), time.Since(startTime)/time.Second)
+		}
 
 		// 设置 IP 地址列表
 		var ips []string
@@ -473,16 +480,22 @@ func main() {
 }
 
 // loadLocations 加载位置信息，使用函数封装确保 defer 正确执行
+// httpGetClient 给裸 http.Get 加 10 秒超时：远端挂住时启动不再无限等。
+var httpGetClient = &http.Client{Timeout: 10 * time.Second}
+
 func loadLocations() ([]location, error) {
 	var locations []location
 
 	if _, err := os.Stat("locations.json"); os.IsNotExist(err) {
 		fmt.Println("本地 locations.json 不存在\n正在从 https://www.baipiao.eu.org/cloudflare/locations 下载 locations.json")
-		resp, err := http.Get("https://www.baipiao.eu.org/cloudflare/locations")
+		resp, err := httpGetClient.Get("https://www.baipiao.eu.org/cloudflare/locations")
 		if err != nil {
 			return nil, fmt.Errorf("无法从URL中获取JSON: %v", err)
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("下载 locations.json 失败，状态码: %d", resp.StatusCode)
+		}
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
@@ -526,11 +539,27 @@ func loadLocations() ([]location, error) {
 }
 
 // scanIPs 扫描 IP 列表并返回结果
+// clampThreads 把用户传的并发数钳到 [1,1000]，越界时打印提示并回落。
+func clampThreads(n int, flagName string) int {
+	if n < 1 {
+		fmt.Printf("-%s %d 无效，并发数钳到 1\n", flagName, n)
+		return 1
+	}
+	if n > 1000 {
+		fmt.Printf("-%s %d 过大，并发数钳到 1000\n", flagName, n)
+		return 1000
+	}
+	return n
+}
+
 func scanIPs(ipList []string, locationMap map[string]location, maxThreads int) []result {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var results []result
 
+	// -task 0 或负数会让 make(chan,<=0) 后第一次发送即永久阻塞；
+	// 上限 1000 防手滑把并发打爆。
+	maxThreads = clampThreads(maxThreads, "task")
 	thread := make(chan struct{}, maxThreads)
 
 	var count int32
@@ -620,7 +649,7 @@ func scanIPs(ipList []string, locationMap map[string]location, maxThreads int) [
 
 // 获取URL内容
 func getURLContent(url string) (string, error) {
-	resp, err := http.Get(url)
+	resp, err := httpGetClient.Get(url)
 	if err != nil {
 		return "", err
 	}
@@ -700,6 +729,53 @@ func parseFixedTargets(value string) ([]string, error) {
 	return targets, nil
 }
 
+// countFixedKinds 分别统计固定目标里的 IP 与域名数量。
+func countFixedKinds(results []result) (ips, domains int) {
+	for _, r := range results {
+		if net.ParseIP(r.ip) == nil {
+			domains++
+		} else {
+			ips++
+		}
+	}
+	return ips, domains
+}
+
+// countIPTargets 统计列表里真正的 IP 条数（域名不计）。
+func countIPTargets(results []result) int {
+	n := 0
+	for _, r := range results {
+		if net.ParseIP(r.ip) != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// capFixedTargets 把 IP 数量限制在 limit 以内，域名全部保留。
+//
+// 固定模式下 -fixed 同时带 IP 和域名，-ipnum 的语义是「取多少个有效 IP」，
+// 不是「整个目标列表最多几项」。旧实现直接 results[:ipCount]，排序对全为 0
+// 的固定目标又不稳定，域名会被任意截掉——IP 池一空，域名也跟着消失。
+func capFixedTargets(results []result, limit int) []result {
+	if limit < 0 {
+		limit = 0
+	}
+	out := make([]result, 0, len(results))
+	ips := 0
+	for _, r := range results {
+		if net.ParseIP(r.ip) == nil {
+			out = append(out, r)
+			continue
+		}
+		if ips < limit {
+			out = append(out, r)
+			ips++
+		}
+	}
+	return out
+}
+
 // validForwardHostname 校验可作为转发目标的域名：仅 ASCII、含点、逐标签合法。
 // 纯数字加点的“残 IP”形式（如 1.2.3.999）一律拒绝，避免被误当域名。
 func validForwardHostname(host string) bool {
@@ -741,7 +817,9 @@ func nextRandomIntn(n int) int {
 	return randomGenerator.Intn(n)
 }
 
-// 从每个/24子网随机提取一个IPv4
+// 从每个/24子网随机提取一个IPv4。非法输入直接跳过：旧写法只按 "."
+// 切分，`1.2.3.4.5/24` 会拼出 5 段非法地址，`/16` 后缀去不掉也
+// 会原样残留；且末段可取 .0（网络地址）与 .255（广播地址）。
 func getRandomIPv4s(ipList []string) []string {
 	var randomIPs []string
 	for _, subnet := range ipList {
@@ -750,18 +828,31 @@ func getRandomIPv4s(ipList []string) []string {
 		if subnet == "" {
 			continue
 		}
-		baseIP := strings.TrimSuffix(subnet, "/24")
-		octets := strings.Split(baseIP, ".")
-		if len(octets) >= 4 {
-			octets[3] = fmt.Sprintf("%d", nextRandomIntn(256))
-			randomIP := strings.Join(octets, ".")
-			randomIPs = append(randomIPs, randomIP)
+		ip, ipnet, err := net.ParseCIDR(subnet)
+		if err != nil {
+			continue
 		}
+		ones, bits := ipnet.Mask.Size()
+		if bits != 32 || ones != 24 {
+			continue
+		}
+		ip4 := ip.To4()
+		if ip4 == nil {
+			continue
+		}
+		out := make(net.IP, net.IPv4len)
+		copy(out, ip4)
+		// 主机段取 1..254，避开 .0 网络地址与 .255 广播地址。
+		out[3] = byte(1 + nextRandomIntn(254))
+		randomIPs = append(randomIPs, out.String())
 	}
 	return randomIPs
 }
 
 // 从每个/48子网随机提取一个IPv6
+// 从每个/48子网随机提取一个IPv6（保留前三组）。旧写法按 ":" 切分，
+// `2400::/48` 这类压缩写法会切出空段，拼出 `2400:::` 非法地址；
+// 非十六进制段也不校验。
 func getRandomIPv6s(ipList []string) []string {
 	var randomIPs []string
 	for _, subnet := range ipList {
@@ -770,19 +861,50 @@ func getRandomIPv6s(ipList []string) []string {
 		if subnet == "" {
 			continue
 		}
-		baseIP := strings.TrimSuffix(subnet, "/48")
-		sections := strings.Split(baseIP, ":")
-		if len(sections) >= 3 {
-			sections = sections[:3]
-			for i := 3; i < 8; i++ {
-				sections = append(sections, fmt.Sprintf("%x", nextRandomIntn(65536)))
-			}
-			randomIP := strings.Join(sections, ":")
-			randomIPs = append(randomIPs, randomIP)
+		_, ipnet, err := net.ParseCIDR(subnet)
+		if err != nil {
+			continue
 		}
+		ones, bits := ipnet.Mask.Size()
+		if bits != 128 || ones != 48 {
+			continue
+		}
+		ip16 := ipnet.IP.To16()
+		if ip16 == nil {
+			continue
+		}
+		out := make(net.IP, net.IPv6len)
+		copy(out, ip16)
+		for i := 6; i < net.IPv6len; i++ {
+			out[i] = byte(nextRandomIntn(256))
+		}
+		randomIPs = append(randomIPs, out.String())
 	}
 	return randomIPs
 }
+
+// applyColoFilter 按数据中心（逗号分隔，忽略大小写）筛选扫描结果。
+func applyColoFilter(results []result, coloFilter string) []result {
+	filters := strings.Split(coloFilter, ",")
+	var filtered []result
+	for _, r := range results {
+		for _, filter := range filters {
+			if strings.EqualFold(r.dataCenter, filter) {
+				filtered = append(filtered, r)
+				break
+			}
+		}
+	}
+	return filtered
+}
+
+// readIPs 展开上限：单个 CIDR 最多 65536 个地址（/16），整文件最多
+// 262144 条。再大不是“候选列表”，是直接把内存和扫描时间撑爆——
+// IPv6 /48 展开是 2^80 个地址，旧代码会在这个循环里跑到天荒地老。
+const (
+	maxCIDRExpansion = 65536
+	maxReadIPsTotal  = 262144
+)
 
 // 从CIDR中拆分出所有IP
 func readIPs(filename string) ([]string, error) {
@@ -805,12 +927,20 @@ func readIPs(filename string) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
+			// 先算再展开：掩码位数直接决定展开规模，IPv6 大前缀
+			// 不经此检查会把循环跑到天荒地老。
+			if ones, bits := ipNet.Mask.Size(); bits-ones > 16 {
+				return nil, fmt.Errorf("CIDR %s 展开超过 %d 个地址", line, maxCIDRExpansion)
+			}
 			// 使用新变量避免遮蔽
 			for currentIP := ipAddr.Mask(ipNet.Mask); ipNet.Contains(currentIP); incrementIP(currentIP) {
 				ips = append(ips, currentIP.String())
 			}
 		} else {
 			ips = append(ips, line)
+		}
+		if len(ips) > maxReadIPsTotal {
+			return nil, fmt.Errorf("IP 文件展开超过 %d 条", maxReadIPsTotal)
 		}
 	}
 
@@ -841,58 +971,6 @@ func generateTargets(ips []string, port int) []string {
 		targets[i] = fmt.Sprintf("%s:%d", address, port)
 	}
 	return targets
-}
-
-func checkValidIP(ip string, port int, useTLS bool, domain string, code int) bool {
-	address := ip
-	if strings.Contains(ip, ":") {
-		address = fmt.Sprintf("[%s]", ip)
-	}
-	targetURL := fmt.Sprintf("http://%s", domain)
-	if useTLS {
-		targetURL = fmt.Sprintf("https://%s", domain)
-	}
-
-	cacheKey := fmt.Sprintf("%s:%d", address, port)
-	clientAny, loaded := validIPClientCache.Load(cacheKey)
-	var client *http.Client
-	if loaded {
-		client = clientAny.(*http.Client)
-	} else {
-		transport := &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				log.Printf("尝试连接 IP: %s 端口: %d", ip, port)
-				dialer := &net.Dialer{Timeout: 2 * time.Second}
-				return dialer.DialContext(ctx, network, fmt.Sprintf("%s:%d", address, port))
-			},
-		}
-		newClient := &http.Client{
-			Timeout:   2 * time.Second,
-			Transport: transport,
-		}
-		actual, _ := validIPClientCache.LoadOrStore(cacheKey, newClient)
-		client = actual.(*http.Client)
-	}
-
-	log.Printf("向 URL %s 发送请求以检查 IP %s 是否有效", targetURL, ip)
-	resp, err := client.Get(targetURL)
-	if err != nil {
-		log.Printf("检查 IP %s 时发生错误: %v", ip, err)
-		return false
-	}
-	defer resp.Body.Close()
-
-	log.Printf("IP %s 的检查响应状态码: %d", ip, resp.StatusCode)
-
-	isValid := resp.StatusCode == code
-	if isValid {
-		log.Printf("IP %s 是有效的", ip)
-	} else {
-		log.Printf("IP %s 不是有效的", ip)
-	}
-
-	return isValid
 }
 
 // 处理客户端连接；仅在拨号失败时按顺序尝试下一个地址。
@@ -944,6 +1022,12 @@ func handleConnectionWithDial(conn net.Conn, forwardAddrs []string, dial func(co
 	log.Printf("未找到可用的转发连接: %v", lastErr)
 }
 
+// pipeIdleTimeout 任一方向无流量超过此时长即断开：半开/装死的连接
+// 否则会永远占着两个 goroutine、两个 FD 与一个 activeConnections
+// 计数。10 分钟——内层协议自带心跳，真空闲这么久就是死了。
+// 变量而非常量，供测试收窄。
+var pipeIdleTimeout = 10 * time.Minute
+
 func pipeConnections(src, dst net.Conn) {
 	var wg sync.WaitGroup
 	var closeOnce sync.Once
@@ -958,15 +1042,41 @@ func pipeConnections(src, dst net.Conn) {
 
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(src, dst)
+		_, _ = copyWithIdleTimeout(src, dst, pipeIdleTimeout)
 		closeBoth()
 	}()
 
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(dst, src)
+		_, _ = copyWithIdleTimeout(dst, src, pipeIdleTimeout)
 		closeBoth()
 	}()
 
 	wg.Wait()
+}
+
+// copyWithIdleTimeout 从 src 拷到 dst，每次读前刷新 src 的读 deadline。
+// 对端握手完就装死时，读超时即返回，不再无限占槽。
+func copyWithIdleTimeout(dst io.Writer, src net.Conn, timeout time.Duration) (int64, error) {
+	buf := make([]byte, 32*1024)
+	var written int64
+	for {
+		if err := src.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+			return written, err
+		}
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[:nr])
+			written += int64(nw)
+			if ew != nil {
+				return written, ew
+			}
+			if nw != nr {
+				return written, io.ErrShortWrite
+			}
+		}
+		if er != nil {
+			return written, er
+		}
+	}
 }

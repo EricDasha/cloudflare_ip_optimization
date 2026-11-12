@@ -2,7 +2,7 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"log"
 	"net"
 	"os"
@@ -98,15 +98,27 @@ type subscriptionInventory struct {
 // （全部标为 pass），避免升级后第一次运行把已验证的候选全丢。
 func (a *app) loadSubscriptionInventory() {
 	inv := subscriptionInventory{Entries: make(map[string]*subEntry), Fetches: make(map[string][]subFetchRecord)}
-	data, err := os.ReadFile(filepath.Join(a.dataDir, subscriptionInventoryFile))
+	path := filepath.Join(a.dataDir, subscriptionInventoryFile)
+	data, err := os.ReadFile(path)
 	if err == nil {
 		var stored subscriptionInventory
-		if json.Unmarshal(data, &stored) == nil && stored.Entries != nil {
+		if uerr := json.Unmarshal(data, &stored); uerr != nil {
+			// 损坏文件改名备查：否则下次落盘会用空本子把它覆盖，
+			// 几千条候选的死因无从查（与 loadDomainQuality 同一做法）。
+			bad := path + ".corrupt-" + time.Now().Format("20060102-150405")
+			if rerr := os.Rename(path, bad); rerr != nil {
+				log.Printf("subscription inventory corrupt (%v), rename failed: %v", uerr, rerr)
+			} else {
+				log.Printf("subscription inventory corrupt (%v), moved to %s", uerr, bad)
+			}
+		} else if stored.Entries != nil {
 			inv = stored
 			if inv.Fetches == nil {
 				inv.Fetches = make(map[string][]subFetchRecord)
 			}
 		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		log.Printf("subscription inventory load failed, starting empty: %v", err)
 	}
 	if len(inv.Entries) == 0 {
 		inv = a.importLegacySubscriptionPool(inv)
@@ -534,32 +546,6 @@ func (a *app) subscriptionEntrySnapshot(ip string) (subEntry, bool) {
 	copied.Sources = append([]string(nil), entry.Sources...)
 	copied.Via = append([]string(nil), entry.Via...)
 	return copied, true
-}
-
-// formatSubscriptionInventoryLine 给日志用的一行摘要。
-func formatSubscriptionInventoryLine(inv subscriptionInventory) string {
-	pending, pass, failed := 0, 0, 0
-	for _, entry := range inv.Entries {
-		if entry == nil {
-			continue
-		}
-		switch entry.State {
-		case subStatePass:
-			pass++
-		case subStateFail:
-			failed++
-		default:
-			pending++
-		}
-	}
-	return fmt.Sprintf("total=%d pending=%d pass=%d fail=%d", len(inv.Entries), pending, pass, failed)
-}
-
-// subscriptionInventoryCount 本子条目数，供日志与状态使用。
-func (a *app) subscriptionInventoryCount() int {
-	a.subMu.RLock()
-	defer a.subMu.RUnlock()
-	return len(a.subInv.Entries)
 }
 
 // subscriptionInventoryEntryView 是接口输出的单条记录（带 IP 字段）。

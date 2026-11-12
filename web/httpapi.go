@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -477,6 +478,15 @@ func (a *app) handleProxyPromote(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
+	// 先占扫描锁再拿换池锁，与踢人同模式：后台漏斗持 proxyScanMu 跑
+	// 几分钟、最后才拿 cfnatCtlMu 落池，池是开考前的快照；这里若只拿
+	// 换池锁，刚做的顶替会在漏斗落池时被旧快照整批覆盖。锁序全局规范
+	// refresh → proxyScan → cfnatCtl。
+	if !a.proxyScanMu.TryLock() {
+		http.Error(w, "优选或补位正在运行，等它结束再顶替", http.StatusConflict)
+		return
+	}
+	defer a.proxyScanMu.Unlock()
 	// 只拿换池锁；与 kick 同链，等待而非立即拒绝。
 	if !lockTimeout(&a.cfnatCtlMu, 15*time.Second) {
 		http.Error(w, "换池操作正在运行，请稍后再试", http.StatusTooManyRequests)
@@ -509,28 +519,33 @@ func (a *app) handleProxyPromote(w http.ResponseWriter, r *http.Request) {
 	// 旧实现只考握手，于是 1168ms 的慢 IP 也能堂堂正正换进池，
 	// 再被设备粘性锁死——生产事故的根因。
 	cfg := defaultProxyAutoConfig()
+	// 未配置 SNI 时不得跳过体检直接顶替：与 handleProxyProbe 同口径回
+	// 412。旧实现用 if 守着体检块，Host/Path 为空就整段跳过，任何公网
+	// IP 都能不经 WS 握手进池。
+	if cfg.Host == "" || cfg.Path == "" {
+		http.Error(w, "未配置 PROXY_AUTO_HOST/PATH，无法体检", http.StatusPreconditionFailed)
+		return
+	}
 	entryColo := ""
 	fresh := make([]proxyScanResult, 0, 1)
-	if cfg.Host != "" && cfg.Path != "" {
-		measureCtx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-		latency, colo, fails := measurePoolEntryLatency(measureCtx, ip, cfg)
-		cancel()
-		if latency == 0 {
-			http.Error(w, "体检未通过（WS 握手三次全败），拒绝顶替", http.StatusBadRequest)
-			return
-		}
-		if ceiling := poolEntryMaxLatencyMs(); latency > ceiling {
-			http.Error(w, fmt.Sprintf("延迟 %dms 超过进池上限 %dms，拒绝顶替：握手虽通但太慢，进池会拖垮粘在那台设备上的所有连接", latency, ceiling), http.StatusBadRequest)
-			return
-		}
-		entryColo = colo
-		_ = fails // 失败次数并入体检注记，软信号不否决
-		// 入池体检结果写进新成员的成绩单：机房码随行，丢手率记档。
-		fresh = append(fresh, proxyScanResult{
-			IP: ip, Latency: latency, Colo: colo, Stage: "WS_PASS",
-			Note: fmt.Sprintf("入池体检 %d/3 通过", 3-fails),
-		})
+	measureCtx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	latency, colo, fails := measurePoolEntryLatency(measureCtx, ip, cfg)
+	cancel()
+	if latency == 0 {
+		http.Error(w, "体检未通过（WS 握手三次全败），拒绝顶替", http.StatusBadRequest)
+		return
 	}
+	if ceiling := poolEntryMaxLatencyMs(); latency > ceiling {
+		http.Error(w, fmt.Sprintf("延迟 %dms 超过进池上限 %dms，拒绝顶替：握手虽通但太慢，进池会拖垮粘在那台设备上的所有连接", latency, ceiling), http.StatusBadRequest)
+		return
+	}
+	entryColo = colo
+	_ = fails // 失败次数并入体检注记，软信号不否决
+	// 入池体检结果写进新成员的成绩单：机房码随行，丢手率记档。
+	fresh = append(fresh, proxyScanResult{
+		IP: ip, Latency: latency, Colo: colo, Stage: "WS_PASS",
+		Note: fmt.Sprintf("入池体检 %d/3 通过", 3-fails),
+	})
 	// 先踢在位最差者：按质量记录里延迟最差者，无记录则末位。
 	victim := a.worstPoolMember(current.IPs)
 	pool := current
@@ -835,12 +850,20 @@ func (a *app) qualitySnapshot() map[string]any {
 func (a *app) backgroundOptimizerStatus() map[string]any {
 	a.optimizerMu.RLock()
 	defer a.optimizerMu.RUnlock()
+	// 节拍读调度器运行时的真实配置（PROXY_SCHEDULER_*），不是写死的
+	// 5 分钟/12 个；调度器未初始化时回落默认值。concurrency 4 是
+	// runQualitySchedulerProbe 里硬编码的真实值，保持不动。
+	intervalMinutes, batchSize := 5, 12
+	if a.quality != nil {
+		interval, batch := a.quality.probeCadence()
+		intervalMinutes, batchSize = int(interval.Minutes()), batch
+	}
 	return map[string]any{
 		"enabled":         a.optimizerEnabled,
 		"lastRun":         a.optimizerLastRun,
 		"lastError":       a.optimizerLastError,
-		"intervalMinutes": 5,
-		"batchSize":       12,
+		"intervalMinutes": intervalMinutes,
+		"batchSize":       batchSize,
 		"concurrency":     4,
 	}
 }
@@ -880,7 +903,12 @@ func (a *app) handleCFnatStart(w http.ResponseWriter, r *http.Request) {
 	a.cfnatCtlMu.Lock()
 	defer a.cfnatCtlMu.Unlock()
 	var cfg cfnatConfig
-	_ = json.NewDecoder(r.Body).Decode(&cfg)
+	// 空 body 即用默认配置（EOF 不算错）；真正的语法错误回 400，
+	// 不再静默当成零值配置。
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
 	cfg = normalizeCFnat(cfg)
 	if err := a.cfnat.stop(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -914,7 +942,10 @@ func (a *app) handleCFdataRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var cfg cfdataConfig
-	_ = json.NewDecoder(r.Body).Decode(&cfg)
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
 	cfg = normalizeCFdata(cfg)
 	if err := a.cfdata.start(a.dataDir, cfg.args(), ""); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

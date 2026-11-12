@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -282,6 +283,10 @@ func probeVLESSPool(parent context.Context, results []proxyScanResult, candidate
 		if err != nil {
 			results[i].Stage = "VLESS_FAIL"
 			results[i].Error = err.Error()
+			// 失败必须归类：降级逻辑（degradedFromWSResults）靠 ErrorClass
+			// 区分「数据面超时」与「快速失败」；此前这里从不写 ErrorClass，
+			// VLESS_FAIL 的 errorClass 一律为空，降级无从判断。
+			results[i].ErrorClass = classifyProbeError(err)
 			continue
 		}
 		results[i].Stage = "VLESS_PASS"
@@ -336,15 +341,59 @@ func probeVLESSCandidate(ctx context.Context, candidateIP string, candidatePort 
 	return err
 }
 
-func probeVLESSCandidateMetrics(ctx context.Context, candidateIP string, candidatePort int, cfg vlessProbeConfig, template map[string]any) (vlessProbeMetrics, error) {
-	metrics := vlessProbeMetrics{}
+// maxVLESSProbePortAttempts 探针端口被抢占时换端口重试的次数上限。
+const maxVLESSProbePortAttempts = 3
+
+// allocProbePort 向内核要一个空闲本地端口。注意拿到的瞬间就已释放，
+// 调用方必须尽快让 sing-box 绑上去，窗口期内别的进程可能抢走——
+// 因此 probeVLESSCandidateMetrics 在绑定冲突时换端口重试。
+func allocProbePort() (int, error) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
-		return metrics, fmt.Errorf("分配本地探针端口失败: %w", err)
+		return 0, err
 	}
-	inboundPort := listener.Addr().(*net.TCPAddr).Port
+	port := listener.Addr().(*net.TCPAddr).Port
 	_ = listener.Close()
+	return port, nil
+}
 
+// isBindConflictError 识别「端口被抢占」导致的 sing-box 启动失败：
+// 进程退出前输出里带有 bind address already in use。其它启动失败
+// （模板错、二进制缺失）重试换端口也没用，直接返回。
+func isBindConflictError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "address already in use")
+}
+
+// probeVLESSCandidateMetrics 起 sing-box 探针测一次 VLESS 数据面。
+// 端口分配与绑定之间存在 TOCTOU 窗口（先 Listen 取端口、Close 释放，
+// 再起 sing-box 去绑）：窗口期内端口被别的进程或并发探针抢走时，
+// sing-box 绑失败，本次失败会被记到被测 IP 头上。绑定冲突时换一个
+// 新分配的端口重试，最多 3 次。
+func probeVLESSCandidateMetrics(ctx context.Context, candidateIP string, candidatePort int, cfg vlessProbeConfig, template map[string]any) (vlessProbeMetrics, error) {
+	metrics := vlessProbeMetrics{}
+	var lastErr error
+	for attempt := 0; attempt < maxVLESSProbePortAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return metrics, ctx.Err()
+		}
+		inboundPort, err := allocProbePort()
+		if err != nil {
+			return metrics, fmt.Errorf("分配本地探针端口失败: %w", err)
+		}
+		metrics, lastErr = probeVLESSCandidateMetricsOnce(ctx, candidateIP, candidatePort, cfg, template, inboundPort)
+		if lastErr == nil || !isBindConflictError(lastErr) {
+			return metrics, lastErr
+		}
+		log.Printf("VLESS probe port %d taken, retrying with a fresh port (attempt %d/%d)", inboundPort, attempt+1, maxVLESSProbePortAttempts)
+	}
+	return metrics, lastErr
+}
+
+func probeVLESSCandidateMetricsOnce(ctx context.Context, candidateIP string, candidatePort int, cfg vlessProbeConfig, template map[string]any, inboundPort int) (vlessProbeMetrics, error) {
+	metrics := vlessProbeMetrics{}
 	probeConfig, err := buildSingBoxProbeConfig(template, candidateIP, candidatePort, inboundPort)
 	if err != nil {
 		return metrics, fmt.Errorf("生成 sing-box 配置失败: %w", err)
@@ -432,6 +481,11 @@ func probeVLESSCandidateMetrics(ctx context.Context, candidateIP string, candida
 		return metrics, fmt.Errorf("VLESS 数据面请求失败: %w", err)
 	}
 	defer resp.Body.Close()
+	// 状态码先验：403/404 的错误体不必读满预算才判失败，且读超时会
+	// 先于状态码返回、把报错原因写错。
+	if resp.StatusCode != cfg.ExpectedStatus {
+		return metrics, fmt.Errorf("VLESS 数据面状态码 %d，预期 %d", resp.StatusCode, cfg.ExpectedStatus)
+	}
 	started := time.Now()
 	sampler := newSpeedSampler(io.LimitReader(resp.Body, cfg.ReadLimit))
 	n, readErr := sampler.copyTo(io.Discard)
@@ -453,9 +507,6 @@ func probeVLESSCandidateMetrics(ctx context.Context, candidateIP string, candida
 			return metrics, nil
 		}
 		return metrics, fmt.Errorf("读取 VLESS 测试响应失败: %w", readErr)
-	}
-	if resp.StatusCode != cfg.ExpectedStatus {
-		return metrics, fmt.Errorf("VLESS 数据面状态码 %d，预期 %d", resp.StatusCode, cfg.ExpectedStatus)
 	}
 	if metrics.Bytes < cfg.MinBytes {
 		return metrics, fmt.Errorf("VLESS 下载数据不足: %d/%d bytes", metrics.Bytes, cfg.MinBytes)

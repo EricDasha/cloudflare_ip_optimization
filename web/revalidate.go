@@ -310,9 +310,15 @@ func (a *app) revalidateActivePool(parent context.Context) (report revalidateRep
 
 	removed := make([]string, 0)
 	kept := make([]string, 0)
+	skipped := make([]string, 0)
 	for _, r := range all {
 		if r.OK {
 			report.Passed++
+			kept = append(kept, r.Member)
+		} else if r.Stage == "skipped" {
+			// 没轮上验证的成员不得按失败剔除：它根本没被测过，
+			// 预算耗尽时信号量没排上就直接判死，等于把好成员当垃圾清掉。
+			skipped = append(skipped, r.Member)
 			kept = append(kept, r.Member)
 		} else {
 			removed = append(removed, r.Member)
@@ -337,7 +343,11 @@ func (a *app) revalidateActivePool(parent context.Context) (report revalidateRep
 	report.Kept = kept
 
 	if len(removed) == 0 {
-		report.Note = "全部通过，未剔除任何成员"
+		if len(skipped) > 0 {
+			report.Note = fmt.Sprintf("全部通过，未剔除任何成员；%d 个未轮上验证（预算用尽），已保留", len(skipped))
+		} else {
+			report.Note = "全部通过，未剔除任何成员"
+		}
 		if err := restart(current); err != nil {
 			return report, fmt.Errorf("恢复转发失败: %w", err)
 		}

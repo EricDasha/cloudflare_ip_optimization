@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -28,6 +29,9 @@ func (a *app) loadPreferredSettings() {
 	a.preferredStatus = make(map[string]preferredDomainStatus)
 	data, err := os.ReadFile(filepath.Join(a.dataDir, preferredSettingsFile))
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("preferred settings load failed, using defaults (all enabled): %v", err)
+		}
 		return
 	}
 	var stored struct {
@@ -36,7 +40,10 @@ func (a *app) loadPreferredSettings() {
 		Enabled *[]string `json:"enabled"`
 		Limit   int       `json:"limit"`
 	}
-	if json.Unmarshal(data, &stored) != nil {
+	if err := json.Unmarshal(data, &stored); err != nil {
+		// 损坏的设置文件不得静默回落到“全部启用”：用户显式关掉的
+		// 域名会被悄悄重新启用，且无任何日志可查。
+		log.Printf("preferred settings corrupt, using defaults (all enabled): %v", err)
 		return
 	}
 	if stored.Limit >= 1 && stored.Limit <= maxPreferredDomains {
@@ -190,7 +197,7 @@ func (a *app) handlePreferredDomains(w http.ResponseWriter, r *http.Request) {
 			Enabled []string `json:"enabled"`
 			Limit   int      `json:"limit"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
@@ -213,7 +220,13 @@ func (a *app) handlePreferredDomains(w http.ResponseWriter, r *http.Request) {
 		} else if body.Limit != 0 {
 			a.preferredLimit = envInt("PROXY_PREFERRED_MAX_DOMAINS", 20)
 		}
-		a.preferredEnabled = want
+		// 内存必须与落盘一致：save 只写导入列表里的域名，want 若含
+		// 未导入域名，旧代码会让内存比磁盘多、重启后悄悄丢失。
+		enabled := make(map[string]bool, len(valid))
+		for _, domain := range valid {
+			enabled[domain] = true
+		}
+		a.preferredEnabled = enabled
 		if err := a.savePreferredSettingsLocked(); err != nil {
 			a.preferredMu.Unlock()
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -238,7 +251,10 @@ func (a *app) handleCFdataPushCandidates(w http.ResponseWriter, r *http.Request)
 		DataCenter string `json:"dataCenter"`
 		Limit      int    `json:"limit"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
 	if body.Limit <= 0 || body.Limit > 3000 {
 		body.Limit = 300
 	}
@@ -291,11 +307,14 @@ func (a *app) mergeCfdataIPsIntoCandidates(ips []string) {
 		if _, ok := snapshot.SourceByIP[ip]; ok {
 			continue
 		}
+		// 先判上限再登记：旧代码先写 SourceByIP 再截 IPs[:1000]，
+		// 到上限后每个新 IP 只进 map、随即被截掉——map 无限长，
+		// IP 却永远进不来，且 SourceByIP 里留一堆不在 IPs 里的孤儿。
+		if len(snapshot.IPs) >= candidatePoolTotalCap {
+			break
+		}
 		snapshot.SourceByIP[ip] = "cfdata"
 		snapshot.IPs = append(snapshot.IPs, ip)
-		if len(snapshot.IPs) > 1000 {
-			snapshot.IPs = snapshot.IPs[:1000]
-		}
 	}
 	if len(snapshot.IPs) > 0 {
 		a.candidates = snapshot

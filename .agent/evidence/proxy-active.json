@@ -1,0 +1,542 @@
+{
+  "updatedAt": "2026-11-11T17:52:58.940317758Z",
+  "host": "vlesdy.trojanjd.dpdns.org",
+  "path": "/thread/proxyip=tw.william.us.ci?ed=2560",
+  "ips": [
+    "207.57.125.21",
+    "154.36.145.47",
+    "15.164.118.107",
+    "108.160.135.122",
+    "185.115.207.82"
+  ],
+  "domains": [
+    "cmcc.vvvv.ee",
+    "www.oopt.eu.cc",
+    "cf.xreak.top",
+    "cfsaas.080112.xyz",
+    "cdn.aneko.ink",
+    "www.5h.com",
+    "yg8.ygkkk.dpdns.org",
+    "www.aneko.ink",
+    "cf.legspcpd.top",
+    "cf-cname.xingpingcn.top",
+    "www.shopify.com",
+    "serviceshub.samsclub.com",
+    "www.allianz.com",
+    "www.decathlon.com",
+    "www.asda.com",
+    "cookiebot.com",
+    "bluehost.com",
+    "nexusmods.com",
+    "glassdoor.com",
+    "www.jimdo.com",
+    "openai.com",
+    "www.sage.com",
+    "www.speedtest.net",
+    "investor.apple.com",
+    "markmonitor.com",
+    "store.epicgames.com",
+    "mycareer.verizon.com",
+    "onetrust.com",
+    "www.affirm.com"
+  ],
+  "results": [
+    {
+      "ip": "43.155.82.88",
+      "latency": 228,
+      "colo": "HKG",
+      "dataLatency": 15005,
+      "sourceRank": 2,
+      "stage": "VLESS_FAIL",
+      "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+    },
+    {
+      "ip": "207.57.123.31",
+      "latency": 231,
+      "colo": "HKG",
+      "dataLatency": 1492,
+      "sourceRank": 2,
+      "stage": "VLESS_PASS"
+    },
+    {
+      "ip": "154.36.145.47",
+      "latency": 235,
+      "colo": "HKG",
+      "dataLatency": 15004,
+      "sourceRank": 2,
+      "stage": "VLESS_FAIL",
+      "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+    },
+    {
+      "ip": "47.244.225.39",
+      "latency": 239,
+      "colo": "HKG",
+      "dataLatency": 687,
+      "sourceRank": 2,
+      "stage": "VLESS_PASS",
+      "note": "测速未完成（软门槛，仅影响排序）：VLESS 数据面请求失败: Get \"https://speed.cloudflare.com/__down?bytes=2097152\": context deadline exceeded"
+    },
+    {
+      "ip": "207.57.125.21",
+      "latency": 241,
+      "colo": "HKG",
+      "dataLatency": 583,
+      "sourceRank": 2,
+      "stage": "VLESS_PASS",
+      "note": "测速未完成（软门槛，仅影响排序）：VLESS 数据面请求失败: Get \"https://speed.cloudflare.com/__down?bytes=2097152\": context deadline exceeded"
+    },
+    {
+      "ip": "207.57.121.243",
+      "latency": 243,
+      "colo": "HKG",
+      "dataLatency": 15007,
+      "sourceRank": 2,
+      "stage": "VLESS_FAIL",
+      "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+    },
+    {
+      "ip": "38.55.192.169",
+      "latency": 245,
+      "colo": "HKG",
+      "dataLatency": 15005,
+      "sourceRank": 2,
+      "stage": "VLESS_FAIL",
+      "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+    },
+    {
+      "ip": "61.92.212.253",
+      "latency": 255,
+      "colo": "HKG",
+      "dataLatency": 15013,
+      "sourceRank": 2,
+      "stage": "VLESS_FAIL",
+      "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+    },
+    {
+      "ip": "207.57.122.184",
+      "latency": 263,
+      "colo": "HKG",
+      "dataLatency": 15011,
+      "sourceRank": 2,
+      "stage": "VLESS_FAIL",
+      "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+    },
+    {
+      "ip": "64.83.46.107",
+      "latency": 306,
+      "colo": "NRT",
+      "dataLatency": 15006,
+      "sourceRank": 2,
+      "stage": "VLESS_FAIL",
+      "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+    },
+    {
+      "ip": "69.8.131.228",
+      "latency": 308,
+      "colo": "NRT",
+      "dataLatency": 5062,
+      "sourceRank": 2,
+      "stage": "VLESS_FAIL",
+      "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": read tcp 127.0.0.1:45250-\u003e127.0.0.1:39393: read: connection reset by peer"
+    },
+    {
+      "ip": "161.117.181.127",
+      "latency": 337,
+      "colo": "SIN",
+      "dataLatency": 15006,
+      "sourceRank": 2,
+      "stage": "VLESS_FAIL",
+      "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+    },
+    {
+      "ip": "149.88.87.93",
+      "latency": 350,
+      "colo": "HKG",
+      "dataLatency": 819,
+      "sourceRank": 2,
+      "stage": "VLESS_PASS",
+      "note": "测速未完成（软门槛，仅影响排序）：VLESS 数据面请求失败: Get \"https://speed.cloudflare.com/__down?bytes=2097152\": read tcp 127.0.0.1:53136-\u003e127.0.0.1:46831: read: connection reset by peer"
+    },
+    {
+      "ip": "114.204.44.25",
+      "latency": 353,
+      "colo": "NRT",
+      "dataLatency": 1222,
+      "sourceRank": 2,
+      "stage": "VLESS_PASS",
+      "note": "测速未完成（软门槛，仅影响排序）：VLESS 数据面请求失败: Get \"https://speed.cloudflare.com/__down?bytes=2097152\": context deadline exceeded"
+    },
+    {
+      "ip": "114.204.40.185",
+      "latency": 360,
+      "colo": "NRT",
+      "dataLatency": 750,
+      "sourceRank": 2,
+      "stage": "VLESS_PASS",
+      "note": "测速未完成（软门槛，仅影响排序）：VLESS 数据面请求失败: Get \"https://speed.cloudflare.com/__down?bytes=2097152\": read tcp 127.0.0.1:52312-\u003e127.0.0.1:42269: read: connection reset by peer"
+    },
+    {
+      "ip": "103.118.40.68",
+      "latency": 368,
+      "colo": "TPE",
+      "dataLatency": 15018,
+      "sourceRank": 2,
+      "stage": "VLESS_FAIL",
+      "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+    },
+    {
+      "ip": "45.129.9.222",
+      "latency": 384,
+      "colo": "NRT",
+      "dataLatency": 835,
+      "sourceRank": 2,
+      "stage": "VLESS_PASS",
+      "note": "测速未完成（软门槛，仅影响排序）：VLESS 数据面请求失败: Get \"https://speed.cloudflare.com/__down?bytes=2097152\": EOF"
+    },
+    {
+      "ip": "38.211.230.85",
+      "latency": 386,
+      "colo": "SIN",
+      "dataLatency": 15005,
+      "sourceRank": 2,
+      "stage": "VLESS_FAIL",
+      "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+    },
+    {
+      "ip": "185.200.66.10",
+      "latency": 420,
+      "colo": "NRT",
+      "dataLatency": 15015,
+      "sourceRank": 2,
+      "stage": "VLESS_FAIL",
+      "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+    },
+    {
+      "ip": "60.130.209.253",
+      "latency": 423,
+      "colo": "KIX",
+      "dataLatency": 15007,
+      "sourceRank": 2,
+      "stage": "VLESS_FAIL",
+      "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+    },
+    {
+      "ip": "166.88.99.195",
+      "latency": 444,
+      "colo": "KIX",
+      "sourceRank": 2,
+      "stage": "WS_PASS"
+    },
+    {
+      "ip": "109.176.19.176",
+      "latency": 452,
+      "colo": "SIN",
+      "sourceRank": 2,
+      "stage": "WS_PASS"
+    },
+    {
+      "ip": "39.115.137.14",
+      "latency": 464,
+      "colo": "HKG",
+      "sourceRank": 2,
+      "stage": "WS_PASS"
+    },
+    {
+      "ip": "154.83.95.6",
+      "latency": 465,
+      "colo": "NRT",
+      "sourceRank": 2,
+      "stage": "WS_PASS"
+    },
+    {
+      "ip": "206.237.120.104",
+      "latency": 465,
+      "colo": "NRT",
+      "sourceRank": 2,
+      "stage": "WS_PASS"
+    },
+    {
+      "ip": "156.59.125.64",
+      "latency": 541,
+      "colo": "SJC",
+      "sourceRank": 2,
+      "stage": "WS_PASS"
+    },
+    {
+      "ip": "135.235.140.16",
+      "latency": 550,
+      "colo": "BOM",
+      "sourceRank": 2,
+      "stage": "WS_PASS"
+    },
+    {
+      "ip": "103.122.247.43",
+      "latency": 556,
+      "colo": "HKG",
+      "sourceRank": 2,
+      "stage": "WS_PASS"
+    },
+    {
+      "ip": "123.111.169.70",
+      "latency": 578,
+      "colo": "ICN",
+      "sourceRank": 2,
+      "stage": "WS_PASS"
+    },
+    {
+      "ip": "198.13.33.64",
+      "latency": 754,
+      "colo": "NRT",
+      "sourceRank": 2,
+      "stage": "WS_PASS"
+    },
+    {
+      "ip": "38.47.198.28",
+      "latency": 1275,
+      "colo": "NRT",
+      "sourceRank": 2,
+      "stage": "WS_PASS"
+    },
+    {
+      "ip": "103.143.81.178",
+      "latency": 242,
+      "colo": "HKG",
+      "sourceRank": 3,
+      "stage": "WS_PASS"
+    },
+    {
+      "ip": "45.192.201.197",
+      "latency": 687,
+      "colo": "NRT",
+      "sourceRank": 3,
+      "stage": "WS_PASS"
+    },
+    {
+      "ip": "188.164.248.143",
+      "latency": 1215,
+      "colo": "SIN",
+      "sourceRank": 3,
+      "stage": "WS_PASS"
+    },
+    {
+      "ip": "13.196.179.169",
+      "latency": 1289,
+      "colo": "NRT",
+      "sourceRank": 3,
+      "stage": "WS_PASS"
+    },
+    {
+      "ip": "43.165.135.8",
+      "latency": 5000,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 43.165.135.8:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "13.193.78.117",
+      "latency": 5000,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 13.193.78.117:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "13.158.86.30",
+      "latency": 5000,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 13.158.86.30:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "152.69.237.109",
+      "latency": 5000,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 152.69.237.109:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "13.158.71.221",
+      "latency": 5000,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 13.158.71.221:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "23.129.140.165",
+      "latency": 5000,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 23.129.140.165:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "15.164.118.107",
+      "latency": 5000,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 15.164.118.107:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "13.213.246.120",
+      "latency": 5000,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 13.213.246.120:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "13.250.70.157",
+      "latency": 5000,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 13.250.70.157:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "23.141.52.44",
+      "latency": 5000,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 23.141.52.44:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "56.69.125.222",
+      "latency": 5000,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 56.69.125.222:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "18.162.207.129",
+      "latency": 5000,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 18.162.207.129:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "69.8.131.142",
+      "latency": 5001,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 69.8.131.142:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "3.36.57.97",
+      "latency": 5001,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 3.36.57.97:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "216.23.120.251",
+      "latency": 5001,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 216.23.120.251:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "69.8.133.24",
+      "latency": 5001,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 69.8.133.24:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "43.198.156.94",
+      "latency": 5001,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 43.198.156.94:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "177.3.90.144",
+      "latency": 5001,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 177.3.90.144:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "43.156.39.15",
+      "latency": 5001,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "context deadline exceeded",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "83.229.123.135",
+      "latency": 5001,
+      "sourceRank": 2,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 83.229.123.135:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "149.104.28.62",
+      "latency": 167,
+      "sourceRank": 3,
+      "stage": "WS_FAIL",
+      "error": "tls: failed to verify certificate: x509: certificate is valid for ad.tpcms.com, not vlesdy.trojanjd.dpdns.org",
+      "errorClass": "handshake"
+    },
+    {
+      "ip": "3.112.67.101",
+      "latency": 5000,
+      "sourceRank": 3,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 3.112.67.101:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "103.201.130.126",
+      "latency": 5000,
+      "sourceRank": 3,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 103.201.130.126:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "172.64.146.106",
+      "latency": 5000,
+      "sourceRank": 3,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 172.64.146.106:443: i/o timeout",
+      "errorClass": "timeout"
+    },
+    {
+      "ip": "162.159.46.203",
+      "latency": 5000,
+      "sourceRank": 3,
+      "stage": "WS_FAIL",
+      "error": "dial tcp 162.159.46.203:443: i/o timeout",
+      "errorClass": "timeout"
+    }
+  ],
+  "error": "自动换池被换池闸拦截（healthy）；保留旧池",
+  "errorAt": "2026-11-11T17:51:13.264108024Z",
+  "memberChannels": {
+    "108.160.135.122": "subscription",
+    "15.164.118.107": "subscription",
+    "154.36.145.47": "subscription",
+    "185.115.207.82": "subscription",
+    "207.57.125.21": "subscription"
+  },
+  "disabled": [
+    "154.36.145.47",
+    "185.115.207.82"
+  ]
+}

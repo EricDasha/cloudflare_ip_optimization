@@ -104,7 +104,9 @@ func parseProcTCPUpstream(reader io.Reader, ipv6 bool, upstreamPort int, byIP ma
 			continue
 		}
 		parsed := net.ParseIP(remoteIP)
-		if parsed == nil || !isPublicIPv4(parsed) {
+		// 上游也可是 IPv6：旧代码只认 isPublicIPv4，CFNAT_IPS=6 时
+		// /api/cfnat/upstreams 恒为空。
+		if parsed == nil || (!isPublicIPv4(parsed) && !isPublicIPv6(parsed)) {
 			continue
 		}
 		state := procTCPState(fields[3])
@@ -228,6 +230,12 @@ func parseProcTCP(reader io.Reader, ipv6 bool, port int, byIP map[string]*cfnatC
 			continue
 		}
 		stats.PortHits++
+		// 只计活跃态：TIME_WAIT/CLOSE 等是已断连接的残留，计入会让
+		// 「在途连接数」虚高；与上游统计共用 procTCPStateActive 口径。
+		// PortHits 是诊断计数（命中端口的行数），保持在过滤之前。
+		if !procTCPStateActive(fields[3]) {
+			continue
+		}
 		remoteIP, _, ok := parseProcEndpoint(fields[2], ipv6)
 		parsed := net.ParseIP(remoteIP)
 		// 只排掉回环与未指定地址：设备经端口映射从外网进来，一样要认得出。

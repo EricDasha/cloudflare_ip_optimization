@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -166,5 +167,41 @@ func TestSubscriptionSettingsSnapshot(t *testing.T) {
 	}
 	if snap["converter"] == "" {
 		t.Fatal("converter should fall back to the default")
+	}
+}
+
+// 遇维护者上限必须整单拒绝、不落盘：旧代码报 400 的同时已把部分
+// 添加与先执行的删除保存了。
+func TestUpdateSubscriptionSettingsLimitIsAtomic(t *testing.T) {
+	maintainers := make([]string, 0, maxSubscriptionMaintainers)
+	for i := 0; i < maxSubscriptionMaintainers; i++ {
+		maintainers = append(maintainers, fmt.Sprintf("m%d.example.com", i))
+	}
+	a := &app{dataDir: t.TempDir(), subSettings: subscriptionSettings{Maintainers: maintainers}}
+	// 已满 24 个：一次加 2 个、同时删 1 个、同时 disable 1 个——
+	// 整单都必须被拒绝，内存与落盘都不变。
+	a.subSettings.Disabled = []string{"m1.example.com"}
+	_, _, _, _, _, err := a.updateSubscriptionSettings(
+		[]string{"new1.example.com", "new2.example.com"}, []string{"m0.example.com"}, nil, []string{"m2.example.com"}, "")
+	if err != errSubscriptionMaintainerLimit {
+		t.Fatalf("err = %v, want maintainer limit error", err)
+	}
+	if len(a.subSettings.Maintainers) != maxSubscriptionMaintainers {
+		t.Fatalf("maintainers = %d, want %d (unchanged)", len(a.subSettings.Maintainers), maxSubscriptionMaintainers)
+	}
+	m0Found := false
+	for _, host := range a.subSettings.Maintainers {
+		if host == "new1.example.com" || host == "new2.example.com" {
+			t.Fatalf("%s was added despite limit error", host)
+		}
+		if host == "m0.example.com" {
+			m0Found = true
+		}
+	}
+	if !m0Found {
+		t.Fatalf("m0.example.com was removed despite limit error")
+	}
+	if len(a.subSettings.Disabled) != 1 || a.subSettings.Disabled[0] != "m1.example.com" {
+		t.Fatalf("disabled changed despite limit error: %v", a.subSettings.Disabled)
 	}
 }

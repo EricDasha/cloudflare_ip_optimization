@@ -343,12 +343,38 @@ func (a *app) admittedPoolDomains(domains, guaranteed []string) []string {
 	return admitted
 }
 
+// gatePoolDomains 对生效池里的域名过质量闸，并保留「闸门只能筛目标、不能把
+// 服务拦死」这一条兜底。
+//
+// 单靠 admittedPoolDomains 会出现这种形态：IP 侧全灭或全被关闭，域名又都被体检
+// 判坏，planFixedMembers 拿到空集合直接报错，于是「池里有域名、1234 上一个目标
+// 都没有」。兜底只在「确实再也没有别的目标」时放行，体检结论仍留在账本上，
+// 下一轮照常复检。
+func (a *app) gatePoolDomains(pool proxyActivePool) []string {
+	original := pool.Domains
+	admitted := a.admittedPoolDomains(original, pool.Priority)
+	if len(admitted) > 0 || len(original) == 0 {
+		return admitted
+	}
+	if len(forwardingIPs(pool)) > 0 {
+		return admitted
+	}
+	log.Printf("domain gate DEGRADED: 无可用 IP 且域名全部未通过体检，按兜底放行 %d 个域名", len(original))
+	return original
+}
+
 // applyPoolLocked 在已持有 cfnatCtlMu 时执行换池（踢人/手动采用等已持锁路径复用）。
 func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
+	// 换池成功，历史报错随之作废——pool 是按值传的本地副本，这里清掉
+	// 只影响本次要落盘的那一份；失败路径不落盘，报错仍由调用方另行记录。
+	// 旧实现只清 poolBlock（内存态），Error/ErrorAt 从不清除：手动换池
+	// 成功后 GUI 仍挂着上一轮的拦截原因。
+	pool.Error = ""
+	pool.ErrorAt = time.Time{}
 	// 落盘的生效池可能带着体检已判坏的域名（闸门上线前写入的历史遗留）。
 	// 启动、手动采用、立即优选都走这里，若不过闸，重启就是把坏域名重新塞回
 	// -fixed 的通道——闸门只在建池时生效、在重启时失效，等于没有。
-	pool.Domains = a.admittedPoolDomains(pool.Domains, pool.Priority)
+	pool.Domains = a.gatePoolDomains(pool)
 	// 关闭标记只对在位成员有意义：整批换 IP 时原样复制 Disabled 会留下
 	// 「已经离池、却永远显示为关闭」的幽灵，体检也不会再碰它们。
 	pool.Disabled = pruneDisabledMissingIPs(pool)
@@ -362,21 +388,56 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 	cfnatCfg.Fixed = strings.Join(fixedMembers, ",")
 	cfnatCfg.Priority = strings.Join(priorityMembers, ",")
 	cfnatCfg.Fallback = strings.TrimSpace(env("CFNAT_FALLBACK", ""))
-	rollbackFixed, rollbackPriority, rollbackErr := planFixedMembers(current)
-	if rollbackErr != nil {
-		rollbackFixed = append(append([]string(nil), current.IPs...), current.Domains...)
-		rollbackPriority = nil
+	// 回滚目标是「换池前正在跑的那一份」，不是「用默认参数重算一份」：
+	// 现跑进程可能经 /api/cfnat/start 定制过 Addr/Port/Num/Sticky，
+	// 默认配置会把它们全丢掉。status().Args 是上一次成功启动的参数
+	// （start() 失败不改写它），直接复用就是最忠实的回滚。
+	// 只有从未成功启动过（无运行参数可复用）时，才用默认配置 +
+	// planFixedMembers(current) 重算；若连这份规划都做不出来（全员
+	// 关闭/锁位无置顶），宁可不回滚、如实报错，也不用原样 IP+域名
+	// 把已关闭的成员重新投入转发。
+	rollbackArgs := a.cfnat.status().Args
+	if len(rollbackArgs) == 0 {
+		if fixed, priority, err := planFixedMembers(current); err == nil {
+			rollbackCfg := defaultCFnatConfig()
+			rollbackCfg.Fixed = strings.Join(fixed, ",")
+			rollbackCfg.Priority = strings.Join(priority, ",")
+			rollbackCfg.Fallback = strings.TrimSpace(env("CFNAT_FALLBACK", ""))
+			rollbackArgs = rollbackCfg.args()
+		}
 	}
-	rollbackCfg := defaultCFnatConfig()
-	rollbackCfg.Fixed = strings.Join(rollbackFixed, ",")
-	rollbackCfg.Priority = strings.Join(rollbackPriority, ",")
-	rollbackCfg.Fallback = strings.TrimSpace(env("CFNAT_FALLBACK", ""))
+	// 同参不重启：自动换池、在位验活剔人、域名体检回池三条后台路径各自重算
+	// -fixed，同一轮里经常得出与正在运行的进程逐字相同的参数（生产日志里
+	// 16:21:12/16:21:16 连续三次 applied 的 -fixed 完全相同，每次都是一次
+	// stop()+start()）。对一模一样的参数重启 cfnat，唯一效果是把在途连接全部
+	// 掐断，然后拨向同一批目标。只有「进程确实在跑 + 参数逐字相同」才走落盘
+	// 通道；进程已退出时必须重建，否则池子改了却没人转发。
+	if shouldSkipCFnatRestart(a.cfnat.status(), cfnatCfg.args()) {
+		if err := a.commitPoolWithoutRestart(pool); err != nil {
+			return fmt.Errorf("保存生效池: %w", err)
+		}
+		// 参数未变但池记录变了（成员通道、体检结论等），状态要与 apply 路径一致。
+		a.poolGuardMu.Lock()
+		a.poolBlock, a.poolBlockAt, a.poolBlockBy = poolSwitchVerdict{}, time.Time{}, ""
+		a.poolGuardMu.Unlock()
+		if a.quality != nil {
+			if forwarding := forwardingIPs(pool); len(forwarding) > 0 {
+				a.quality.seedActive(forwarding[0], pool.UpdatedAt)
+			}
+		}
+		a.pruneActiveHealth(forwardingIPs(pool))
+		log.Printf("proxy active pool applied (unchanged, no restart): %s", strings.Join(fixedMembers, ","))
+		return nil
+	}
 	if err := a.cfnat.stop(); err != nil {
 		return fmt.Errorf("停止 cfnat: %w", err)
 	}
 	if err := a.cfnat.start(a.dataDir, cfnatCfg.args(), ""); err != nil {
 		applyErr := fmt.Errorf("启动新 cfnat: %w", err)
-		if rollbackErr := a.cfnat.start(a.dataDir, rollbackCfg.args(), ""); rollbackErr != nil {
+		if len(rollbackArgs) == 0 {
+			return fmt.Errorf("%w；无可回滚的运行配置（旧池规划也失败），cfnat 已停止", applyErr)
+		}
+		if rollbackErr := a.cfnat.start(a.dataDir, rollbackArgs, ""); rollbackErr != nil {
 			return fmt.Errorf("%w；回滚 cfnat 也失败: %v", applyErr, rollbackErr)
 		}
 		return applyErr
@@ -386,7 +447,10 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 		if stopErr := a.cfnat.stop(); stopErr != nil {
 			return fmt.Errorf("%w；回滚前停止新 cfnat 失败: %v", commitErr, stopErr)
 		}
-		if rollbackErr := a.cfnat.start(a.dataDir, rollbackCfg.args(), ""); rollbackErr != nil {
+		if len(rollbackArgs) == 0 {
+			return fmt.Errorf("%w；无可回滚的运行配置（旧池规划也失败），cfnat 已停止", commitErr)
+		}
+		if rollbackErr := a.cfnat.start(a.dataDir, rollbackArgs, ""); rollbackErr != nil {
 			return fmt.Errorf("%w；回滚 cfnat 也失败: %v", commitErr, rollbackErr)
 		}
 		return commitErr
@@ -405,8 +469,39 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 			a.quality.seedActive(forwarding[0], pool.UpdatedAt)
 		}
 	}
+	// 换池成功才裁健康账：离池 IP 的旧记录本来就不会再被读到
+	// （activePoolHealthy 只遍历当前成员），只占内存与 /api/status 体积。
+	// 失败路径不裁——旧池仍在跑，它的健康记录还得留着。
+	a.pruneActiveHealth(forwardingIPs(pool))
 	log.Printf("proxy active pool applied: %s", strings.Join(fixedMembers, ","))
 	return nil
+}
+
+// shouldSkipCFnatRestart 判定「这次换池能不能直接落盘、不重启 cfnat」。
+//
+// 判据只有一条：进程正跑着，且这次要用的参数与它启动时收到的逐字相同。
+// 参数相同意味着转发目标、优先级、回退深度全部没变，重启只是把在途连接
+// 掐断再拨回同一批目标。
+//
+// 进程没在跑时绝不能跳过：那些参数只存在于我们手里，不重启就等于池子改了
+// 却没人转发。参数有任何差异（哪怕只是顺序）也一律重启，宁可多断一次，
+// 不可让配置与实跑不一致。
+func shouldSkipCFnatRestart(st processStatus, want []string) bool {
+	return st.Running && sameCFnatArgs(st.Args, want)
+}
+
+// sameCFnatArgs 逐字比较两组 cfnat 命令行参数。用于判定「这次换池是否需要重启」。
+// 顺序敏感：args() 的输出顺序固定，不做集合比较。
+func sameCFnatArgs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // commitPoolWithoutRestart 落盘并替换内存中的生效池，但不重启 cfnat。
@@ -426,15 +521,23 @@ func (a *app) commitPoolWithoutRestart(pool proxyActivePool) error {
 }
 
 func (a *app) setProxyPoolError(message string, results []proxyScanResult) {
-	pool := a.proxyActivePoolSnapshot()
-	pool.Error = message
-	pool.ErrorAt = time.Now()
-	if results != nil {
-		pool.Results = results
-	}
+	// 快照-改-写回是竞态：promote/select 在 cfnatCtlMu 下落池的瞬间若
+	// 夹在快照与写回之间，刚落成的池会被这份旧快照原样盖掉；且只写内
+	// 存不落盘，重启后报错消失，与 Error/ErrorAt 的持久化结构自相矛
+	// 盾。改成在 activeMu 下直接读改写、解锁后再落盘。注意不能拿
+	// cfnatCtlMu：revalidate 在持双锁（proxyScanMu + cfnatCtlMu）时
+	// 调本函数，拿锁会死锁。
 	a.activeMu.Lock()
-	a.activePool = pool
+	a.activePool.Error = message
+	a.activePool.ErrorAt = time.Now()
+	if results != nil {
+		a.activePool.Results = results
+	}
+	pool := a.activePool
 	a.activeMu.Unlock()
+	if err := a.saveProxyActivePool(pool); err != nil {
+		log.Printf("proxy pool error persist failed: %v", err)
+	}
 	log.Printf("proxy auto apply skipped: %s", message)
 }
 
@@ -855,6 +958,14 @@ func (a *app) worstPoolMember(ips []string) string {
 	return worst
 }
 
+// refillGap 踢人补位的缺口：按实际转发的成员算，锁位时不补。
+func refillGap(pool proxyActivePool, poolSize int) int {
+	if pool.Lock {
+		return 0
+	}
+	return poolSize - len(forwardingIPs(pool))
+}
+
 // refillPoolAfterKick 踢人后的自动补位终审：从候选缓存考试新 IP，
 // 保序并入现有在位成员，把池补回 PoolSize 目标（5~15）。
 // 手动踢除的延续语义：不走 allowPoolSwitch 冷却（markPoolSwitched 由本路径自行记录）。
@@ -880,8 +991,15 @@ func (a *app) refillPoolAfterKick() {
 	}
 	defer a.proxyScanMu.Unlock()
 	current := a.proxyActivePoolSnapshot()
-	need := cfg.PoolSize - len(current.IPs)
+	// 缺口按实际转发的成员算：Disabled 成员占着 IPs 名额却不转发，
+	// 按 len(IPs) 算会得出 need=0，池永远补不满。锁位模式下补位无权
+	// 改动池子：补进来的 IP 会进 pool.IPs 但不进 -fixed，账面与转发
+	// 事实分叉，直接退出，等用户解锁再说。
+	need := refillGap(current, cfg.PoolSize)
 	if need <= 0 {
+		if current.Lock {
+			log.Printf("kick refill skipped: pool lock enabled")
+		}
 		return
 	}
 	snapshot := a.proxyCandidateSnapshot()
@@ -957,7 +1075,9 @@ func (a *app) refillPoolAfterKick() {
 		}
 		merged = append(merged, ip)
 		added = append(added, ip)
-		if len(merged) >= cfg.PoolSize {
+		// 按新增数封顶：merged 含 Disabled 成员，按 len(merged) 封顶会
+		// 在有已关闭成员时少补（与 need 的算法同病）。
+		if len(added) >= need {
 			break
 		}
 	}

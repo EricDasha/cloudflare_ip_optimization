@@ -34,6 +34,7 @@ func TestClassifyProbeError(t *testing.T) {
 		{"refused text", errors.New("dial tcp 1.2.3.4:443: connect: connection refused"), failureRefused},
 		{"tls text", errors.New("tls: first record does not look like a TLS handshake"), failureHandshake},
 		{"ws code", errors.New("WS 状态码 403"), failureProtocol},
+		{"chinese timeout", errors.New("VLESS 探针启动超时"), failureTimeout},
 		{"unknown", errors.New("something odd"), failureOther},
 	}
 	for _, tc := range cases {

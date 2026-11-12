@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -103,7 +104,11 @@ func newQualitySchedulerRuntime(dataDir string) *qualitySchedulerRuntime {
 		apply: envBool("PROXY_SCHEDULER_APPLY", true), interval: interval, batch: batch,
 		data: qualityStoreData{Version: 1, Records: make(map[string]*qualityRecord)},
 	}
-	_ = r.load()
+	// 载入失败不得静默吞掉：文件损坏或版本不对时进程会带着空账本启动，
+	// 至多 1500 条质量记录、Active 指向与晋升历史悄悄清零，死因无从查。
+	if err := r.load(); err != nil {
+		log.Printf("quality cache load failed, starting with empty ledger: %v", err)
+	}
 	return r
 }
 
@@ -259,6 +264,11 @@ func (r *qualitySchedulerRuntime) observe(ip, source string, mbps float64, laten
 		rec.ConsecutiveFailures = 0
 		if rec.IP != r.data.ActiveIP {
 			rec.State, rec.StateReason, rec.StateChangedAt = lineStandby, reasonProbePassed, now
+		} else if rec.State != lineActive {
+			// 恢复的 Active 必须捡回 ACTIVE：失败时它被置 FAILED，下一轮
+			// 观察先把它挪到 PROBING，成功后若还留在 PROBING，
+			// decideLineSwitch 见 State==FAILED/非 ACTIVE 会误判。
+			rec.State, rec.StateReason, rec.StateChangedAt = lineActive, reasonProbePassed, now
 		}
 	} else {
 		rec.ConsecutiveFailures++
@@ -295,7 +305,9 @@ func (r *qualitySchedulerRuntime) observeActiveHealth(success bool, latencyMs in
 	r.recalculateLocked(rec)
 	if success {
 		rec.ConsecutiveFailures = 0
-		if rec.State == lineDegraded {
+		if rec.State != lineActive {
+			// 旧实现只从 DEGRADED 捡回：FAILED 的 Active 成功后永远卡在
+			// FAILED，decideLineSwitch 每轮误判 FAILOVER。
 			rec.State, rec.StateReason, rec.StateChangedAt = lineActive, reasonProbePassed, now
 		}
 	} else {
@@ -466,6 +478,14 @@ func (r *qualitySchedulerRuntime) setError(message string) {
 	defer r.mu.Unlock()
 	r.data.LastError = message
 	_ = r.saveLocked()
+}
+
+// probeCadence 返回调度器实际的探测节拍（环境变量配置值），供状态
+// 接口展示：硬编码 5 分钟/12 个会与 PROXY_SCHEDULER_* 的实际值脱节。
+func (r *qualitySchedulerRuntime) probeCadence() (interval time.Duration, batch int) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.interval, r.batch
 }
 
 func (r *qualitySchedulerRuntime) snapshot() map[string]any {

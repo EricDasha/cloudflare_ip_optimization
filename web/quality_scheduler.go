@@ -62,7 +62,6 @@ const (
 	reasonProbePassed                = "probe_passed"
 	reasonPromotedSuperiorThroughput = "promoted_by_superior_throughput"
 	reasonPromotedNoActive           = "promoted_without_active"
-	reasonThroughputDrop             = "throughput_drop"
 	reasonProbeTimeout               = "probe_timeout"
 	reasonFailoverAfterActiveFailure = "failover_after_active_failure"
 	// reasonOrphanActiveDemoted：不变量修复时清出的「幽灵 ACTIVE」。
@@ -154,6 +153,12 @@ func superiorTo(candidate, active lineQuality, policy schedulerPolicy) bool {
 	activeSpeed := effectiveMbps(active.AverageMbps, policy.CapacityMbps)
 	candidateSpeed := effectiveMbps(candidate.AverageMbps, policy.CapacityMbps)
 	if activeSpeed > 0 && candidateSpeed > 0 {
+		// 吞吐轨同样要求成功率不低于 Active：只比速度会让一个历史
+		// 成功率 0.2、最近 3 轮恰好成功的抖动快 IP 挤掉成功率 1.0 的
+		// Active。WS 轨已有此要求，两轨同一口径。
+		if candidate.SuccessRate < active.SuccessRate {
+			return false
+		}
 		return candidateSpeed >= activeSpeed*(1+policy.RelativePromotionGain) &&
 			candidateSpeed >= activeSpeed+policy.AbsolutePromotionGainMbps
 	}
