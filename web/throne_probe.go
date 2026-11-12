@@ -455,27 +455,13 @@ func (a *app) reapThroneMembers(current proxyActivePool, now time.Time) {
 
 	next := fresh
 	next.UpdatedAt = now
-	next.IPs = make([]string, 0, len(fresh.IPs))
 	next.Domains = make([]string, 0, len(fresh.Domains))
-	removed := make([]string, 0, len(victims))
-	swapped := make([]string, 0, len(victims))
-	held := make([]string, 0, len(victims))
-	for _, ip := range fresh.IPs {
-		if !containsString(victims, ip) {
-			next.IPs = append(next.IPs, ip)
-			continue
-		}
-		if replacement, ok := replacements[ip]; ok {
-			next.IPs = append(next.IPs, replacement)
-			removed = append(removed, ip)
-			swapped = append(swapped, ip+"→"+replacement)
-			continue
-		}
-		// 无合格替补：不删。池子缩水（5→4→3）比留一个病号更糟，而且越缩越
-		// 容易触发「整组已死」。留下来并在账上标清理由，页面能看见。
-		next.IPs = append(next.IPs, ip)
-		held = append(held, ip)
+	victimSet := make(map[string]bool, len(victims))
+	for _, member := range victims {
+		victimSet[member] = true
 	}
+	merged, removed, swapped, held := mergePoolSwaps(fresh.IPs, victimSet, replacements, true)
+	next.IPs = merged
 	for _, domain := range fresh.Domains {
 		if !containsString(victims, domain) {
 			next.Domains = append(next.Domains, domain)

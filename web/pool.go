@@ -954,6 +954,53 @@ func replacePoolMember(current []string, from, to string) []string {
 	return pool
 }
 
+// mergePoolSwaps 把病号换成替补，返回新池成员与处置账。
+//   - 非病号原样保留；
+//   - 有替补的病号换成替补；无替补的病号按 keepUnresolved 处置：
+//     为真时暂留（验活：池子缩水比留一个病号更糟），为假时直接摘掉
+//     （关闭席：弱成员本来就不转发，摘掉不影响转发）；
+//   - 替补已在池里（考试期间别的路径把它换进来了）或已在本轮新池里
+//     （两个病号共用一个替补）时不再重复进池，病号仍摘掉——
+//     planFixedMembers 虽会对 -fixed 去重，但落盘池的成员计数与
+//     转发统计都会因重复 IP 算错。
+//
+// removed 是被摘掉的病号（含已由在位替补接替的）；swapped 是
+// "病号→替补" 的记录；held 是暂留的病号。
+func mergePoolSwaps(ips []string, victims map[string]bool, replacements map[string]string, keepUnresolved bool) (next, removed, swapped, held []string) {
+	next = make([]string, 0, len(ips))
+	removed = make([]string, 0, len(victims))
+	swapped = make([]string, 0, len(victims))
+	held = make([]string, 0, len(victims))
+	for _, ip := range ips {
+		if !victims[ip] {
+			next = append(next, ip)
+			continue
+		}
+		replacement, ok := replacements[ip]
+		if !ok {
+			if keepUnresolved {
+				// 无合格替补：不删。池子缩水（5→4→3）比留一个病号更糟，
+				// 而且越缩越容易触发「整组已死」。留下来并在账上标清理由，
+				// 页面能看见。
+				next = append(next, ip)
+				held = append(held, ip)
+			} else {
+				removed = append(removed, ip)
+			}
+			continue
+		}
+		if containsString(ips, replacement) || containsString(next, replacement) {
+			removed = append(removed, ip)
+			swapped = append(swapped, ip+"→"+replacement+"（已在位）")
+			continue
+		}
+		next = append(next, replacement)
+		removed = append(removed, ip)
+		swapped = append(swapped, ip+"→"+replacement)
+	}
+	return next, removed, swapped, held
+}
+
 func mergePoolResults(ips []string, current, fresh []proxyScanResult) []proxyScanResult {
 	byIP := make(map[string]proxyScanResult, len(current)+len(fresh))
 	for _, result := range current {

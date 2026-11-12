@@ -744,20 +744,10 @@ func (a *app) applyDisabledBenchChanges(removals []string, swaps map[string]stri
 
 	next := current
 	next.UpdatedAt = now
-	next.IPs = make([]string, 0, len(current.IPs))
-	for _, ip := range current.IPs {
-		if !victims[ip] {
-			next.IPs = append(next.IPs, ip)
-			continue
-		}
-		if candidate, ok := effectiveSwaps[ip]; ok {
-			next.IPs = append(next.IPs, candidate)
-		}
-	}
-	removed := make([]string, 0, len(victims))
-	for member := range victims {
-		removed = append(removed, member)
-	}
+	// 替补已在位时不重复进池（见 mergePoolSwaps）：关闭席的替补考试
+	// 同样耗时数十秒，期间别的路径可能已把它换入。
+	merged, removed, _, _ := mergePoolSwaps(current.IPs, victims, effectiveSwaps, false)
+	next.IPs = merged
 	// Disabled 的清理必须同时对照 IP 和域名：只留 next.IPs 会把同样被关闭的
 	// 域名从 Disabled 里抹掉，下一轮它就会悄悄回到 -fixed 开始转发——用户的
 	// 关闭决定不能被另一条链顺手撤销。
