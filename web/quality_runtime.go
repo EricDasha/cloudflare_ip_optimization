@@ -400,11 +400,12 @@ func (r *qualitySchedulerRuntime) decide(now time.Time) schedulerDecision {
 		_ = r.saveLocked()
 		return schedulerDecision{Event: switchNone, Reason: err.Error()}
 	}
-	// lastDecision 保真：NONE 不覆盖最后一次真实的 SWITCH/FAILOVER 记录，
-	// 否则每 5 分钟一轮的空决策会把换池审计痕迹冲掉（观测性缺陷）。
-	if decision.Event != switchNone {
-		r.data.LastDecision = decision
-	}
+	// LastDecision 只由 commitSwitch 写：decide() 只是提议，调度器随后
+	// 还要过换池闸、准入闸、片区检查与实际落池，任一环节被拦/失败，
+	// 这次晋升/故障转移都没发生。若 decide() 先把它落盘，
+	// proxy-quality.json 与 /api/status 就会显示一次从未发生的切换，
+	// 而 ActiveIP/LastSwitchAt 未变——审计痕迹与实际不符。
+	// （NONE 不覆盖的语义仍在：decide() 从不写 LastDecision。）
 	_ = r.saveLocked()
 	return decision
 }
