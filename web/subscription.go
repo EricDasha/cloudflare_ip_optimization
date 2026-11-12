@@ -27,6 +27,24 @@ func allowHTTPSRedirect(req *http.Request, base *url.URL) bool {
 	return req.URL.Scheme == "https" && strings.EqualFold(req.URL.Hostname(), base.Hostname())
 }
 
+// subscriptionRedirectPolicy 是订阅与候选源共用的重定向策略：只跟同 host
+// 的 HTTPS 跳转，且最多 10 次。Go 的 10 次重定向上限只在默认
+// checkRedirect 里（CheckRedirect == nil 时才用）：一旦自定义
+// CheckRedirect，上限就不存在——被攻陷的订阅转换器返回自指 Location
+// 时，一轮采集会被拖成请求风暴（订阅 URL 里还带 token 查询串，
+// 反复发往同一 host）。
+func subscriptionRedirectPolicy(base *url.URL) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		if !allowHTTPSRedirect(req, base) {
+			return http.ErrUseLastResponse
+		}
+		return nil
+	}
+}
+
 func fetchSubscriptionBody(parent context.Context, converter, maintainer, token string) ([]byte, int, error) {
 	if converter == "" || maintainer == "" || token == "" {
 		return nil, 0, errors.New("订阅转换器、维护者或 token 为空")
@@ -41,13 +59,8 @@ func fetchSubscriptionBody(parent context.Context, converter, maintainer, token 
 		subFetchTimeout = 45
 	}
 	client := &http.Client{
-		Timeout: time.Duration(subFetchTimeout) * time.Second,
-		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			if !allowHTTPSRedirect(req, parsed) {
-				return http.ErrUseLastResponse
-			}
-			return nil
-		},
+		Timeout:       time.Duration(subFetchTimeout) * time.Second,
+		CheckRedirect: subscriptionRedirectPolicy(parsed),
 	}
 	request, err := http.NewRequestWithContext(parent, http.MethodGet, target, nil)
 	if err != nil {
@@ -386,6 +399,10 @@ func (a *app) probeSubscriptions(parent context.Context) (int, error) {
 	passed := 0
 	a.subMu.Lock()
 	for ip, result := range survivor {
+		if result.Stage == "skipped" {
+			// 没排上 WS 槽位、根本没测：不得记 ConsecutiveFails。
+			continue
+		}
 		if vlessReady && result.Error == "" {
 			// 真实数据面启用时，握手通过不算结论——真正取不回内容的地址
 			// 不该先被记成 pass。等 VLESS 结果出来再写，避免「先判能用、
@@ -407,7 +424,14 @@ func (a *app) probeSubscriptions(parent context.Context) (int, error) {
 
 	if vlessReady {
 		probeCfg := vlessCfg
-		probeCfg.Timeout = time.Duration(envInt("PROXY_SUBSCRIPTION_VLESS_TIMEOUT", 12)) * time.Second
+		// 超时与预算必须钳制：0 值会毒化本子——超时 0 让每条探针 ctx
+		// 立即过期、全部记失败，3 轮后好 IP 被 ConsecutiveFails 判 fail；
+		// 预算 0 让整轮 VLESS 直接跳过、通过数为 0。
+		vlessTimeoutSeconds := envInt("PROXY_SUBSCRIPTION_VLESS_TIMEOUT", 12)
+		if vlessTimeoutSeconds < 3 || vlessTimeoutSeconds > 60 {
+			vlessTimeoutSeconds = 12
+		}
+		probeCfg.Timeout = time.Duration(vlessTimeoutSeconds) * time.Second
 		probePort := cfg.Port
 		maxProbes := envInt("PROXY_SUBSCRIPTION_VLESS_MAX", 120)
 		if maxProbes < 1 || maxProbes > 1000 {
@@ -435,7 +459,11 @@ func (a *app) probeSubscriptions(parent context.Context) (int, error) {
 		sem := make(chan struct{}, concurrency)
 		var wg sync.WaitGroup
 		var mu sync.Mutex
-		vlessCtx, vlessCancel := context.WithTimeout(parent, time.Duration(envInt("PROXY_SUBSCRIPTION_VLESS_BUDGET", 900))*time.Second)
+		vlessBudgetSeconds := envInt("PROXY_SUBSCRIPTION_VLESS_BUDGET", 900)
+		if vlessBudgetSeconds < 60 || vlessBudgetSeconds > 1800 {
+			vlessBudgetSeconds = 900
+		}
+		vlessCtx, vlessCancel := context.WithTimeout(parent, time.Duration(vlessBudgetSeconds)*time.Second)
 		for _, ip := range wsPass {
 			wg.Add(1)
 			go func(ip string) {
@@ -449,6 +477,11 @@ func (a *app) probeSubscriptions(parent context.Context) (int, error) {
 				ctx, cancel := context.WithTimeout(vlessCtx, probeCfg.Timeout)
 				metrics, err := probeVLESSCandidateMetrics(ctx, ip, probePort, probeCfg, vlessTemplate)
 				cancel()
+				if err != nil && isLocalProbeError(err) {
+					// 探针自己坏了（端口冲突耗尽、sing-box 提前退出等）：
+					// 不是候选的问题，不记失败账；否则整批候选各背一次连败。
+					return
+				}
 				mu.Lock()
 				defer mu.Unlock()
 				outcome := subscriptionProbeOutcome{

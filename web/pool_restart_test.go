@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -284,5 +286,51 @@ func TestApplyPoolLockedPrunesStaleActiveHealth(t *testing.T) {
 	}
 	if !kept {
 		t.Fatalf("current member 1.1.1.1 pruned by mistake")
+	}
+}
+
+// F4：换池提交与报错落盘并发时，磁盘与内存最终必须一致——
+// 旧实现里 setProxyPoolError「解锁后再落盘」，commitPoolWithoutRestart
+// 「先落盘再上锁写内存」，两边的窗口互相覆盖，重启后池会静默回退
+// 到旧成员。现两边都在同一把 activeMu 下完成「落盘+内存写回」。
+func TestPoolFileAndMemoryAgreeUnderConcurrentWrites(t *testing.T) {
+	a := &app{
+		dataDir:    t.TempDir(),
+		activePool: proxyActivePool{IPs: []string{"1.1.1.1"}, UpdatedAt: time.Now()},
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			pool := proxyActivePool{
+				IPs:       []string{"1.1.1.1", "2.2.2.2"},
+				UpdatedAt: time.Now(),
+			}
+			if i%2 == 0 {
+				pool.IPs = []string{"1.1.1.1", "3.3.3.3"}
+			}
+			_ = a.commitPoolWithoutRestart(pool)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			a.setProxyPoolError("并发报错", nil)
+		}
+	}()
+	wg.Wait()
+	saved := a.proxyActivePoolSnapshot()
+	data, err := os.ReadFile(filepath.Join(a.dataDir, proxyActivePoolFile))
+	if err != nil {
+		t.Fatalf("读池文件: %v", err)
+	}
+	var onDisk proxyActivePool
+	if err := json.Unmarshal(data, &onDisk); err != nil {
+		t.Fatalf("解析池文件: %v", err)
+	}
+	if !reflect.DeepEqual(onDisk.IPs, saved.IPs) || onDisk.Error != saved.Error {
+		t.Fatalf("磁盘与内存不一致：磁盘 IPs=%v Error=%q，内存 IPs=%v Error=%q",
+			onDisk.IPs, onDisk.Error, saved.IPs, saved.Error)
 	}
 }

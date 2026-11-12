@@ -433,3 +433,19 @@ func TestRevalidateKeepsSkippedDomains(t *testing.T) {
 		t.Fatalf("Removed = %v, want [bad.example]", report.Removed)
 	}
 }
+
+// 总预算到期时正在跑的域名探针被截断，必须记 skipped 保留，不得按真失败剔除。
+func TestRevalidateOneDomainBudgetExpiryIsSkipped(t *testing.T) {
+	a := &app{dataDir: t.TempDir()}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res := a.revalidateOneDomain(ctx, "example.com", vlessProbeConfig{}, nil, false)
+	if res.Stage != "skipped" {
+		t.Fatalf("cancelled ctx must yield skipped, got stage=%q err=%q", res.Stage, res.Error)
+	}
+	// 对照：预算充足时 TCP 被拒是真失败，记 tcp 段。
+	res = a.revalidateOneDomain(context.Background(), "127.0.0.1", vlessProbeConfig{}, nil, false)
+	if res.Stage != "tcp" || res.OK {
+		t.Fatalf("live ctx refused dial must be tcp failure, got stage=%q ok=%v err=%q", res.Stage, res.OK, res.Error)
+	}
+}

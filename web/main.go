@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -327,8 +328,15 @@ func (a *app) triggerCFdataScan() {
 const autoApplyBudget = 10 * time.Minute
 
 // newAutoApplyContext 每次漏斗都开一份全新预算，与刷新/请求 ctx 彻底解耦。
+// 预算按 VLESS 终审工作量算（见 vlessReviewBudget），下限 10 分钟：
+// 固定 10 分钟在 batch/Timeout/MaxCandidates 取大值时不够，尾部候选
+// 没验却被记失败进质量账。
 func newAutoApplyContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), autoApplyBudget)
+	budget := vlessReviewBudget(defaultProxyAutoConfig().VLESS)
+	if budget < autoApplyBudget {
+		budget = autoApplyBudget
+	}
+	return context.WithTimeout(context.Background(), budget)
 }
 
 // refreshCandidatesAfterCFdata 轮询等待 cfdata 退出，然后重算候选。
@@ -412,6 +420,25 @@ func (a *app) cfdataIPListStale() bool {
 // runQualitySchedulerProbe 后台优选主循环：
 // 从 Candidate Pool 取一批 IP → WS/VLESS 测试 → 观察结果 → 决定是否换池。
 // 此函数是三池模型的核心执行器。
+// healthProbeBudget 按成员数算在位健康探测预算：并发槽数×单条上限，
+// 再留 1 秒余量，下限 5 秒。固定 5 秒时，成员一多尾部必然超时——
+// 预算不够被当成「成员死了」，与 throne 的按需预算（按目标数算）
+// 是同一笔账，不能只在一处算对。
+func healthProbeBudget(memberCount, concurrency, maxLatencyMs int) time.Duration {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if maxLatencyMs < 1 {
+		maxLatencyMs = 1
+	}
+	rounds := (memberCount + concurrency - 1) / concurrency
+	need := time.Duration(rounds)*time.Duration(maxLatencyMs)*time.Millisecond + time.Second
+	if need < 5*time.Second {
+		need = 5 * time.Second
+	}
+	return need
+}
+
 func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	if a.quality == nil {
 		return
@@ -434,11 +461,21 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	// the only remaining source, so an empty candidate batch must not disable
 	// the health gate.
 	healthNow := time.Now()
-	if len(current.IPs) > 0 {
-		healthCtx, healthCancel := context.WithTimeout(parent, 5*time.Second)
-		activeResults := scanProxyWebSockets(healthCtx, current.IPs, cfg)
+	// 只测真正转发的成员：Disabled 成员既不进 cfnat -fixed，还占预算槽位；
+	// 预算按成员数算，不再固定 5 秒——14 个成员（并发 4、单条 1.5 秒）
+	// 就要 6 秒，尾部成员此前每轮确定性地拿不到槽位被记假失败，
+	// LastFail 每轮刷新，健康闸永久 fail-open。
+	targets := forwardingIPs(current)
+	if len(targets) > 0 {
+		healthCtx, healthCancel := context.WithTimeout(parent, healthProbeBudget(len(targets), cfg.Concurrency, cfg.MaxLatency))
+		activeResults := scanProxyWebSockets(healthCtx, targets, cfg)
 		healthCancel()
 		for _, result := range activeResults {
+			if result.Stage == "skipped" {
+				// 没排上槽位、根本没测：不得记成健康失败，否则尾部成员
+				// 每轮被刷新 LastFail，健康闸永久 fail-open。
+				continue
+			}
 			ok := result.Error == ""
 			a.recordActiveHealth(result.IP, ok, healthNow)
 			if result.IP == a.quality.activeIP() {
@@ -495,7 +532,9 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 		// 15 秒超时，12 个一批最坏 180 秒 + 测速 6×20 秒，45 秒一到
 		// 后面的尝试瞬间报 context 错误——不是 IP 死了，是预算没了，
 		// 降级逻辑（改动 B）还会把这些假超时当真失败采纳。与漏斗同款：
-		// 终审单独开一份 10 分钟预算，探测量不变，只是让它跑完。
+		// 终审单独开一份按工作量算的预算（见 vlessReviewBudget），
+		// 探测量不变，只是让它跑完；预算仍不够时没轮上的记 skipped，
+		// 不入失败账。
 		vlessCtx, vlessCancel := newAutoApplyContext()
 		defer vlessCancel()
 		passed = probeVLESSPool(vlessCtx, results, cfg.Port, len(results), cfg.VLESS, template)
@@ -515,6 +554,12 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 		passedSet[ip] = struct{}{}
 	}
 	for _, result := range results {
+		if result.Stage == "skipped" {
+			// 没轮上探测（WS 排队预算耗尽，或 VLESS 终审预算耗尽）：
+			// 不是失败，不得进质量账。否则尾部候选每轮被记一次
+			// ConsecutiveFailures，3 次即进 lineFailed。
+			continue
+		}
 		_, ok := passedSet[result.IP]
 		a.quality.observe(result.IP, snapshot.SourceByIP[result.IP], result.DownloadMbps, result.Latency, ok, now)
 	}
@@ -548,24 +593,43 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 		log.Printf("scheduler pool switch skipped: target %s fails pool gate (not a public IPv4)", decision.ToIP)
 		return
 	}
-	if containsString(current.IPs, decision.ToIP) {
-		log.Printf("scheduler pool switch skipped: target already in current pool")
-		return
-	}
-	// 片区多样性：调度器单独换一个成员时，若换完会让池的段数变少就拒绝。
-	// spreadBySegment 只在全量重挑/踢人补位里跑过，这条路径此前完全绕过片区
-	// 检查——池结构可以一轮一轮被换成同一段，而所有指标都显示正常。
-	nextIPs := replacePoolMember(current.IPs, decision.FromIP, decision.ToIP)
-	if degradedSegmentDiversity(current.IPs, nextIPs) {
-		log.Printf("scheduler pool switch skipped: segment diversity would drop %v -> %v", poolSegmentStats(current.IPs), poolSegmentStats(nextIPs))
-		a.quality.setError("调度器换池被片区多样性检查拦截：换入后段数减少")
-		return
-	}
-	pool := current
-	pool.UpdatedAt, pool.Host, pool.Path = now, cfg.Host, cfg.Path
-	pool.IPs = nextIPs
-	pool.Results = mergePoolResults(pool.IPs, current.Results, results)
-	if err := a.applyProxyPool(pool, current); err != nil {
+	// 提交前在锁内重取快照再换：探测持续数分钟，期间验活/reconcile
+	// 随时可能换池；拿开考前的旧快照提交会把并发改动覆盖掉，甚至
+	// 复活刚剔的死成员（见 applyPoolRebased）。以下三道检查都在
+	// 新快照上重做——旧快照上的结论已过期。
+	if err := a.applyPoolRebased(func(fresh proxyActivePool) (proxyActivePool, bool) {
+		if containsString(fresh.IPs, decision.ToIP) {
+			log.Printf("scheduler pool switch skipped: target already in current pool")
+			return proxyActivePool{}, false
+		}
+		if !containsString(fresh.IPs, decision.FromIP) {
+			// 换出对象已不在位（验活/别路刚换过），决策前提已不存在：
+			// 不能拿 replacePoolMember 去顶 fresh.IPs[0]，下一轮按新池重判。
+			log.Printf("scheduler pool switch skipped: source %s no longer in pool", decision.FromIP)
+			return proxyActivePool{}, false
+		}
+		// 片区多样性：调度器单独换一个成员时，若换完会让池的段数变少就拒绝。
+		// spreadBySegment 只在全量重挑/踢人补位里跑过，这条路径此前完全绕过片区
+		// 检查——池结构可以一轮一轮被换成同一段，而所有指标都显示正常。
+		nextIPs := replacePoolMember(fresh.IPs, decision.FromIP, decision.ToIP)
+		if degradedSegmentDiversity(fresh.IPs, nextIPs) {
+			log.Printf("scheduler pool switch skipped: segment diversity would drop %v -> %v", poolSegmentStats(fresh.IPs), poolSegmentStats(nextIPs))
+			a.quality.setError("调度器换池被片区多样性检查拦截：换入后段数减少")
+			return proxyActivePool{}, false
+		}
+		pool := fresh
+		pool.UpdatedAt, pool.Host, pool.Path = now, cfg.Host, cfg.Path
+		pool.IPs = nextIPs
+		pool.Results = mergePoolResults(pool.IPs, fresh.Results, results)
+		return pool, true
+	}); err != nil {
+		if errors.Is(err, errPoolRebaseAborted) {
+			return
+		}
+		if errors.Is(err, errPoolChangedDuringSubmit) {
+			log.Printf("scheduler pool switch skipped: pool changed during submit, will retry next round")
+			return
+		}
 		a.quality.setError("调度器换池失败: " + err.Error())
 		return
 	}

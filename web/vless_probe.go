@@ -48,6 +48,43 @@ type vlessProbeMetrics struct {
 	Bytes    int64
 	Duration time.Duration
 	Mbps     float64
+	// Proven 表示本次探测有明确的数据面成功证据：隧道里收到了源站的
+	// HTTP 响应（见 vlessResponseProvesDataPlane）。只有它能证明候选
+	// 的数据面真的通过——DataLatency 只是整次尝试的耗时（含 15 秒超时），
+	// ErrorClass 也只是失败归类，两者都不能当「连上过」的证明。
+	// 降级准入（degradedFromWSResults）只认这一位。
+	Proven bool
+}
+
+// vlessResponseProvesDataPlane 判断一次经 VLESS 隧道收到的 HTTP 响应
+// 是否证明数据面真的通过。纯函数，便于单测钉死边界。
+//
+// 证明成立：
+//   - 状态码等于预期状态：sing-box 不会凭空拼出调用方要的那个状态码；
+//   - 其他非代理错误状态（如 200/403/404）：请求确实穿过隧道抵达了源站，
+//     源站回了真实的 HTTP 状态——状态码不对是测速端点的问题，不是隧道的问题。
+//
+// 不算证明：
+//   - 502/503/504：sing-box 的 HTTP 入站（mixed inbound）在出站拨号失败
+//     时会就地合成 502 之类的错误响应，请求根本没进隧道。只凭这类状态码
+//     就认「通了」，等于把探针坏了也当成候选好了。
+//   - 无响应（statusCode==0）：client.Do 直接报错，没收到任何响应头。
+func vlessResponseProvesDataPlane(statusCode, expectedStatus int) bool {
+	if statusCode <= 0 {
+		return false
+	}
+	if statusCode == expectedStatus {
+		// 预期状态本身若就是代理错误码，同样不可信——配置里不该这么写，
+		// 但防一手：sing-box 合成的 502 正好撞上预期 502 时不能算数。
+		return expectedStatus != http.StatusBadGateway &&
+			expectedStatus != http.StatusServiceUnavailable &&
+			expectedStatus != http.StatusGatewayTimeout
+	}
+	switch statusCode {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return false
+	}
+	return true
 }
 
 // speedSampler 分片采样读取器：边读边按固定时间片记字节账。
@@ -268,19 +305,147 @@ func buildSingBoxProbeConfig(template map[string]any, candidateIP string, candid
 }
 
 func probeVLESSPool(parent context.Context, results []proxyScanResult, candidatePort, poolSize int, cfg vlessProbeConfig, template map[string]any) []string {
+	return probeVLESSPoolWithProbe(parent, results, candidatePort, poolSize, cfg, template, probeVLESSCandidate)
+}
+
+// probeVLESSPoolWithProbe 与 probeVLESSPool 相同，但探针函数可注入，
+// 便于单测钉死「数据面证据如何进结果、降级如何认」而不必真的起 sing-box。
+// isLocalProbeError 识别「探针自己坏了」而不是「候选坏了」。
+//
+// 本地故障包括：端口分配/配置生成/临时文件/sing-box 启动失败、
+// 绑定冲突 3 次重试耗尽、sing-box 迟迟起不来（启动超时）、
+// sing-box 中途死亡后本地代理拨号被拒（错误里出现 127.0.0.1——
+// 探针的 HTTP 入口永远只监听 127.0.0.1，对端的拒绝不会长这样）。
+//
+// 这类失败记到候选头上是误判：并发抢端口或 sing-box 崩一次，整批候选
+// 各背一次失败，3 轮即进 lineFailed；第一轮只修了「重试成功不记账」，
+// 耗尽分支仍归因。注意裸 "connection refused" 不算本地：只有带
+// 127.0.0.1 的才是拨本地入口被拒，对端的拒绝由 sing-box 在隧道内
+// 合成 502/503/504 响应，不会以 dial 错误出现。
+func isLocalProbeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "分配本地探针端口失败"),
+		strings.Contains(msg, "生成 sing-box 配置失败"),
+		strings.Contains(msg, "创建 sing-box 临时配置失败"),
+		strings.Contains(msg, "写入 sing-box 临时配置失败"),
+		strings.Contains(msg, "关闭 sing-box 临时配置失败"),
+		strings.Contains(msg, "保护 sing-box 临时配置失败"),
+		strings.Contains(msg, "启动 sing-box 失败"),
+		strings.Contains(msg, "sing-box 提前退出"),
+		strings.Contains(msg, "vless 探针启动超时"),
+		strings.Contains(msg, "address already in use"),
+		strings.Contains(msg, "127.0.0.1"):
+		return true
+	}
+	return false
+}
+
+// vlessSpeedTimeoutSeconds 是 VLESS 测速单条超时（秒），与
+// rankVLESSPassesBySpeed 共用同一钳制，避免两处各写各的范围。
+func vlessSpeedTimeoutSeconds() int {
+	timeout := envInt("PROXY_VLESS_SPEED_TIMEOUT", 20)
+	if timeout < 5 || timeout > 120 {
+		timeout = 20
+	}
+	return timeout
+}
+
+// vlessReviewBudget 按可配工作量算 VLESS 终审预算：探针（单轮候选数×
+// 单条超时）+ 测速（最多 6 个×测速超时）+ 60 秒余量，下限 10 分钟、
+// 上限 30 分钟。此前终审固定 10 分钟，但工作量可配：batch 50×15 秒
+// =750 秒、Timeout 60 秒×12=720 秒、漏斗 MaxCandidates 60×15 秒
+// =900 秒，默认值（20×15+6×20=420 秒）刚好够用，属「默认够、允许值
+// 不够」——尾部候选没验却被记失败进质量账。
+func vlessReviewBudget(cfg vlessProbeConfig) time.Duration {
+	maxCandidates := cfg.MaxCandidates
+	if maxCandidates < 1 {
+		maxCandidates = 1
+	}
+	if maxCandidates > 100 {
+		maxCandidates = 100
+	}
+	timeout := cfg.Timeout
+	if timeout < 3*time.Second {
+		timeout = 3 * time.Second
+	}
+	if timeout > 60*time.Second {
+		timeout = 60 * time.Second
+	}
+	need := time.Duration(maxCandidates)*timeout +
+		time.Duration(maxVLESSSpeedProbes)*time.Duration(vlessSpeedTimeoutSeconds())*time.Second +
+		time.Minute
+	if need < 10*time.Minute {
+		need = 10 * time.Minute
+	}
+	if need > 30*time.Minute {
+		need = 30 * time.Minute
+	}
+	return need
+}
+
+func probeVLESSPoolWithProbe(parent context.Context, results []proxyScanResult, candidatePort, poolSize int, cfg vlessProbeConfig, template map[string]any, probe func(context.Context, string, int, vlessProbeConfig, map[string]any) (vlessProbeMetrics, error)) []string {
+	// 入口钳制：validate() 只在漏斗路径调用，踢人补位与调度器不调；
+	// MaxCandidates≤0 时 attempts>=0 首轮即成立、零次尝试，补位/调度
+	// 静默无替补；Timeout≤0 时每条探针 ctx 立即过期、全部记失败。
+	// 订阅段的超时/预算另在 subscription.go 里钳制。
+	maxCandidates := cfg.MaxCandidates
+	if maxCandidates < 1 {
+		maxCandidates = 1
+	}
+	if maxCandidates > 100 {
+		maxCandidates = 100
+	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
 	order := vlessProbeOrder(results)
+	attempted := make(map[int]struct{}, len(order))
 	attempts := 0
 	for _, i := range order {
-		if attempts >= cfg.MaxCandidates {
+		if attempts >= maxCandidates {
 			break
 		}
+		if parent.Err() != nil {
+			// 父预算已到期：这一条及之后都没验，不得记失败。
+			results[i].Stage = "skipped"
+			results[i].Error = "VLESS 终审预算耗尽，未开始探测"
+			results[i].ErrorClass = failureTimeout
+			continue
+		}
 		attempts++
-		ctx, cancel := context.WithTimeout(parent, cfg.Timeout)
+		attempted[i] = struct{}{}
+		ctx, cancel := context.WithTimeout(parent, timeout)
 		started := time.Now()
-		err := probeVLESSCandidate(ctx, results[i].IP, candidatePort, cfg, template)
+		metrics, err := probe(ctx, results[i].IP, candidatePort, cfg, template)
 		cancel()
 		results[i].DataLatency = time.Since(started).Milliseconds()
+		// 数据面证据随 metrics 回来：失败时也要记——降级准入只认它。
+		// 此前 probeVLESSCandidate 只返回 error，metrics 直接丢掉，
+		// 失败候选有没有真的通根本无从知道，降级只能靠「非超时」瞎猜。
+		results[i].DataProven = metrics.Proven
 		if err != nil {
+			if parent.Err() != nil {
+				// 本条正在跑时父预算到期：不是候选死了，是预算没了。
+				results[i].Stage = "skipped"
+				results[i].Error = "VLESS 终审预算耗尽，探测被截断"
+				results[i].ErrorClass = failureTimeout
+				continue
+			}
+			if isLocalProbeError(err) {
+				// 探针自己坏了（端口冲突耗尽、sing-box 提前退出等）：
+				// 不是候选的问题，记 skipped，不进质量账、不进降级。
+				// 降级准入已只认 DataProven（本轮 P1），这里再把账也摘掉，
+				// 否则整批候选各背一次连败。
+				results[i].Stage = "skipped"
+				results[i].Error = err.Error()
+				results[i].ErrorClass = failureLocal
+				continue
+			}
 			results[i].Stage = "VLESS_FAIL"
 			results[i].Error = err.Error()
 			// 失败必须归类：降级逻辑（degradedFromWSResults）靠 ErrorClass
@@ -290,6 +455,15 @@ func probeVLESSPool(parent context.Context, results []proxyScanResult, candidate
 			continue
 		}
 		results[i].Stage = "VLESS_PASS"
+	}
+	// 名额已满没轮上的也不是失败：本轮只验 N 个，剩下的根本没测过，
+	// 不得进质量账（调度器 observe 会跳过 skipped）。
+	for _, i := range order {
+		if _, ok := attempted[i]; !ok && results[i].Stage == "WS_PASS" {
+			results[i].Stage = "skipped"
+			results[i].Error = "本轮 VLESS 终审名额已满，未开始探测"
+			results[i].ErrorClass = failureTimeout
+		}
 	}
 	return fastestVLESSPasses(results, poolSize)
 }
@@ -336,9 +510,8 @@ func fastestVLESSPasses(results []proxyScanResult, poolSize int) []string {
 	return result
 }
 
-func probeVLESSCandidate(ctx context.Context, candidateIP string, candidatePort int, cfg vlessProbeConfig, template map[string]any) error {
-	_, err := probeVLESSCandidateMetrics(ctx, candidateIP, candidatePort, cfg, template)
-	return err
+func probeVLESSCandidate(ctx context.Context, candidateIP string, candidatePort int, cfg vlessProbeConfig, template map[string]any) (vlessProbeMetrics, error) {
+	return probeVLESSCandidateMetrics(ctx, candidateIP, candidatePort, cfg, template)
 }
 
 // maxVLESSProbePortAttempts 探针端口被抢占时换端口重试的次数上限。
@@ -452,6 +625,18 @@ func probeVLESSCandidateMetricsOnce(ctx context.Context, candidateIP string, can
 		conn, dialErr := net.DialTimeout("tcp4", address, 100*time.Millisecond)
 		if dialErr == nil {
 			_ = conn.Close()
+			// 拨通只说明「这个端口有人监听」，不说明是自己的 sing-box：
+			// 并发探针撞端口时，输家的 sing-box 绑定失败已退出，但拨号
+			// 恰好打通赢家的监听端口，直接 break 就会借赢家的隧道测——
+			// 输家的候选可能借赢家的隧道拿到通过，或背上赢家的错误。
+			// 拨通后先非阻塞确认本进程还没退出，退出了按绑定冲突
+			// 返回（调用方换端口重试）。
+			select {
+			case processErr := <-done:
+				processFinished = true
+				return metrics, formatSingBoxExit(processErr, output, template)
+			default:
+			}
 			break
 		}
 		select {
@@ -481,6 +666,11 @@ func probeVLESSCandidateMetricsOnce(ctx context.Context, candidateIP string, can
 		return metrics, fmt.Errorf("VLESS 数据面请求失败: %w", err)
 	}
 	defer resp.Body.Close()
+	// 响应头到了，就按 vlessResponseProvesDataPlane 判定数据面证据：
+	// 状态码不对（403 之类）也算——请求穿过隧道抵达了源站；只有
+	// sing-box 就地合成的 502/503/504 不算。此后所有失败返回
+	// （状态码不对、读不满、读一半断开）都带着这一位，降级准入认它。
+	metrics.Proven = vlessResponseProvesDataPlane(resp.StatusCode, cfg.ExpectedStatus)
 	// 状态码先验：403/404 的错误体不必读满预算才判失败，且读超时会
 	// 先于状态码返回、把报错原因写错。
 	if resp.StatusCode != cfg.ExpectedStatus {

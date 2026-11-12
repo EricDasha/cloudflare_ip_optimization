@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -159,6 +160,52 @@ func (a *app) applyProxyPool(pool, current proxyActivePool) error {
 	a.cfnatCtlMu.Lock()
 	defer a.cfnatCtlMu.Unlock()
 	return a.applyPoolLocked(pool, current)
+}
+
+// errPoolRebaseAborted 表示 rebase 闭包判定本轮不必提交
+// （例如换入目标已在位、缺口已补满），不是错误，调用方直接返回。
+var errPoolRebaseAborted = errors.New("pool rebase aborted")
+
+// errPoolChangedDuringSubmit 表示提交窗口内已有别的路径换池：
+// 调用方应放弃本轮（不重试、不覆盖），下一轮再按新池重算。
+var errPoolChangedDuringSubmit = errors.New("pool changed during submit")
+
+// applyPoolRebased 把「基于旧快照算出的改动」合到最新快照上再提交。
+//
+// 后台长探测（调度器数分钟、补位 6 分钟、reconcile 排队数分钟）期间，
+// 验活/revalidate/关闭席等路径随时可能换池；直接拿旧快照提交会把
+// 并发改动覆盖掉，甚至复活刚剔的死成员。rebase 在 cfnatCtlMu 下收到
+// 最新快照，返回要提交的池；返回 ok=false 即本轮作罢，不提交。
+//
+// 提交分三步，缺一不可：
+//  1. 锁内重取快照并算出要提交的池；
+//  2. 解锁后在锁外结算来源映射（只读候选快照，不与 cfnatCtlMu 交叉持锁，
+//     见 applyProxyPool 的注释）；
+//  3. 再取锁并 CAS：窗口内若已有别的路径换池（内存池 UpdatedAt 变了），
+//     放弃本轮——宁可少换一次，也不拿旧基底覆盖新池。
+//     UpdatedAt 能当版本号用，是因为每次成功提交都会把它写成当下时间
+//     （见各提交点的 pool.UpdatedAt = now 与 applyPoolLocked 的内存写回）；
+//     只改报错的 setProxyPoolError 不动它，但那不改成员，不影响 CAS。
+func (a *app) applyPoolRebased(rebase func(fresh proxyActivePool) (proxyActivePool, bool)) error {
+	if !lockTimeout(&a.cfnatCtlMu, 10*time.Second) {
+		return errors.New("pool control busy")
+	}
+	fresh := a.proxyActivePoolSnapshot()
+	pool, ok := rebase(fresh)
+	a.cfnatCtlMu.Unlock()
+	if !ok {
+		return errPoolRebaseAborted
+	}
+	pool.MemberChannels = a.reconcileMemberChannels(pool, fresh)
+	if !lockTimeout(&a.cfnatCtlMu, 10*time.Second) {
+		return errors.New("pool control busy")
+	}
+	defer a.cfnatCtlMu.Unlock()
+	latest := a.proxyActivePoolSnapshot()
+	if !latest.UpdatedAt.Equal(fresh.UpdatedAt) {
+		return errPoolChangedDuringSubmit
+	}
+	return a.applyPoolLocked(pool, latest)
 }
 
 // planFixedMembers 决定 cfnat -fixed 的成员与顺序：
@@ -442,8 +489,17 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 		}
 		return applyErr
 	}
-	if err := a.saveProxyActivePool(pool); err != nil {
-		commitErr := fmt.Errorf("保存生效池: %w", err)
+	// 落盘与内存写回在同一把 activeMu 下完成（见 commitPoolWithoutRestart
+	// 的注释）：保存失败时内存不动、照旧回滚；成功时磁盘与内存同时换新，
+	// 窗口内 setProxyPoolError 不可能用旧副本把新池盖掉。
+	a.activeMu.Lock()
+	saveErr := a.saveProxyActivePool(pool)
+	if saveErr == nil {
+		a.activePool = pool
+	}
+	a.activeMu.Unlock()
+	if saveErr != nil {
+		commitErr := fmt.Errorf("保存生效池: %w", saveErr)
 		if stopErr := a.cfnat.stop(); stopErr != nil {
 			return fmt.Errorf("%w；回滚前停止新 cfnat 失败: %v", commitErr, stopErr)
 		}
@@ -455,9 +511,6 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 		}
 		return commitErr
 	}
-	a.activeMu.Lock()
-	a.activePool = pool
-	a.activeMu.Unlock()
 	// 换池成功，历史报错随之作废——粘滞字段不该继续挂着上一轮的拦截原因。
 	a.poolGuardMu.Lock()
 	a.poolBlock, a.poolBlockAt, a.poolBlockBy = poolSwitchVerdict{}, time.Time{}, ""
@@ -511,12 +564,15 @@ func sameCFnatArgs(a, b []string) bool {
 // 全部打断一次，代价与收益完全不成比例。调用方必须先证明前后 -fixed 一致。
 func (a *app) commitPoolWithoutRestart(pool proxyActivePool) error {
 	pool.Disabled = pruneDisabledMissingIPs(pool)
+	// 落盘与内存写回必须在同一把 activeMu 下完成：上一版先落盘、
+	// 再上锁写内存，窗口内 setProxyPoolError 可能用旧副本把新池从
+	// 磁盘上盖掉（反之亦然）。保存失败时内存不动，调用方按失败处理。
+	a.activeMu.Lock()
+	defer a.activeMu.Unlock()
 	if err := a.saveProxyActivePool(pool); err != nil {
 		return err
 	}
-	a.activeMu.Lock()
 	a.activePool = pool
-	a.activeMu.Unlock()
 	return nil
 }
 
@@ -524,18 +580,23 @@ func (a *app) setProxyPoolError(message string, results []proxyScanResult) {
 	// 快照-改-写回是竞态：promote/select 在 cfnatCtlMu 下落池的瞬间若
 	// 夹在快照与写回之间，刚落成的池会被这份旧快照原样盖掉；且只写内
 	// 存不落盘，重启后报错消失，与 Error/ErrorAt 的持久化结构自相矛
-	// 盾。改成在 activeMu 下直接读改写、解锁后再落盘。注意不能拿
-	// cfnatCtlMu：revalidate 在持双锁（proxyScanMu + cfnatCtlMu）时
-	// 调本函数，拿锁会死锁。
+	// 盾。改成在 activeMu 下直接读改写。注意不能拿 cfnatCtlMu：
+	// revalidate 在持双锁（proxyScanMu + cfnatCtlMu）时调本函数，
+	// 拿锁会死锁。
+	//
+	// 落盘必须在同一把 activeMu 下做：上一版「解锁后再落盘」留了窗口——
+	// 解锁后、落盘前若有别的路径换池并落盘，这份旧副本会把新池从磁盘
+	// 上盖掉（内存是对的，磁盘是旧的），重启后生效池静默回退到旧成员。
+	// 持锁做文件 IO 会短暂挡住快照读，但池文件很小，且本函数的调用方
+	// 都不持 activeMu，无死锁。
 	a.activeMu.Lock()
+	defer a.activeMu.Unlock()
 	a.activePool.Error = message
 	a.activePool.ErrorAt = time.Now()
 	if results != nil {
 		a.activePool.Results = results
 	}
-	pool := a.activePool
-	a.activeMu.Unlock()
-	if err := a.saveProxyActivePool(pool); err != nil {
+	if err := a.saveProxyActivePool(a.activePool); err != nil {
 		log.Printf("proxy pool error persist failed: %v", err)
 	}
 	log.Printf("proxy auto apply skipped: %s", message)
@@ -893,6 +954,53 @@ func replacePoolMember(current []string, from, to string) []string {
 	return pool
 }
 
+// mergePoolSwaps 把病号换成替补，返回新池成员与处置账。
+//   - 非病号原样保留；
+//   - 有替补的病号换成替补；无替补的病号按 keepUnresolved 处置：
+//     为真时暂留（验活：池子缩水比留一个病号更糟），为假时直接摘掉
+//     （关闭席：弱成员本来就不转发，摘掉不影响转发）；
+//   - 替补已在池里（考试期间别的路径把它换进来了）或已在本轮新池里
+//     （两个病号共用一个替补）时不再重复进池，病号仍摘掉——
+//     planFixedMembers 虽会对 -fixed 去重，但落盘池的成员计数与
+//     转发统计都会因重复 IP 算错。
+//
+// removed 是被摘掉的病号（含已由在位替补接替的）；swapped 是
+// "病号→替补" 的记录；held 是暂留的病号。
+func mergePoolSwaps(ips []string, victims map[string]bool, replacements map[string]string, keepUnresolved bool) (next, removed, swapped, held []string) {
+	next = make([]string, 0, len(ips))
+	removed = make([]string, 0, len(victims))
+	swapped = make([]string, 0, len(victims))
+	held = make([]string, 0, len(victims))
+	for _, ip := range ips {
+		if !victims[ip] {
+			next = append(next, ip)
+			continue
+		}
+		replacement, ok := replacements[ip]
+		if !ok {
+			if keepUnresolved {
+				// 无合格替补：不删。池子缩水（5→4→3）比留一个病号更糟，
+				// 而且越缩越容易触发「整组已死」。留下来并在账上标清理由，
+				// 页面能看见。
+				next = append(next, ip)
+				held = append(held, ip)
+			} else {
+				removed = append(removed, ip)
+			}
+			continue
+		}
+		if containsString(ips, replacement) || containsString(next, replacement) {
+			removed = append(removed, ip)
+			swapped = append(swapped, ip+"→"+replacement+"（已在位）")
+			continue
+		}
+		next = append(next, replacement)
+		removed = append(removed, ip)
+		swapped = append(swapped, ip+"→"+replacement)
+	}
+	return next, removed, swapped, held
+}
+
 func mergePoolResults(ips []string, current, fresh []proxyScanResult) []proxyScanResult {
 	byIP := make(map[string]proxyScanResult, len(current)+len(fresh))
 	for _, result := range current {
@@ -1067,35 +1175,56 @@ func (a *app) refillPoolAfterKick() {
 	// 机房软偏好：延迟硬闸滤出的快名单再按偏好机房分区重排——补位先填
 	// 偏好机房，数量不足时其余机房照常补位（软语义，永不因偏好让池短缺）。
 	fast = orderPassedByColoPreference(fast, results, poolColoPreferenceSet())
-	merged := append([]string(nil), current.IPs...)
-	added := make([]string, 0, need)
-	for _, ip := range fast {
-		if containsString(merged, ip) {
-			continue
+	// 提交前在锁内重取快照再合：6 分钟考试窗口内验活或 reconcile
+	// 可能已换池；拿开考前的旧快照提交会把已剔成员带回池。缺口按
+	// 新快照重算，已在位的补位候选直接跳过（不重复进池）。
+	var addedCount, mergedCount int
+	if err := a.applyPoolRebased(func(fresh proxyActivePool) (proxyActivePool, bool) {
+		if fresh.Lock {
+			log.Printf("kick refill skipped: pool lock enabled")
+			return proxyActivePool{}, false
 		}
-		merged = append(merged, ip)
-		added = append(added, ip)
-		// 按新增数封顶：merged 含 Disabled 成员，按 len(merged) 封顶会
-		// 在有已关闭成员时少补（与 need 的算法同病）。
-		if len(added) >= need {
-			break
+		needNow := refillGap(fresh, cfg.PoolSize)
+		if needNow <= 0 {
+			return proxyActivePool{}, false
 		}
-	}
-	if len(added) == 0 {
-		log.Printf("kick refill: no new passes (%d tested), pool stays %d IPs", len(pending), len(current.IPs))
-		return
-	}
-	now := time.Now()
-	pool := current
-	pool.UpdatedAt = now
-	pool.IPs = merged
-	pool.Results = mergePoolResults(merged, current.Results, results)
-	if err := a.applyProxyPool(pool, current); err != nil {
+		merged := append([]string(nil), fresh.IPs...)
+		added := make([]string, 0, needNow)
+		for _, ip := range fast {
+			if containsString(merged, ip) {
+				continue
+			}
+			merged = append(merged, ip)
+			added = append(added, ip)
+			// 按新增数封顶：merged 含 Disabled 成员，按 len(merged) 封顶会
+			// 在有已关闭成员时少补（与 need 的算法同病）。
+			if len(added) >= needNow {
+				break
+			}
+		}
+		if len(added) == 0 {
+			log.Printf("kick refill: no new passes (%d tested), pool stays %d IPs", len(pending), len(fresh.IPs))
+			return proxyActivePool{}, false
+		}
+		addedCount, mergedCount = len(added), len(merged)
+		pool := fresh
+		pool.UpdatedAt = time.Now()
+		pool.IPs = merged
+		pool.Results = mergePoolResults(merged, fresh.Results, results)
+		return pool, true
+	}); err != nil {
+		if errors.Is(err, errPoolRebaseAborted) {
+			return
+		}
+		if errors.Is(err, errPoolChangedDuringSubmit) {
+			log.Printf("kick refill skipped: pool changed during submit")
+			return
+		}
 		log.Printf("kick refill apply failed: %v", err)
 		return
 	}
-	a.markPoolSwitched(now)
-	log.Printf("kick refill: +%d IPs -> pool %d IPs", len(added), len(merged))
+	a.markPoolSwitched(time.Now())
+	log.Printf("kick refill: +%d IPs -> pool %d IPs", addedCount, mergedCount)
 }
 
 // withoutPoolIP 从池中剔除指定 IP；返回 (剩余, 是否找到)。

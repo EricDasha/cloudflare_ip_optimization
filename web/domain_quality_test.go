@@ -476,3 +476,113 @@ func TestNewQualitySchedulerRuntimeToleratesCorruptCache(t *testing.T) {
 		t.Fatalf("corrupt cache produced non-empty runtime: %#v", r.data)
 	}
 }
+
+// 空样本轮次不得动账本：末尾剪枝循环以 samples 为准，空 map 会把
+// 整本账清空。生产路径无目标时不会调到这里，但防御不能缺。
+func TestRecordDomainProbeEmptyRoundIsNoop(t *testing.T) {
+	a := newProbeTestApp(t)
+	old := freshRecord(domainStateHealthy)
+	oldAt := time.Now().Add(-time.Hour)
+	old.LastProbeAt = oldAt
+	old.Samples = []domainProbeSample{okSample(10, 50), okSample(11, 52), okSample(10, 50)}
+	a.domainQuality["old.example.com"] = old
+	if broken := a.recordDomainProbeResults(map[string]domainProbeSample{}); broken {
+		t.Fatal("空轮次不应判定为通路故障")
+	}
+	if broken := a.recordDomainProbeResults(nil); broken {
+		t.Fatal("nil 轮次不应判定为通路故障")
+	}
+	rec := a.domainQuality["old.example.com"]
+	if rec == nil {
+		t.Fatal("空轮次清空了账本")
+	}
+	if len(rec.Samples) != 3 || !rec.LastProbeAt.Equal(oldAt) || rec.State != domainStateHealthy {
+		t.Fatalf("空轮次改动了既有记录: %+v", rec)
+	}
+}
+
+// 模板降级模式下的通路故障轮：8 个 DNS 失败 + 2 个 tcp-only 成功，
+// 整轮都不入账——成功的 tcp-only 样本也不能建记录或刷新 LastProbeAt，
+// 否则故障轮的结论会污染账本（新域名凭空建 state="" 的记录，
+// 闸门对空状态一律放行）。
+func TestRecordDomainProbeBrokenRoundSkipsOKSamplesToo(t *testing.T) {
+	a := newProbeTestApp(t)
+	old := freshRecord(domainStateHealthy)
+	oldAt := time.Now().Add(-time.Hour)
+	old.LastProbeAt = oldAt
+	a.domainQuality["old.example.com"] = old
+	samples := map[string]domainProbeSample{
+		"a.example.com": failSample("dns"),
+		"b.example.com": failSample("dns"),
+		"c.example.com": failSample("dns"),
+		"d.example.com": failSample("dns"),
+		"e.example.com": failSample("dns"),
+		"f.example.com": failSample("dns"),
+		"g.example.com": failSample("dns"),
+		"h.example.com": failSample("dns"),
+		// 模板降级：这两个 TCP 通了，只报可达性。
+		"i.example.com": {At: time.Now(), OK: true, Stage: "tcp-only", TCPMs: 30},
+		"j.example.com": {At: time.Now(), OK: true, Stage: "tcp-only", TCPMs: 35},
+		// 既有记录本轮同样 tcp-only 成功：它的 LastProbeAt 也不应被刷新。
+		"old.example.com": {At: time.Now(), OK: true, Stage: "tcp-only", TCPMs: 40},
+	}
+	if broken := a.recordDomainProbeResults(samples); !broken {
+		t.Fatal("8/10 解析失败应判定为通路故障")
+	}
+	if got := len(a.domainQuality); got != 1 {
+		t.Fatalf("broken round ledger = %d records, want 1 (only pre-existing)", got)
+	}
+	if _, ok := a.domainQuality["i.example.com"]; ok {
+		t.Fatal("通路故障轮给 tcp-only 成功的域名建了记录")
+	}
+	if rec := a.domainQuality["old.example.com"]; rec == nil {
+		t.Fatal("pre-existing record pruned by broken round")
+	} else if !rec.LastProbeAt.Equal(oldAt) {
+		t.Fatalf("LastProbeAt = %v, want untouched %v", rec.LastProbeAt, oldAt)
+	}
+}
+
+// 模板降级模式（全员 tcp-only、无人测速）下，DNS 失败仍要计连败：
+// 它是在测速之前量的，与测速通路无关，不应被「无人测出速度」的
+// 保险连带赦免。连续 3 轮 DNS 失败应判 dead，而不是永远只滑向 unstable。
+func TestRecordDomainProbeDNSFailuresCountInDegradedMode(t *testing.T) {
+	a := newProbeTestApp(t)
+	// 每轮：a 解析失败，b/c 只是 TCP 通（模板降级，无测速）。
+	// DNS 失败 1/3 < 70%，不判通路故障，失败应照常计数。
+	samples := map[string]domainProbeSample{
+		"a.example.com": failSample("dns"),
+		"b.example.com": {At: time.Now(), OK: true, Stage: "tcp-only", TCPMs: 30},
+		"c.example.com": {At: time.Now(), OK: true, Stage: "tcp-only", TCPMs: 35},
+	}
+	for i := 0; i < domainDeadFailures; i++ {
+		a.recordDomainProbeResults(samples)
+	}
+	rec := a.domainQuality["a.example.com"]
+	if rec == nil {
+		t.Fatal("a.example.com 没有记录")
+	}
+	if rec.ConsecutiveFailures != domainDeadFailures {
+		t.Fatalf("a consecutiveFailures = %d, want %d", rec.ConsecutiveFailures, domainDeadFailures)
+	}
+	if rec.State != domainStateDead {
+		t.Fatalf("a state = %q, want dead", rec.State)
+	}
+}
+
+// 对照：测速阶段的失败在无人测出速度时仍不计连败——
+// 那是测速通路本身可疑，不是域名的错。
+func TestRecordDomainProbeSpeedFailuresForgivenWhenNoPeerSucceeds(t *testing.T) {
+	a := newProbeTestApp(t)
+	samples := map[string]domainProbeSample{
+		"a.example.com": failSample("speed"),
+		"b.example.com": failSample("speed"),
+		"c.example.com": failSample("speed"),
+	}
+	for i := 0; i < domainDeadFailures; i++ {
+		a.recordDomainProbeResults(samples)
+	}
+	// 整轮测速全零属通路故障，样本根本不入账，记录都不应建。
+	if len(a.domainQuality) != 0 {
+		t.Fatalf("ledger = %d records, want 0", len(a.domainQuality))
+	}
+}

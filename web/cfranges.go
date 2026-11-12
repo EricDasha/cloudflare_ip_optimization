@@ -24,6 +24,7 @@ const (
 	failureHandshake   = "handshake"   // TLS 握手失败：对方不是目标服务或证书不对
 	failureProtocol    = "protocol"    // 连上了但协议不对：WS 状态码非 101、提前 EOF
 	failureOther       = "other"       // 归不了类
+	failureLocal       = "local"       // 本地探针故障：不是候选的问题，不入失败账
 )
 
 // classifyProbeError 把探测错误归入有限类别。nil 返回 failureNone。

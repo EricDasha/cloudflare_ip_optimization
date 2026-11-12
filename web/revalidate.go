@@ -406,13 +406,19 @@ func (a *app) revalidateIPsByWS(parent context.Context, ips []string, cfg proxyA
 	results := scanProxyWebSockets(ctx, ips, cfg)
 	out := make([]revalidateMemberResult, 0, len(results))
 	for i, r := range results {
+		stage := "ws"
+		if r.Stage == "skipped" {
+			// 汇总处认 Stage=="skipped" 才保留成员：WS 排队耗尽的
+			// 必须原样透传，不能写成 "ws" 被当真失败剔除。
+			stage = "skipped"
+		}
 		out = append(out, revalidateMemberResult{
 			Member:     r.IP,
 			Kind:       "ip",
 			OK:         r.Error == "",
 			LatencyMs:  r.Latency,
 			Colo:       r.Colo,
-			Stage:      "ws",
+			Stage:      stage,
 			Error:      r.Error,
 			ErrorClass: r.ErrorClass,
 		})
@@ -510,6 +516,16 @@ func (a *app) revalidateOneDomain(ctx context.Context, domain string, cfg vlessP
 	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(domain, "443"))
 	out.LatencyMs = time.Since(started).Milliseconds()
 	if err != nil {
+		if ctx.Err() != nil {
+			// 240 秒总预算到期时正在跑的探针被截断：不是域名死了，
+			// 与「没轮上」的 skipped 同一处理，保留不剔除。此前在途
+			// 探针被记成真失败剔除，而没轮上的同类域名反而被保留——
+			// 同一原因两种结论。
+			out.Stage = "skipped"
+			out.Error = "验证预算用尽"
+			out.ErrorClass = failureTimeout
+			return out
+		}
 		out.Stage = "tcp"
 		out.Error = err.Error()
 		out.ErrorClass = classifyProbeError(err)
@@ -527,6 +543,21 @@ func (a *app) revalidateOneDomain(ctx context.Context, domain string, cfg vlessP
 	defer cancel()
 	metrics, err := probeVLESSCandidateMetrics(probeCtx, domain, 443, cfg, template)
 	if err != nil {
+		if ctx.Err() != nil {
+			// 总预算在 VLESS 段到期：同 TCP 段，记 skipped 保留。
+			out.Stage = "skipped"
+			out.Error = "验证预算用尽"
+			out.ErrorClass = failureTimeout
+			return out
+		}
+		if isLocalProbeError(err) {
+			// 探针自己坏了（端口冲突、sing-box 提前退出）：不是域名死了，
+			// 记 skipped 保留，不得剔除。
+			out.Stage = "skipped"
+			out.Error = err.Error()
+			out.ErrorClass = failureLocal
+			return out
+		}
 		out.Stage = "vless"
 		out.Error = err.Error()
 		out.ErrorClass = classifyProbeError(err)

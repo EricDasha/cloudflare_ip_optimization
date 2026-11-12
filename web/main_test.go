@@ -506,6 +506,12 @@ func TestConfiguredVLESSProbeTemplate(t *testing.T) {
 
 func TestVLESSProbeCandidateLimit(t *testing.T) {
 	dir := t.TempDir()
+	// 假 sing-box 回 502：候选的数据面失败（非本地故障），前两条应记
+	// VLESS_FAIL；第三条因 MaxCandidates=2 没轮上，记 skipped。
+	// 注意：不能再拿「缺失的 sing-box 二进制」当失败夹具——二进制缺失
+	// 是本地探针故障（第二轮 P3-1），应记 skipped 而非 VLESS_FAIL。
+	t.Setenv("FAKE_PROXY_STATUS", "502")
+	t.Setenv("FAKE_PROXY_BODY", "Bad Gateway")
 	template := map[string]any{
 		"type": "vless",
 		"uuid": "11111111-2222-4333-8444-555555555555",
@@ -521,14 +527,9 @@ func TestVLESSProbeCandidateLimit(t *testing.T) {
 		{IP: "1.0.0.1", Stage: "WS_PASS"},
 		{IP: "8.8.8.8", Stage: "WS_PASS"},
 	}
-	cfg := vlessProbeConfig{
-		Binary:         filepath.Join(dir, "missing-sing-box"),
-		TemplatePath:   filepath.Join(dir, "template.json"),
-		TestURL:        "https://example.com/generate_204",
-		ExpectedStatus: 204,
-		Timeout:        3 * time.Second,
-		MaxCandidates:  2,
-	}
+	cfg := probeTestConfig(t, dir, writeFakeSingBoxProxy(t, dir))
+	cfg.Timeout = 3 * time.Second
+	cfg.MaxCandidates = 2
 	passed := probeVLESSPool(context.Background(), results, 443, 3, cfg, template)
 	if len(passed) != 0 {
 		t.Fatalf("unexpected passes: %#v", passed)
@@ -542,7 +543,9 @@ func TestVLESSProbeCandidateLimit(t *testing.T) {
 			t.Fatalf("VLESS_FAIL %s 缺少 ErrorClass 归类: %#v", r.IP, r)
 		}
 	}
-	if results[2].Stage != "WS_PASS" || results[2].Error != "" {
+	// 名额已满没轮上的不是失败：记 skipped、不进质量账（第二轮 P3-4）。
+	// 限额本身仍在：第三条没被真测、没进 passed，Error 只写未测原因。
+	if results[2].Stage != "skipped" || results[2].Error == "" {
 		t.Fatalf("candidate limit was not enforced: %#v", results[2])
 	}
 }
@@ -710,5 +713,22 @@ func TestNormalizeClampsOutOfRange(t *testing.T) {
 	fd := defaultCFdataConfig()
 	if f.Scan != fd.Scan || f.Test != fd.Test || f.Port != fd.Port || f.Delay != fd.Delay {
 		t.Fatalf("normalizeCFdata out-of-range not clamped: %+v", f)
+	}
+}
+
+func TestHealthProbeBudgetScalesWithMembers(t *testing.T) {
+	if got := healthProbeBudget(4, 4, 1500); got != 5*time.Second {
+		t.Errorf("4 members fit in 5s floor, got %v", got)
+	}
+	// 14 个成员、并发 4、单条 1.5 秒：4 轮×1.5 秒+1 秒=7 秒。
+	if got := healthProbeBudget(14, 4, 1500); got != 7*time.Second {
+		t.Errorf("14 members should need 7s, got %v", got)
+	}
+	// 50 个成员、并发 4、单条 1.5 秒：13 轮×1.5 秒+1 秒=20.5 秒。
+	if got := healthProbeBudget(50, 4, 1500); got != 20500*time.Millisecond {
+		t.Errorf("50 members should need 20.5s, got %v", got)
+	}
+	if got := healthProbeBudget(10, 0, 0); got != 5*time.Second {
+		t.Errorf("invalid concurrency/latency must not panic and must respect the floor, got %v", got)
 	}
 }

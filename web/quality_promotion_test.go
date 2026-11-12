@@ -126,7 +126,9 @@ func TestDecideKeepsLastRealDecisionAgainstNonSwitchOverwrites(t *testing.T) {
 	if r.data.LastDecision.Event != "" {
 		t.Fatalf("empty NONE should not write lastDecision: %#v", r.data.LastDecision)
 	}
-	// 制造一次真实 failover 决策
+	// 制造一次真实 failover 决策并真正执行：只有 commitSwitch 才能写
+	// LastDecision——decide() 只是提议，随后被换池闸拦住的决策若先落盘，
+	// /api/status 就会显示一次从未发生的切换。
 	r.observe("8.8.8.8", "official", 600, 40, true, now)
 	r.observeActiveHealth(false, 80, now.Add(time.Minute))
 	r.observeActiveHealth(false, 80, now.Add(2*time.Minute))
@@ -135,7 +137,14 @@ func TestDecideKeepsLastRealDecisionAgainstNonSwitchOverwrites(t *testing.T) {
 	if got.Event != switchFailover {
 		t.Fatalf("expected failover, got %#v", got)
 	}
+	if r.data.LastDecision.Event != "" {
+		t.Fatalf("decide() 不应先写 lastDecision: %#v", r.data.LastDecision)
+	}
+	r.commitSwitch(got, now.Add(3*time.Minute))
 	saved := r.data.LastDecision
+	if saved.Event != switchFailover || saved.ToIP != "8.8.8.8" {
+		t.Fatalf("commitSwitch 后 lastDecision = %#v, want failover 到 8.8.8.8", saved)
+	}
 	// 后续空决策轮不得覆盖真实换池记录
 	for i := 0; i < 5; i++ {
 		r.decide(now.Add(time.Duration(4+i) * time.Minute))

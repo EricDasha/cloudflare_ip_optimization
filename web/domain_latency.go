@@ -576,6 +576,12 @@ func (a *app) speedPathStatus() speedPathStat {
 // 样本 + TCP 可达」，DNS/TCP 全灭时失败照样入账，新域名永远停在 state=""
 // （质量闸一律放行），坏域名在下一轮 reconcile 时被整批塞回池。
 func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) bool {
+	// 空轮次直接返回：本函数末尾的剪枝循环会删掉所有不在 samples 里的
+	// 记录——空 map 会把整本账清空。生产路径（probeActiveDomainLatencies）
+	// 在无目标时根本不会调到这里，但空入参也不该是一次「删库」操作。
+	if len(samples) == 0 {
+		return false
+	}
 	now := time.Now()
 	stats := classifyDomainProbeRound(samples)
 	speedSuccess := stats.SpeedOK
@@ -593,19 +599,19 @@ func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) boo
 	}
 	pathBroken := probePathBroken || roundPathBroken
 	if !probeHealthy && len(samples) > 0 && !roundPathBroken {
-		log.Printf("domain probe: no domain produced a speed sample this round (%d domains), failures not counted toward dead", len(samples))
+		log.Printf("domain probe: no domain produced a speed sample this round (%d domains), speed-stage failures not counted toward dead", len(samples))
 	}
 
 	a.domainQualityMu.Lock()
 	for domain, sample := range samples {
-		// 整轮无成绩（pathBroken）时，失败的样本连账都不入。
-		// 只挡住 ConsecutiveFailures 不够：SuccessRate 是按时段样本算的，
-		// 端点坏三轮就会把好域名拖成 unstable，随后被移出转发——
-		// 测速端点坏了，反倒把域名池清空。
-		// 没入账的样本也不建记录、不刷新 LastProbeAt：否则账本凭空多出
-		// 一批 state="" 的空记录（闸门对空状态一律放行，下轮照样回池），
-		// 已有记录的新鲜度还会被没测过的轮次刷新。
-		if !sample.OK && pathBroken {
+		// 通路故障轮整轮不入账，不只跳过失败样本：模板降级模式下，
+		// 8 个 DNS 失败 + 2 个 tcp-only 成功的轮次同样会被判通路故障，
+		// 那 2 个「成功」的 tcp-only 样本若入账，会给新域名凭空建记录
+		// （state="" 时闸门一律放行）并刷新已有记录的 LastProbeAt——
+		// 故障轮的结论不可信，账本一个字都不能写。
+		// 正常模式下通路故障轮本就没有成功样本（SpeedOK>0 即不判故障），
+		// 所以这条收紧不影响正常轮次。
+		if pathBroken {
 			continue
 		}
 		rec := a.domainQuality[domain]
@@ -622,7 +628,14 @@ func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) boo
 			rec.ConsecutiveFailures = 0
 			rec.ConsecutiveSuccesses++
 			rec.LastOKAt = now
-		} else if probeHealthy {
+		} else if probeHealthy || sample.Stage != "speed" {
+			// 测速阶段的失败只在同轮有人测出速度时才计连败：没人测出
+			// 速度时，更可能是测速端点/探针本身坏了，不该冤枉域名。
+			// 但 DNS/TCP 阶段的失败是在测速之前量的，与测速通路无关——
+			// 模板降级模式下（全员 tcp-only、无人测速），一个域名连
+			// 解析/建连都连续失败，本就是它自己的问题，不应被测速通路
+			// 的保险连带赦免，否则它永远到不了 dead，只能靠成功率
+			// 慢慢滑向 unstable。
 			rec.ConsecutiveFailures++
 			rec.ConsecutiveSuccesses = 0
 		}
@@ -788,14 +801,37 @@ func (a *app) reconcilePoolDomains() {
 	if sameStringSet(current.Domains, want) {
 		return
 	}
-	pool.Domains = want
-	pool.UpdatedAt = time.Now()
-	if err := a.applyProxyPool(pool, current); err != nil {
+	// 提交前在锁内重取快照再合：reconcile 每 30 分钟一轮，若此时
+	// revalidate 正持 cfnatCtlMu 跑最长约 5 分钟的验证，本函数会在
+	// 锁上排队数分钟；等验证落盘新池（已剔死成员）并释放后，再用验证前
+	// 的旧快照提交，会把死成员复活进 -fixed、把用户中途改的 Lock /
+	// Priority 用旧值覆盖。改动只合 Domains，其余字段取新快照。
+	var from, to int
+	var reconciled []string
+	if err := a.applyPoolRebased(func(fresh proxyActivePool) (proxyActivePool, bool) {
+		pool := fresh
+		pool.Domains = want
+		pool.Domains = a.gatePoolDomains(pool)
+		if sameStringSet(fresh.Domains, pool.Domains) {
+			return proxyActivePool{}, false
+		}
+		from, to = len(fresh.Domains), len(pool.Domains)
+		reconciled = append([]string(nil), pool.Domains...)
+		pool.UpdatedAt = time.Now()
+		return pool, true
+	}); err != nil {
+		if errors.Is(err, errPoolRebaseAborted) {
+			return
+		}
+		if errors.Is(err, errPoolChangedDuringSubmit) {
+			log.Printf("domain pool reconcile skipped: pool changed during submit")
+			return
+		}
 		log.Printf("domain pool reconcile failed: %v", err)
 		return
 	}
 	log.Printf("domain pool reconciled: %d -> %d domains (%s)",
-		len(current.Domains), len(want), strings.Join(want, ","))
+		from, to, strings.Join(reconciled, ","))
 }
 
 // quarantineDomain 把域名的自动回池时间推迟到 until。已在观察期内则取更晚的那个。

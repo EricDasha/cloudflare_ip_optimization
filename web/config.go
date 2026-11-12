@@ -79,15 +79,44 @@ type proxyAutoConfig struct {
 }
 
 func defaultProxyAutoConfig() proxyAutoConfig {
+	// 环境变量原值直通曾让 PROXY_AUTO_CONCURRENCY=0 卡死补位：
+	// scanProxyWebSockets 用它建 cap 为 0 的 channel，全部 goroutine
+	// 永久阻塞在 sem 发送上，wg.Wait 永不返回，而 refill 已持有
+	// proxyScanMu，之后所有优选/调度/验活都在 lockTimeout 处失败，
+	// 只有重启能恢复；负数则在 make(chan) 处直接 panic。入口处统一钳制，
+	// 漏斗里那道同样的范围校验只是第二道防线。
+	port := envInt("PROXY_AUTO_PORT", 443)
+	if port < 1 || port > 65535 {
+		port = 443
+	}
+	concurrency := envInt("PROXY_AUTO_CONCURRENCY", 20)
+	if concurrency < 1 || concurrency > 100 {
+		concurrency = 20
+	}
+	maxLatency := envInt("PROXY_AUTO_MAX_LATENCY", 5000)
+	if maxLatency < 1 || maxLatency > 30000 {
+		maxLatency = 5000
+	}
+	poolSize := envInt("PROXY_AUTO_POOL_SIZE", 5)
+	if poolSize < 1 || poolSize > 50 {
+		poolSize = 5
+	}
+	minPool := envInt("PROXY_AUTO_MIN_POOL", 3)
+	if minPool < 1 {
+		minPool = 1
+	}
+	if minPool > poolSize {
+		minPool = poolSize
+	}
 	return proxyAutoConfig{
 		Enabled:     envBool("PROXY_AUTO_APPLY", false),
 		Host:        env("PROXY_AUTO_HOST", ""),
 		Path:        env("PROXY_AUTO_PATH", "/"),
-		Port:        envInt("PROXY_AUTO_PORT", 443),
-		Concurrency: envInt("PROXY_AUTO_CONCURRENCY", 20),
-		MaxLatency:  envInt("PROXY_AUTO_MAX_LATENCY", 5000),
-		PoolSize:    envInt("PROXY_AUTO_POOL_SIZE", 5),
-		MinPool:     envInt("PROXY_AUTO_MIN_POOL", 3),
+		Port:        port,
+		Concurrency: concurrency,
+		MaxLatency:  maxLatency,
+		PoolSize:    poolSize,
+		MinPool:     minPool,
 		VLESS:       defaultVLESSProbeConfig(),
 	}
 }
