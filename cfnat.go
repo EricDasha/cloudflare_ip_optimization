@@ -483,6 +483,11 @@ func main() {
 // httpGetClient 给裸 http.Get 加 10 秒超时：远端挂住时启动不再无限等。
 var httpGetClient = &http.Client{Timeout: 10 * time.Second}
 
+// downloadMaxBytes 是 ips/locations 类下载的上限：预期文件仅 KB 级，
+// 10 秒超时内远端被攻陷/DNS 劫持返回超大体时，无上限的 ReadAll 会把
+// 数百 MB 灌进内存（还会落盘）。超限即报错，不解析、不落盘。
+const downloadMaxBytes = 2 << 20
+
 func loadLocations() ([]location, error) {
 	var locations []location
 
@@ -497,9 +502,12 @@ func loadLocations() ([]location, error) {
 			return nil, fmt.Errorf("下载 locations.json 失败，状态码: %d", resp.StatusCode)
 		}
 
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, downloadMaxBytes+1))
 		if err != nil {
 			return nil, fmt.Errorf("无法读取响应体: %v", err)
+		}
+		if len(body) > downloadMaxBytes {
+			return nil, fmt.Errorf("locations.json 超过 %d 字节上限", downloadMaxBytes)
 		}
 
 		err = json.Unmarshal(body, &locations)
@@ -660,7 +668,7 @@ func getURLContent(url string) (string, error) {
 	}
 
 	var content strings.Builder
-	scanner := bufio.NewScanner(resp.Body)
+	scanner := bufio.NewScanner(io.LimitReader(resp.Body, downloadMaxBytes+1))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line != "" {
@@ -669,6 +677,9 @@ func getURLContent(url string) (string, error) {
 	}
 	if err := scanner.Err(); err != nil {
 		return "", err
+	}
+	if content.Len() > downloadMaxBytes {
+		return "", fmt.Errorf("下载内容超过 %d 字节上限", downloadMaxBytes)
 	}
 
 	return content.String(), nil

@@ -254,9 +254,13 @@ func runIPScan(ipType int, scanMaxThreads int) {
 			fmt.Printf("下载 locations.json 失败，状态码: %d\n", resp.StatusCode)
 			return
 		}
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, downloadMaxBytes+1))
 		if err != nil {
 			fmt.Printf("无法读取响应体: %v\n", err)
+			return
+		}
+		if len(body) > downloadMaxBytes {
+			fmt.Printf("locations.json 超过 %d 字节上限，拒绝解析与落盘\n", downloadMaxBytes)
 			return
 		}
 		err = json.Unmarshal(body, &locations)
@@ -739,6 +743,11 @@ func readLine() (string, error) {
 // httpGetClient 给裸 http.Get 加 10 秒超时：远端挂住时不再无限等。
 var httpGetClient = &http.Client{Timeout: 10 * time.Second}
 
+// downloadMaxBytes 是 ips/locations 类下载的上限：预期文件仅 KB 级，
+// 10 秒超时内远端被攻陷/DNS 劫持返回超大体时，无上限的 ReadAll 会把
+// 数百 MB 灌进内存（还会落盘）。超限即报错，不解析、不落盘。
+const downloadMaxBytes = 2 << 20
+
 func getURLContent(url string) (string, error) {
 	resp, err := httpGetClient.Get(url)
 	if err != nil {
@@ -748,9 +757,12 @@ func getURLContent(url string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("HTTP请求失败，状态码: %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, downloadMaxBytes+1))
 	if err != nil {
 		return "", err
+	}
+	if len(body) > downloadMaxBytes {
+		return "", fmt.Errorf("下载内容超过 %d 字节上限", downloadMaxBytes)
 	}
 	return string(body), nil
 }
