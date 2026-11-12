@@ -541,3 +541,48 @@ func TestRecordDomainProbeBrokenRoundSkipsOKSamplesToo(t *testing.T) {
 		t.Fatalf("LastProbeAt = %v, want untouched %v", rec.LastProbeAt, oldAt)
 	}
 }
+
+// 模板降级模式（全员 tcp-only、无人测速）下，DNS 失败仍要计连败：
+// 它是在测速之前量的，与测速通路无关，不应被「无人测出速度」的
+// 保险连带赦免。连续 3 轮 DNS 失败应判 dead，而不是永远只滑向 unstable。
+func TestRecordDomainProbeDNSFailuresCountInDegradedMode(t *testing.T) {
+	a := newProbeTestApp(t)
+	// 每轮：a 解析失败，b/c 只是 TCP 通（模板降级，无测速）。
+	// DNS 失败 1/3 < 70%，不判通路故障，失败应照常计数。
+	samples := map[string]domainProbeSample{
+		"a.example.com": failSample("dns"),
+		"b.example.com": {At: time.Now(), OK: true, Stage: "tcp-only", TCPMs: 30},
+		"c.example.com": {At: time.Now(), OK: true, Stage: "tcp-only", TCPMs: 35},
+	}
+	for i := 0; i < domainDeadFailures; i++ {
+		a.recordDomainProbeResults(samples)
+	}
+	rec := a.domainQuality["a.example.com"]
+	if rec == nil {
+		t.Fatal("a.example.com 没有记录")
+	}
+	if rec.ConsecutiveFailures != domainDeadFailures {
+		t.Fatalf("a consecutiveFailures = %d, want %d", rec.ConsecutiveFailures, domainDeadFailures)
+	}
+	if rec.State != domainStateDead {
+		t.Fatalf("a state = %q, want dead", rec.State)
+	}
+}
+
+// 对照：测速阶段的失败在无人测出速度时仍不计连败——
+// 那是测速通路本身可疑，不是域名的错。
+func TestRecordDomainProbeSpeedFailuresForgivenWhenNoPeerSucceeds(t *testing.T) {
+	a := newProbeTestApp(t)
+	samples := map[string]domainProbeSample{
+		"a.example.com": failSample("speed"),
+		"b.example.com": failSample("speed"),
+		"c.example.com": failSample("speed"),
+	}
+	for i := 0; i < domainDeadFailures; i++ {
+		a.recordDomainProbeResults(samples)
+	}
+	// 整轮测速全零属通路故障，样本根本不入账，记录都不应建。
+	if len(a.domainQuality) != 0 {
+		t.Fatalf("ledger = %d records, want 0", len(a.domainQuality))
+	}
+}

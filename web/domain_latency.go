@@ -599,7 +599,7 @@ func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) boo
 	}
 	pathBroken := probePathBroken || roundPathBroken
 	if !probeHealthy && len(samples) > 0 && !roundPathBroken {
-		log.Printf("domain probe: no domain produced a speed sample this round (%d domains), failures not counted toward dead", len(samples))
+		log.Printf("domain probe: no domain produced a speed sample this round (%d domains), speed-stage failures not counted toward dead", len(samples))
 	}
 
 	a.domainQualityMu.Lock()
@@ -628,7 +628,14 @@ func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) boo
 			rec.ConsecutiveFailures = 0
 			rec.ConsecutiveSuccesses++
 			rec.LastOKAt = now
-		} else if probeHealthy {
+		} else if probeHealthy || sample.Stage != "speed" {
+			// 测速阶段的失败只在同轮有人测出速度时才计连败：没人测出
+			// 速度时，更可能是测速端点/探针本身坏了，不该冤枉域名。
+			// 但 DNS/TCP 阶段的失败是在测速之前量的，与测速通路无关——
+			// 模板降级模式下（全员 tcp-only、无人测速），一个域名连
+			// 解析/建连都连续失败，本就是它自己的问题，不应被测速通路
+			// 的保险连带赦免，否则它永远到不了 dead，只能靠成功率
+			// 慢慢滑向 unstable。
 			rec.ConsecutiveFailures++
 			rec.ConsecutiveSuccesses = 0
 		}
