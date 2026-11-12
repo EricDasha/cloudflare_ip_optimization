@@ -413,6 +413,25 @@ func (a *app) cfdataIPListStale() bool {
 // runQualitySchedulerProbe 后台优选主循环：
 // 从 Candidate Pool 取一批 IP → WS/VLESS 测试 → 观察结果 → 决定是否换池。
 // 此函数是三池模型的核心执行器。
+// healthProbeBudget 按成员数算在位健康探测预算：并发槽数×单条上限，
+// 再留 1 秒余量，下限 5 秒。固定 5 秒时，成员一多尾部必然超时——
+// 预算不够被当成「成员死了」，与 throne 的按需预算（按目标数算）
+// 是同一笔账，不能只在一处算对。
+func healthProbeBudget(memberCount, concurrency, maxLatencyMs int) time.Duration {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if maxLatencyMs < 1 {
+		maxLatencyMs = 1
+	}
+	rounds := (memberCount + concurrency - 1) / concurrency
+	need := time.Duration(rounds)*time.Duration(maxLatencyMs)*time.Millisecond + time.Second
+	if need < 5*time.Second {
+		need = 5 * time.Second
+	}
+	return need
+}
+
 func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	if a.quality == nil {
 		return
@@ -435,9 +454,14 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	// the only remaining source, so an empty candidate batch must not disable
 	// the health gate.
 	healthNow := time.Now()
-	if len(current.IPs) > 0 {
-		healthCtx, healthCancel := context.WithTimeout(parent, 5*time.Second)
-		activeResults := scanProxyWebSockets(healthCtx, current.IPs, cfg)
+	// 只测真正转发的成员：Disabled 成员既不进 cfnat -fixed，还占预算槽位；
+	// 预算按成员数算，不再固定 5 秒——14 个成员（并发 4、单条 1.5 秒）
+	// 就要 6 秒，尾部成员此前每轮确定性地拿不到槽位被记假失败，
+	// LastFail 每轮刷新，健康闸永久 fail-open。
+	targets := forwardingIPs(current)
+	if len(targets) > 0 {
+		healthCtx, healthCancel := context.WithTimeout(parent, healthProbeBudget(len(targets), cfg.Concurrency, cfg.MaxLatency))
+		activeResults := scanProxyWebSockets(healthCtx, targets, cfg)
 		healthCancel()
 		for _, result := range activeResults {
 			if result.Stage == "skipped" {

@@ -712,3 +712,20 @@ func TestNormalizeClampsOutOfRange(t *testing.T) {
 		t.Fatalf("normalizeCFdata out-of-range not clamped: %+v", f)
 	}
 }
+
+func TestHealthProbeBudgetScalesWithMembers(t *testing.T) {
+	if got := healthProbeBudget(4, 4, 1500); got != 5*time.Second {
+		t.Errorf("4 members fit in 5s floor, got %v", got)
+	}
+	// 14 个成员、并发 4、单条 1.5 秒：4 轮×1.5 秒+1 秒=7 秒。
+	if got := healthProbeBudget(14, 4, 1500); got != 7*time.Second {
+		t.Errorf("14 members should need 7s, got %v", got)
+	}
+	// 50 个成员、并发 4、单条 1.5 秒：13 轮×1.5 秒+1 秒=20.5 秒。
+	if got := healthProbeBudget(50, 4, 1500); got != 20500*time.Millisecond {
+		t.Errorf("50 members should need 20.5s, got %v", got)
+	}
+	if got := healthProbeBudget(10, 0, 0); got != 5*time.Second {
+		t.Errorf("invalid concurrency/latency must not panic and must respect the floor, got %v", got)
+	}
+}
