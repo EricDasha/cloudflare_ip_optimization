@@ -1,0 +1,132 @@
+name: ci
+
+# 覆盖范围说明
+# ------------
+# 1. 本仓库只有一个 Go 包 local/cloudflare-tools/web，因此 `go test ./...` 就是全部单测。
+# 2. cfnat.go / cfdata.go 带 `//go:build ignore`（独立的 main 包，按文件单独构建），
+#    `./...` 不会带上它们，所以 build job 额外单独构建这两个。
+# 3. race 单独成 job：它慢 3~10 倍，失败语义也不同（数据竞争 vs 断言失败），
+#    混在一起会让「测试挂了」失去区分度。
+# 4. `pr-baseline` job 用矩阵分别 checkout 两个 PR 的 head 来跑测试：
+#    PR2 依赖 PR1（base 是 handoff/20261112），不能当成独立分支测；
+#    所以这里显式测「PR1 head 自身」与「PR2 head 自身」两个真实代码状态，
+#    其余 job 测的是当前分支（= PR2 + 本分支的夹具修复）。
+
+on:
+  push:
+    branches:
+      - "ci/**"
+      - "handoff/**"
+      - "audit/**"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GOFLAGS: -trimpath
+
+jobs:
+  test:
+    name: go test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go env
+        run: go version && go env GOOS GOARCH CGO_ENABLED
+      - name: go test ./...
+        run: go test ./... -count=1
+
+  race:
+    name: go test -race
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go test -race ./...
+        run: go test -race ./... -count=1
+
+  vet:
+    name: go vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go vet ./...
+        run: go vet ./...
+
+  build:
+    name: linux build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: build cloudflare-web
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build -ldflags "-s -w -X main.gitCommit=${GITHUB_SHA} -X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o /tmp/dist/cloudflare-web ./web
+      - name: build cfnat
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: go build -ldflags "-s -w" -o /tmp/dist/cfnat cfnat.go
+      - name: build cfdata
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: go build -ldflags "-s -w" -o /tmp/dist/cfdata cfdata.go
+      - name: verify artifacts
+        run: |
+          ls -l /tmp/dist
+          file /tmp/dist/cloudflare-web /tmp/dist/cfnat /tmp/dist/cfdata
+
+  pr-baseline:
+    name: pr head / ${{ matrix.ref }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        ref:
+          - handoff/20261112
+          - audit/round2-20261112
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go vet ./...
+        run: go vet ./...
+      - name: go test ./... (count=1)
+        run: go test ./... -count=1
