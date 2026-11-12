@@ -3,18 +3,23 @@ package main
 import (
 	"context"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
 
 // startBlackHoleListener 接受 TCP 连接后什么都不回：WS/TLS 握手会一直等到
 // ctx 到期。用于让第一个探测占住信号量，验证排队者被记 skipped 而非失败。
+// 已接受的连接必须留引用（否则 GC 回收会关掉它们，握手立刻 EOF 失败，
+// 排队者就测上了——满载跑全量测试时 GC 恰好会跑，测试因此飘）。
 func startBlackHoleListener(t *testing.T) (port int, closeFn func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen black hole: %v", err)
 	}
+	var mu sync.Mutex
+	var conns []net.Conn
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -22,14 +27,26 @@ func startBlackHoleListener(t *testing.T) (port int, closeFn func()) {
 				return
 			}
 			// 只持有连接不读写，握手方在 ctx 到期前收不到任何字节。
-			_ = conn
+			mu.Lock()
+			conns = append(conns, conn)
+			mu.Unlock()
 		}
 	}()
-	return ln.Addr().(*net.TCPAddr).Port, func() { _ = ln.Close() }
+	return ln.Addr().(*net.TCPAddr).Port, func() {
+		_ = ln.Close()
+		mu.Lock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		mu.Unlock()
+	}
 }
 
 // 预算耗尽时还没排上槽位的候选必须记 skipped，不得记成 WS_FAIL 超时失败——
 // 否则订阅粗筛每轮约 280 条尾部候选被记一次失败，3 次即判 fail。
+// 300ms 预算对黑洞握手什么都盖不住：唯一开跑的那条也会在中途被预算
+// 截断，按与 revalidate 在途探针同一规则记 skipped——本轮 10 条全是
+// skipped，一条失败都不许记。
 func TestScanProxyWebSocketsSkipsQueuedWhenBudgetExpires(t *testing.T) {
 	port, closeFn := startBlackHoleListener(t)
 	defer closeFn()
@@ -59,11 +76,11 @@ func TestScanProxyWebSocketsSkipsQueuedWhenBudgetExpires(t *testing.T) {
 			t.Errorf("unexpected stage %q for %s", r.Stage, r.IP)
 		}
 	}
-	if failed != 1 {
-		t.Errorf("expected exactly 1 attempted probe (WS_FAIL), got %d", failed)
+	if failed != 0 {
+		t.Errorf("expected no failures when the budget covers nothing, got %d: %+v", failed, results)
 	}
-	if skipped != len(ips)-1 {
-		t.Errorf("expected %d skipped, got %d", len(ips)-1, skipped)
+	if skipped != len(ips) {
+		t.Errorf("expected %d skipped, got %d: %+v", len(ips), skipped, results)
 	}
 }
 
@@ -90,11 +107,11 @@ func TestScanProxyIPsSkipsQueuedWhenBudgetExpires(t *testing.T) {
 			t.Errorf("unexpected stage %q for %s", r.Stage, r.IP)
 		}
 	}
-	if failed != 1 {
-		t.Errorf("expected exactly 1 attempted probe (TLS_FAIL), got %d", failed)
+	if failed != 0 {
+		t.Errorf("expected no failures when the budget covers nothing, got %d: %+v", failed, results)
 	}
-	if skipped != len(ips)-1 {
-		t.Errorf("expected %d skipped, got %d", len(ips)-1, skipped)
+	if skipped != len(ips) {
+		t.Errorf("expected %d skipped, got %d: %+v", len(ips), skipped, results)
 	}
 }
 

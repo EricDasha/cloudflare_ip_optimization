@@ -600,6 +600,13 @@ func scanProxyWebSockets(parent context.Context, ips []string, cfg proxyAutoConf
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
+				// 拿到槽位后仍可能已过期（select 在父 ctx 到期与槽位释放
+				// 同时就绪时随机选分支）：开跑前再查一次，没开始测的
+				// 记 skipped，不得记成超时失败。
+				if parent.Err() != nil {
+					results[i] = proxyScanResult{IP: ip, Stage: "skipped", Error: "等待探测槽位时预算耗尽，未开始探测", ErrorClass: failureTimeout}
+					return
+				}
 			case <-parent.Done():
 				// 预算耗尽时还没排上槽位：根本没开始测，不得记成超时失败。
 				// 此前这里死等槽位，拿到槽后 DialContext 立即报 deadline
@@ -616,9 +623,20 @@ func scanProxyWebSockets(parent context.Context, ips []string, cfg proxyAutoConf
 			latency := time.Since(started).Milliseconds()
 			results[i] = proxyScanResult{IP: ip, Latency: latency, Colo: colo, Stage: "WS_PASS"}
 			if err != nil {
-				results[i].Stage = "WS_FAIL"
-				results[i].Error = err.Error()
-				results[i].ErrorClass = classifyProbeError(err)
+				// 探针进行中父预算到期：不是候选死了，是本轮预算没了——
+				// 与「没排上槽位」同款，记 skipped 不入失败账。只凭错误
+				// 文本分不清「候选超时」与「预算截断」（dial/read 都报
+				// i/o timeout），父 ctx 是唯一判据；与 revalidate 在途
+				// 探针截断记 skipped 是同一规则。
+				if parent.Err() != nil {
+					results[i].Stage = "skipped"
+					results[i].Error = "探测进行中预算耗尽，未完成探测"
+					results[i].ErrorClass = failureTimeout
+				} else {
+					results[i].Stage = "WS_FAIL"
+					results[i].Error = err.Error()
+					results[i].ErrorClass = classifyProbeError(err)
+				}
 			}
 		}(i, ip)
 	}
@@ -794,6 +812,13 @@ func scanProxyIPs(parent context.Context, ips []string, cfg proxyScanConfig) []p
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
+				// 拿到槽位后仍可能已过期（select 在父 ctx 到期与槽位释放
+				// 同时就绪时随机选分支）：开跑前再查一次，没开始测的
+				// 记 skipped，不得记成超时失败。
+				if parent.Err() != nil {
+					results[i] = proxyScanResult{IP: ip, Stage: "skipped", Error: "等待探测槽位时预算耗尽，未开始探测", ErrorClass: failureTimeout}
+					return
+				}
 			case <-parent.Done():
 				// 与 scanProxyWebSockets 同款：预算耗尽还没排上槽位即
 				// skipped，不记 TLS_FAIL。初筛只取 Error=="" 的进短名单，
@@ -820,9 +845,17 @@ func scanProxyIPs(parent context.Context, ips []string, cfg proxyScanConfig) []p
 			latency := time.Since(started).Milliseconds()
 			results[i] = proxyScanResult{IP: ip, Latency: latency, Stage: "TLS_PASS"}
 			if err != nil {
-				results[i].Stage = "TLS_FAIL"
-				results[i].Error = err.Error()
-				results[i].ErrorClass = classifyProbeError(err)
+				// 与 scanProxyWebSockets 同款：探针进行中父预算到期即
+				// skipped，不记 TLS_FAIL。
+				if parent.Err() != nil {
+					results[i].Stage = "skipped"
+					results[i].Error = "探测进行中预算耗尽，未完成探测"
+					results[i].ErrorClass = failureTimeout
+				} else {
+					results[i].Stage = "TLS_FAIL"
+					results[i].Error = err.Error()
+					results[i].ErrorClass = classifyProbeError(err)
+				}
 				return
 			}
 			if latency > int64(cfg.MaxLatency) {
