@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -159,6 +160,52 @@ func (a *app) applyProxyPool(pool, current proxyActivePool) error {
 	a.cfnatCtlMu.Lock()
 	defer a.cfnatCtlMu.Unlock()
 	return a.applyPoolLocked(pool, current)
+}
+
+// errPoolRebaseAborted 表示 rebase 闭包判定本轮不必提交
+// （例如换入目标已在位、缺口已补满），不是错误，调用方直接返回。
+var errPoolRebaseAborted = errors.New("pool rebase aborted")
+
+// errPoolChangedDuringSubmit 表示提交窗口内已有别的路径换池：
+// 调用方应放弃本轮（不重试、不覆盖），下一轮再按新池重算。
+var errPoolChangedDuringSubmit = errors.New("pool changed during submit")
+
+// applyPoolRebased 把「基于旧快照算出的改动」合到最新快照上再提交。
+//
+// 后台长探测（调度器数分钟、补位 6 分钟、reconcile 排队数分钟）期间，
+// 验活/revalidate/关闭席等路径随时可能换池；直接拿旧快照提交会把
+// 并发改动覆盖掉，甚至复活刚剔的死成员。rebase 在 cfnatCtlMu 下收到
+// 最新快照，返回要提交的池；返回 ok=false 即本轮作罢，不提交。
+//
+// 提交分三步，缺一不可：
+//  1. 锁内重取快照并算出要提交的池；
+//  2. 解锁后在锁外结算来源映射（只读候选快照，不与 cfnatCtlMu 交叉持锁，
+//     见 applyProxyPool 的注释）；
+//  3. 再取锁并 CAS：窗口内若已有别的路径换池（内存池 UpdatedAt 变了），
+//     放弃本轮——宁可少换一次，也不拿旧基底覆盖新池。
+//     UpdatedAt 能当版本号用，是因为每次成功提交都会把它写成当下时间
+//     （见各提交点的 pool.UpdatedAt = now 与 applyPoolLocked 的内存写回）；
+//     只改报错的 setProxyPoolError 不动它，但那不改成员，不影响 CAS。
+func (a *app) applyPoolRebased(rebase func(fresh proxyActivePool) (proxyActivePool, bool)) error {
+	if !lockTimeout(&a.cfnatCtlMu, 10*time.Second) {
+		return errors.New("pool control busy")
+	}
+	fresh := a.proxyActivePoolSnapshot()
+	pool, ok := rebase(fresh)
+	a.cfnatCtlMu.Unlock()
+	if !ok {
+		return errPoolRebaseAborted
+	}
+	pool.MemberChannels = a.reconcileMemberChannels(pool, fresh)
+	if !lockTimeout(&a.cfnatCtlMu, 10*time.Second) {
+		return errors.New("pool control busy")
+	}
+	defer a.cfnatCtlMu.Unlock()
+	latest := a.proxyActivePoolSnapshot()
+	if !latest.UpdatedAt.Equal(fresh.UpdatedAt) {
+		return errPoolChangedDuringSubmit
+	}
+	return a.applyPoolLocked(pool, latest)
 }
 
 // planFixedMembers 决定 cfnat -fixed 的成员与顺序：
@@ -1067,35 +1114,56 @@ func (a *app) refillPoolAfterKick() {
 	// 机房软偏好：延迟硬闸滤出的快名单再按偏好机房分区重排——补位先填
 	// 偏好机房，数量不足时其余机房照常补位（软语义，永不因偏好让池短缺）。
 	fast = orderPassedByColoPreference(fast, results, poolColoPreferenceSet())
-	merged := append([]string(nil), current.IPs...)
-	added := make([]string, 0, need)
-	for _, ip := range fast {
-		if containsString(merged, ip) {
-			continue
+	// 提交前在锁内重取快照再合：6 分钟考试窗口内验活或 reconcile
+	// 可能已换池；拿开考前的旧快照提交会把已剔成员带回池。缺口按
+	// 新快照重算，已在位的补位候选直接跳过（不重复进池）。
+	var addedCount, mergedCount int
+	if err := a.applyPoolRebased(func(fresh proxyActivePool) (proxyActivePool, bool) {
+		if fresh.Lock {
+			log.Printf("kick refill skipped: pool lock enabled")
+			return proxyActivePool{}, false
 		}
-		merged = append(merged, ip)
-		added = append(added, ip)
-		// 按新增数封顶：merged 含 Disabled 成员，按 len(merged) 封顶会
-		// 在有已关闭成员时少补（与 need 的算法同病）。
-		if len(added) >= need {
-			break
+		needNow := refillGap(fresh, cfg.PoolSize)
+		if needNow <= 0 {
+			return proxyActivePool{}, false
 		}
-	}
-	if len(added) == 0 {
-		log.Printf("kick refill: no new passes (%d tested), pool stays %d IPs", len(pending), len(current.IPs))
-		return
-	}
-	now := time.Now()
-	pool := current
-	pool.UpdatedAt = now
-	pool.IPs = merged
-	pool.Results = mergePoolResults(merged, current.Results, results)
-	if err := a.applyProxyPool(pool, current); err != nil {
+		merged := append([]string(nil), fresh.IPs...)
+		added := make([]string, 0, needNow)
+		for _, ip := range fast {
+			if containsString(merged, ip) {
+				continue
+			}
+			merged = append(merged, ip)
+			added = append(added, ip)
+			// 按新增数封顶：merged 含 Disabled 成员，按 len(merged) 封顶会
+			// 在有已关闭成员时少补（与 need 的算法同病）。
+			if len(added) >= needNow {
+				break
+			}
+		}
+		if len(added) == 0 {
+			log.Printf("kick refill: no new passes (%d tested), pool stays %d IPs", len(pending), len(fresh.IPs))
+			return proxyActivePool{}, false
+		}
+		addedCount, mergedCount = len(added), len(merged)
+		pool := fresh
+		pool.UpdatedAt = time.Now()
+		pool.IPs = merged
+		pool.Results = mergePoolResults(merged, fresh.Results, results)
+		return pool, true
+	}); err != nil {
+		if errors.Is(err, errPoolRebaseAborted) {
+			return
+		}
+		if errors.Is(err, errPoolChangedDuringSubmit) {
+			log.Printf("kick refill skipped: pool changed during submit")
+			return
+		}
 		log.Printf("kick refill apply failed: %v", err)
 		return
 	}
-	a.markPoolSwitched(now)
-	log.Printf("kick refill: +%d IPs -> pool %d IPs", len(added), len(merged))
+	a.markPoolSwitched(time.Now())
+	log.Printf("kick refill: +%d IPs -> pool %d IPs", addedCount, mergedCount)
 }
 
 // withoutPoolIP 从池中剔除指定 IP；返回 (剩余, 是否找到)。

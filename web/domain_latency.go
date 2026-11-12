@@ -801,14 +801,37 @@ func (a *app) reconcilePoolDomains() {
 	if sameStringSet(current.Domains, want) {
 		return
 	}
-	pool.Domains = want
-	pool.UpdatedAt = time.Now()
-	if err := a.applyProxyPool(pool, current); err != nil {
+	// 提交前在锁内重取快照再合：reconcile 每 30 分钟一轮，若此时
+	// revalidate 正持 cfnatCtlMu 跑最长约 5 分钟的验证，本函数会在
+	// 锁上排队数分钟；等验证落盘新池（已剔死成员）并释放后，再用验证前
+	// 的旧快照提交，会把死成员复活进 -fixed、把用户中途改的 Lock /
+	// Priority 用旧值覆盖。改动只合 Domains，其余字段取新快照。
+	var from, to int
+	var reconciled []string
+	if err := a.applyPoolRebased(func(fresh proxyActivePool) (proxyActivePool, bool) {
+		pool := fresh
+		pool.Domains = want
+		pool.Domains = a.gatePoolDomains(pool)
+		if sameStringSet(fresh.Domains, pool.Domains) {
+			return proxyActivePool{}, false
+		}
+		from, to = len(fresh.Domains), len(pool.Domains)
+		reconciled = append([]string(nil), pool.Domains...)
+		pool.UpdatedAt = time.Now()
+		return pool, true
+	}); err != nil {
+		if errors.Is(err, errPoolRebaseAborted) {
+			return
+		}
+		if errors.Is(err, errPoolChangedDuringSubmit) {
+			log.Printf("domain pool reconcile skipped: pool changed during submit")
+			return
+		}
 		log.Printf("domain pool reconcile failed: %v", err)
 		return
 	}
 	log.Printf("domain pool reconciled: %d -> %d domains (%s)",
-		len(current.Domains), len(want), strings.Join(want, ","))
+		from, to, strings.Join(reconciled, ","))
 }
 
 // quarantineDomain 把域名的自动回池时间推迟到 until。已在观察期内则取更晚的那个。

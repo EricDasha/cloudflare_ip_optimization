@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -548,24 +549,43 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 		log.Printf("scheduler pool switch skipped: target %s fails pool gate (not a public IPv4)", decision.ToIP)
 		return
 	}
-	if containsString(current.IPs, decision.ToIP) {
-		log.Printf("scheduler pool switch skipped: target already in current pool")
-		return
-	}
-	// 片区多样性：调度器单独换一个成员时，若换完会让池的段数变少就拒绝。
-	// spreadBySegment 只在全量重挑/踢人补位里跑过，这条路径此前完全绕过片区
-	// 检查——池结构可以一轮一轮被换成同一段，而所有指标都显示正常。
-	nextIPs := replacePoolMember(current.IPs, decision.FromIP, decision.ToIP)
-	if degradedSegmentDiversity(current.IPs, nextIPs) {
-		log.Printf("scheduler pool switch skipped: segment diversity would drop %v -> %v", poolSegmentStats(current.IPs), poolSegmentStats(nextIPs))
-		a.quality.setError("调度器换池被片区多样性检查拦截：换入后段数减少")
-		return
-	}
-	pool := current
-	pool.UpdatedAt, pool.Host, pool.Path = now, cfg.Host, cfg.Path
-	pool.IPs = nextIPs
-	pool.Results = mergePoolResults(pool.IPs, current.Results, results)
-	if err := a.applyProxyPool(pool, current); err != nil {
+	// 提交前在锁内重取快照再换：探测持续数分钟，期间验活/reconcile
+	// 随时可能换池；拿开考前的旧快照提交会把并发改动覆盖掉，甚至
+	// 复活刚剔的死成员（见 applyPoolRebased）。以下三道检查都在
+	// 新快照上重做——旧快照上的结论已过期。
+	if err := a.applyPoolRebased(func(fresh proxyActivePool) (proxyActivePool, bool) {
+		if containsString(fresh.IPs, decision.ToIP) {
+			log.Printf("scheduler pool switch skipped: target already in current pool")
+			return proxyActivePool{}, false
+		}
+		if !containsString(fresh.IPs, decision.FromIP) {
+			// 换出对象已不在位（验活/别路刚换过），决策前提已不存在：
+			// 不能拿 replacePoolMember 去顶 fresh.IPs[0]，下一轮按新池重判。
+			log.Printf("scheduler pool switch skipped: source %s no longer in pool", decision.FromIP)
+			return proxyActivePool{}, false
+		}
+		// 片区多样性：调度器单独换一个成员时，若换完会让池的段数变少就拒绝。
+		// spreadBySegment 只在全量重挑/踢人补位里跑过，这条路径此前完全绕过片区
+		// 检查——池结构可以一轮一轮被换成同一段，而所有指标都显示正常。
+		nextIPs := replacePoolMember(fresh.IPs, decision.FromIP, decision.ToIP)
+		if degradedSegmentDiversity(fresh.IPs, nextIPs) {
+			log.Printf("scheduler pool switch skipped: segment diversity would drop %v -> %v", poolSegmentStats(fresh.IPs), poolSegmentStats(nextIPs))
+			a.quality.setError("调度器换池被片区多样性检查拦截：换入后段数减少")
+			return proxyActivePool{}, false
+		}
+		pool := fresh
+		pool.UpdatedAt, pool.Host, pool.Path = now, cfg.Host, cfg.Path
+		pool.IPs = nextIPs
+		pool.Results = mergePoolResults(pool.IPs, fresh.Results, results)
+		return pool, true
+	}); err != nil {
+		if errors.Is(err, errPoolRebaseAborted) {
+			return
+		}
+		if errors.Is(err, errPoolChangedDuringSubmit) {
+			log.Printf("scheduler pool switch skipped: pool changed during submit, will retry next round")
+			return
+		}
 		a.quality.setError("调度器换池失败: " + err.Error())
 		return
 	}
