@@ -15,11 +15,8 @@ import (
 func TestProbeVLESSCandidateMetricsRetriesOnBindConflict(t *testing.T) {
 	dir := t.TempDir()
 	counter := filepath.Join(dir, "attempts.log")
-	script := filepath.Join(dir, "fake-sing-box.sh")
-	body := "#!/bin/sh\necho x >> " + counter + "\necho 'FATAL: listen tcp: bind: address already in use' >&2\nexit 1\n"
-	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
+	// 每次启动往 counter 追加一行并报 bind conflict（见 fakebin_test.go）。
+	script := fakeSingBoxBinWithArgFile(t, fakeModeSingBoxBind, counter)
 	cfg := vlessProbeConfig{
 		Binary:       script,
 		TemplatePath: filepath.Join(dir, "template.json"),

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,29 +13,8 @@ import (
 // 响应头后拖 10 秒才写 body——探针应立即因状态码失败，不等 body。
 func TestProbeVLESSCandidateMetricsFailsFastOnBadStatus(t *testing.T) {
 	dir := t.TempDir()
-	script := filepath.Join(dir, "fake-sing-box.py")
-	py := `#!/usr/bin/env python3
-import json, sys, time
-from http.server import BaseHTTPRequestHandler, HTTPServer
-cfg = json.load(open(sys.argv[3]))
-port = cfg["inbounds"][0]["listen_port"]
-class H(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(403)
-        self.send_header("Content-Length", "5000000")
-        self.end_headers()
-        time.sleep(10)
-        try:
-            self.wfile.write(b"x" * 1000)
-        except Exception:
-            pass
-    def log_message(self, *a):
-        pass
-HTTPServer(("127.0.0.1", port), H).serve_forever()
-`
-	if err := os.WriteFile(script, []byte(py), 0755); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
+	// 假 sing-box 回 403，且响应头之后再拖 10 秒才结束响应体。
+	script := fakeSingBoxBin(t, fakeModeSingBoxSlow)
 	cfg := vlessProbeConfig{
 		Binary:         script,
 		TemplatePath:   filepath.Join(dir, "template.json"),

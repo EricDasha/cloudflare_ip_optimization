@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -79,43 +78,13 @@ func TestProbeVLESSPoolWithProbePropagatesDataProven(t *testing.T) {
 	}
 }
 
-// fakeSingBoxProxy 是一段假 sing-box：读 -c 指定的探针配置，
+// writeFakeSingBoxProxy 返回一个假 sing-box：读 -c 指定的探针配置，
 // 在其中的 inbound 端口上起一个 HTTP 代理，按环境变量回固定状态码。
 // 探针的 HTTP 客户端经它发请求——它回什么状态码，探针就当源站回了什么。
-func writeFakeSingBoxProxy(t *testing.T, dir string) string {
+// 实现见 fakebin_test.go 的 fakeModeSingBoxProxy（测试二进制复执行）。
+func writeFakeSingBoxProxy(t *testing.T, _ string) string {
 	t.Helper()
-	script := filepath.Join(dir, "fake-sing-box.py")
-	body := `import json, os, sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
-cfgPath = sys.argv[sys.argv.index("-c") + 1]
-with open(cfgPath) as f:
-    cfg = json.load(f)
-port = cfg["inbounds"][0]["listen_port"]
-status = int(os.environ.get("FAKE_PROXY_STATUS", "403"))
-payload = os.environ.get("FAKE_PROXY_BODY", "forbidden").encode()
-
-class H(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(status)
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(payload)
-    def log_message(self, *args):
-        pass
-
-HTTPServer(("127.0.0.1", port), H).serve_forever()
-`
-	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
-		t.Fatalf("write fake sing-box: %v", err)
-	}
-	wrapper := filepath.Join(dir, "fake-sing-box.sh")
-	wrapperBody := "#!/bin/sh\nexec python3 " + script + " \"$@\"\n"
-	if err := os.WriteFile(wrapper, []byte(wrapperBody), 0755); err != nil {
-		t.Fatalf("write fake sing-box wrapper: %v", err)
-	}
-	return wrapper
+	return fakeSingBoxBin(t, fakeModeSingBoxProxy)
 }
 
 func probeTestConfig(t *testing.T, dir, binary string) vlessProbeConfig {

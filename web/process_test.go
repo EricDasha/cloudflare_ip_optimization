@@ -158,7 +158,10 @@ func readFile(t *testing.T, path string) string {
 // Running（旧 PID），之后每次 start() 都被「已在运行」挡回。
 func TestManagedProcessFailedStartDoesNotPoisonState(t *testing.T) {
 	dir := t.TempDir()
-	p := newManagedProcess("proc", "/bin/true")
+	// 用「立刻成功退出」的假二进制替代 /bin/true（Windows 上没有该路径）。
+	// 见 fakebin_test.go：测试二进制复执行自身，靠环境变量认领身份。
+	trueBin := fakeSingBoxBin(t, fakeModeExitZero)
+	p := newManagedProcess("proc", trueBin)
 	if err := p.start(dir, nil, ""); err != nil {
 		t.Fatalf("first start: %v", err)
 	}
@@ -170,7 +173,7 @@ func TestManagedProcessFailedStartDoesNotPoisonState(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if p.status().Running {
-		t.Fatalf("/bin/true still reported Running")
+		t.Fatalf("exit-zero fake binary still reported Running")
 	}
 	p.bin = filepath.Join(dir, "missing-binary")
 	if err := p.start(dir, nil, ""); err == nil {
@@ -179,7 +182,7 @@ func TestManagedProcessFailedStartDoesNotPoisonState(t *testing.T) {
 	if st := p.status(); st.Running {
 		t.Fatalf("failed start reported Running with stale pid %d", st.PID)
 	}
-	p.bin = "/bin/true"
+	p.bin = trueBin
 	if err := p.start(dir, nil, ""); err != nil {
 		t.Fatalf("start after failure: %v", err)
 	}
