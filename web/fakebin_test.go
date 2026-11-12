@@ -117,7 +117,13 @@ func runFakeBinaryIfChild() {
 func fakeCFnatSleep() {
 	recordFakeStart()
 	// 阻塞等外部 Kill：stop() 会先 cancel ctx 再 Kill，这里不必主动退出。
-	select {}
+	//
+	// 不能用 `select {}`：假 cfnat 只有一个 goroutine，Go 运行时会把它判定为
+	// 「所有 goroutine 都睡死」并直接 abort（fatal error: all goroutines are
+	// asleep - deadlock!，退出码 2）。那样进程不等被杀就自己没了，测试随后
+	// 断言 status().Running 必然失败。挂一个定时器即可——有 timer 在，死锁
+	// 检测不会触发；真被 Kill 时进程直接消失，定时器也就无所谓了。
+	<-time.After(30 * time.Minute)
 }
 
 // fakeSingBoxBindConflict 每次启动记一次尝试，然后照真实 sing-box
