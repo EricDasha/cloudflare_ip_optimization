@@ -48,6 +48,43 @@ type vlessProbeMetrics struct {
 	Bytes    int64
 	Duration time.Duration
 	Mbps     float64
+	// Proven 表示本次探测有明确的数据面成功证据：隧道里收到了源站的
+	// HTTP 响应（见 vlessResponseProvesDataPlane）。只有它能证明候选
+	// 的数据面真的通过——DataLatency 只是整次尝试的耗时（含 15 秒超时），
+	// ErrorClass 也只是失败归类，两者都不能当「连上过」的证明。
+	// 降级准入（degradedFromWSResults）只认这一位。
+	Proven bool
+}
+
+// vlessResponseProvesDataPlane 判断一次经 VLESS 隧道收到的 HTTP 响应
+// 是否证明数据面真的通过。纯函数，便于单测钉死边界。
+//
+// 证明成立：
+//   - 状态码等于预期状态：sing-box 不会凭空拼出调用方要的那个状态码；
+//   - 其他非代理错误状态（如 200/403/404）：请求确实穿过隧道抵达了源站，
+//     源站回了真实的 HTTP 状态——状态码不对是测速端点的问题，不是隧道的问题。
+//
+// 不算证明：
+//   - 502/503/504：sing-box 的 HTTP 入站（mixed inbound）在出站拨号失败
+//     时会就地合成 502 之类的错误响应，请求根本没进隧道。只凭这类状态码
+//     就认「通了」，等于把探针坏了也当成候选好了。
+//   - 无响应（statusCode==0）：client.Do 直接报错，没收到任何响应头。
+func vlessResponseProvesDataPlane(statusCode, expectedStatus int) bool {
+	if statusCode <= 0 {
+		return false
+	}
+	if statusCode == expectedStatus {
+		// 预期状态本身若就是代理错误码，同样不可信——配置里不该这么写，
+		// 但防一手：sing-box 合成的 502 正好撞上预期 502 时不能算数。
+		return expectedStatus != http.StatusBadGateway &&
+			expectedStatus != http.StatusServiceUnavailable &&
+			expectedStatus != http.StatusGatewayTimeout
+	}
+	switch statusCode {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return false
+	}
+	return true
 }
 
 // speedSampler 分片采样读取器：边读边按固定时间片记字节账。
@@ -268,6 +305,12 @@ func buildSingBoxProbeConfig(template map[string]any, candidateIP string, candid
 }
 
 func probeVLESSPool(parent context.Context, results []proxyScanResult, candidatePort, poolSize int, cfg vlessProbeConfig, template map[string]any) []string {
+	return probeVLESSPoolWithProbe(parent, results, candidatePort, poolSize, cfg, template, probeVLESSCandidate)
+}
+
+// probeVLESSPoolWithProbe 与 probeVLESSPool 相同，但探针函数可注入，
+// 便于单测钉死「数据面证据如何进结果、降级如何认」而不必真的起 sing-box。
+func probeVLESSPoolWithProbe(parent context.Context, results []proxyScanResult, candidatePort, poolSize int, cfg vlessProbeConfig, template map[string]any, probe func(context.Context, string, int, vlessProbeConfig, map[string]any) (vlessProbeMetrics, error)) []string {
 	order := vlessProbeOrder(results)
 	attempts := 0
 	for _, i := range order {
@@ -277,9 +320,13 @@ func probeVLESSPool(parent context.Context, results []proxyScanResult, candidate
 		attempts++
 		ctx, cancel := context.WithTimeout(parent, cfg.Timeout)
 		started := time.Now()
-		err := probeVLESSCandidate(ctx, results[i].IP, candidatePort, cfg, template)
+		metrics, err := probe(ctx, results[i].IP, candidatePort, cfg, template)
 		cancel()
 		results[i].DataLatency = time.Since(started).Milliseconds()
+		// 数据面证据随 metrics 回来：失败时也要记——降级准入只认它。
+		// 此前 probeVLESSCandidate 只返回 error，metrics 直接丢掉，
+		// 失败候选有没有真的通根本无从知道，降级只能靠「非超时」瞎猜。
+		results[i].DataProven = metrics.Proven
 		if err != nil {
 			results[i].Stage = "VLESS_FAIL"
 			results[i].Error = err.Error()
@@ -336,9 +383,8 @@ func fastestVLESSPasses(results []proxyScanResult, poolSize int) []string {
 	return result
 }
 
-func probeVLESSCandidate(ctx context.Context, candidateIP string, candidatePort int, cfg vlessProbeConfig, template map[string]any) error {
-	_, err := probeVLESSCandidateMetrics(ctx, candidateIP, candidatePort, cfg, template)
-	return err
+func probeVLESSCandidate(ctx context.Context, candidateIP string, candidatePort int, cfg vlessProbeConfig, template map[string]any) (vlessProbeMetrics, error) {
+	return probeVLESSCandidateMetrics(ctx, candidateIP, candidatePort, cfg, template)
 }
 
 // maxVLESSProbePortAttempts 探针端口被抢占时换端口重试的次数上限。
@@ -481,6 +527,11 @@ func probeVLESSCandidateMetricsOnce(ctx context.Context, candidateIP string, can
 		return metrics, fmt.Errorf("VLESS 数据面请求失败: %w", err)
 	}
 	defer resp.Body.Close()
+	// 响应头到了，就按 vlessResponseProvesDataPlane 判定数据面证据：
+	// 状态码不对（403 之类）也算——请求穿过隧道抵达了源站；只有
+	// sing-box 就地合成的 502/503/504 不算。此后所有失败返回
+	// （状态码不对、读不满、读一半断开）都带着这一位，降级准入认它。
+	metrics.Proven = vlessResponseProvesDataPlane(resp.StatusCode, cfg.ExpectedStatus)
 	// 状态码先验：403/404 的错误体不必读满预算才判失败，且读超时会
 	// 先于状态码返回、把报错原因写错。
 	if resp.StatusCode != cfg.ExpectedStatus {

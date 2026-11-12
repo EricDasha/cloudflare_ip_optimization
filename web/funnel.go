@@ -265,23 +265,30 @@ func admitPassedUnderCeiling(passed []string, results []proxyScanResult, ceiling
 // 语义边界：只补到 want 为止，绝不越界扩池——降级是为了不空池，
 // 不是为了用未验证的候选把池子填满。
 //
-// 准入（改动 B）：候选必须真的进过 VLESS 终审（Stage=VLESS_FAIL，
-// DataLatency>0 说明探针跑完了）且失败归类不是 timeout——超时意味着
-// 数据面 15 秒静默，最能说明这条出口此刻不通。
+// 准入（第二轮审计收紧）：候选必须有明确的数据面成功证据
+// （DataProven，见 vless_probe.go）：VLESS 终审里隧道收到过源站的
+// HTTP 响应，才算「数据面真的通过」。只有这种失败才允许降级采用——
+// 失败点在测速端点而不在隧道本身（例如状态码不对、下载字节不够），
+// 候选本身是通的。
 //
-// 拒绝的三类：
-//   - 纯 WS_PASS（未进 VLESS 终审）：WS 握手对数据面毫无预测力。实测：
-//     13 个 VLESS_FAIL 的 WS 握手仅 228–423ms，数据面却卡满 15s 超时，
-//     不能凭 WS 通过就进池；
-//   - VLESS_FAIL 且 errorClass=timeout：数据面超时；
+// 为什么不能按「非超时失败」放行（第一轮改动 B 的旧口径）：
+//   - refused / unreachable 恰恰证明候选已死：443 没人听，或根本没路由。
+//     把已死的地址推进池子，比空池更糟——转发过去必定失败；
+//   - reset / protocol 在没收到任何响应前发生时，同样什么都没证明：
+//     可能是对端在握手前就 RST，也可能是中间设备掐的；
+//   - other 里混着探针基础设施失败（sing-box 起不来、模板错、端口分
+//     配失败）——探针坏了，全员失败，旧口径会把整批候选照单全收；
+//   - DataLatency 只是整次尝试的耗时（含 15 秒超时），实测超时项全是
+//     约 15005ms，从来就不是「连上过」的证明。
+//
+// 结论：快速失败不比超时更可信——两者都只说明「这次没通」，
+// 唯一可信的是隧道里真实流过源站响应的证据。
+//
+// 拒绝的情形：
+//   - 纯 WS_PASS（未进 VLESS 终审）：WS 握手对数据面毫无预测力；
+//   - VLESS_FAIL 但无 DataProven：不论 timeout / refused / reset /
+//     protocol / other，一律拒绝并按归类写明原因；
 //   - WS_FAIL 或其他阶段失败：WS 阶段已失败。
-//
-// 注意：probeVLESSPool 里 DataLatency 是整次尝试的耗时（含 15s 超时），
-// 不是「连上过」的证明——不能只凭 DataLatency>0 就放行，必须同时看
-// errorClass。交接单原文「有 dataLatency 值（即真的连上过）」按字面
-// 理解会把 15s 超时也放进来（实测证据里超时项的 dataLatency 全是
-// 约 15005ms），此处按「已尝试 + 非超时失败」执行，并在 PR 说明里
-// 标出这一处与原文措辞的出入。
 func degradedFromWSResults(results []proxyScanResult, existing []string, want int) (adopted, rejected []string) {
 	if want <= len(existing) {
 		return nil, nil
@@ -300,12 +307,10 @@ func degradedFromWSResults(results []proxyScanResult, existing []string, want in
 		}
 		seen[result.IP] = struct{}{}
 		switch {
-		case result.Stage == "VLESS_FAIL" && result.DataLatency > 0 && result.ErrorClass != "" && result.ErrorClass != failureTimeout:
+		case result.Stage == "VLESS_FAIL" && result.DataProven:
 			adopted = append(adopted, result.IP)
-		case result.Stage == "VLESS_FAIL" && result.ErrorClass == failureTimeout:
-			rejected = append(rejected, result.IP+": VLESS 数据面超时")
 		case result.Stage == "VLESS_FAIL":
-			rejected = append(rejected, result.IP+": VLESS 失败原因未归类或无数据面耗时")
+			rejected = append(rejected, result.IP+": VLESS 失败（"+degradedRejectReason(result)+"），无数据面成功证据")
 		case result.Stage == "WS_PASS":
 			rejected = append(rejected, result.IP+": 仅 WS 通过，未验 VLESS 数据面")
 		default:
@@ -313,6 +318,27 @@ func degradedFromWSResults(results []proxyScanResult, existing []string, want in
 		}
 	}
 	return adopted, rejected
+}
+
+// degradedRejectReason 把 VLESS 失败的归类翻成人话，供拒绝日志使用。
+// 只做展示，不参与准入判定——准入只认 DataProven。
+func degradedRejectReason(result proxyScanResult) string {
+	switch result.ErrorClass {
+	case failureTimeout:
+		return "数据面超时"
+	case failureRefused:
+		return "连接被拒，对端 443 无人监听"
+	case failureUnreachable:
+		return "无路由/网络不可达"
+	case failureHandshake:
+		return "TLS 握手失败"
+	case failureProtocol:
+		return "连接被重置/协议错误"
+	case "":
+		return "失败原因未归类"
+	default:
+		return "未归类失败（" + result.ErrorClass + "）"
+	}
 }
 
 // autoApplyProxyPool 跑一轮全量重挑并换池。
@@ -452,9 +478,10 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 	}
 	if len(passed) < cfg.MinPool {
 		message := fmt.Sprintf("%s 终审仅 %d 个通过，低于最小池 %d", finalStage, len(passed), cfg.MinPool)
-		// L3 降级：VLESS 数据面没验过，但 WS 101 已经通过 —— 说明 TCP/TLS/WS
-		// 三层都通，失败点大概率在探测目标而非链路本身。池子空掉比用
-		// 「未完成终审」的候选严重得多，故降级采用并明确标记。
+		// L3 降级：VLESS 终审没全过，但个别候选在终审里已证明数据面
+		// 真的通过（隧道里收到过源站响应，只是测速端点/字节数没达标）。
+		// 池子空掉比用「有证据但不完美」的候选严重得多，故降级采用并
+		// 明确标记。没有数据面证据的失败一律不采——凑数进池比空池更糟。
 		if cfg.VLESS.Enabled {
 			extra, rejected := degradedFromWSResults(results, passed, cfg.MinPool)
 			if len(rejected) > 0 {
@@ -476,7 +503,7 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 			}
 			if len(extra) > 0 {
 				passed = append(passed, extra...)
-				message = fmt.Sprintf("%s；已降级采用 %d 个 VLESS 非超时失败的候选", message, len(extra))
+				message = fmt.Sprintf("%s；已降级采用 %d 个有数据面成功证据的 VLESS 失败候选", message, len(extra))
 				log.Printf("proxy pool DEGRADED: %s", message)
 			}
 		}
@@ -680,10 +707,15 @@ func probeProxyWebSocket(ctx context.Context, ip string, cfg proxyAutoConfig) (s
 }
 
 type proxyScanResult struct {
-	IP           string  `json:"ip"`
-	Latency      int64   `json:"latency"`
-	Colo         string  `json:"colo,omitempty"`
-	DataLatency  int64   `json:"dataLatency,omitempty"`
+	IP          string `json:"ip"`
+	Latency     int64  `json:"latency"`
+	Colo        string `json:"colo,omitempty"`
+	DataLatency int64  `json:"dataLatency,omitempty"`
+	// DataProven 表示本次 VLESS 探测有明确的数据面成功证据（隧道里收到
+	// 了源站的 HTTP 响应，见 vless_probe.go 的 Proven）。只有它能证明
+	// 候选的数据面真的通过——DataLatency 只是尝试耗时，ErrorClass 只是
+	// 失败归类。降级准入只认这一位。
+	DataProven   bool    `json:"dataProven,omitempty"`
 	DownloadMbps float64 `json:"downloadMbps,omitempty"`
 	SourceRank   int     `json:"sourceRank,omitempty"`
 	Stage        string  `json:"stage,omitempty"`
