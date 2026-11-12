@@ -582,7 +582,17 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 
 func scanProxyWebSockets(parent context.Context, ips []string, cfg proxyAutoConfig) []proxyScanResult {
 	results := make([]proxyScanResult, len(ips))
-	sem := make(chan struct{}, cfg.Concurrency)
+	// 防御性钳制：不是所有调用方都走 defaultProxyAutoConfig（手动采用
+	// 的 gate.Concurrency 直接取请求值），0 会让 sem 变成 cap 为 0 的
+	// channel、全部 goroutine 永久阻塞，负数直接 panic。钳到 [1,100]。
+	concurrency := cfg.Concurrency
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if concurrency > 100 {
+		concurrency = 100
+	}
+	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	for i, ip := range ips {
 		wg.Add(1)
