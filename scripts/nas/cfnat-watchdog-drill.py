@@ -72,7 +72,12 @@ def patch_vless(server, port, path):
             o["server"] = server
             o["server_port"] = port
             o.get("transport", {})["path"] = path
-    json.dump(d, open(CFG, "w"), indent=2)
+    # 原子写：先写临时文件再 rename。直接覆盖写一半崩了，config.json
+    # 被截断，下次 sing-box 启动即解析失败。
+    tmp = CFG + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f, indent=2)
+    os.replace(tmp, CFG)
     run(SUDO + "docker restart sing-box", timeout=120)
     time.sleep(10)
 

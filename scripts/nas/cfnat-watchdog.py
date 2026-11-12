@@ -345,7 +345,13 @@ def set_target(server, port):
     v = vless_of(d)
     v["server"] = server
     v["server_port"] = port
-    json.dump(d, open(CFG, "w"), indent=2)
+    # 原子写：先写临时文件再 rename，与 save_state 同款。直接覆盖写一半
+    # 崩了（断电/OOM），config.json 被截断，sing-box 下次启动解析失败，
+    # 隧道彻底停摆，需人工从备份恢复。
+    tmp = CFG + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f, indent=2)
+    os.replace(tmp, CFG)
     r = run(["docker", "restart", "sing-box"], timeout=120)
     if r.returncode != 0:
         log(f"docker restart failed: {r.stderr[:120]}")
