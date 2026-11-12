@@ -121,8 +121,8 @@ HTTPServer(("127.0.0.1", port), H).serve_forever()
 func probeTestConfig(t *testing.T, dir, binary string) vlessProbeConfig {
 	t.Helper()
 	return vlessProbeConfig{
-		Binary:         binary,
-		TemplatePath:   filepath.Join(dir, "template.json"),
+		Binary:       binary,
+		TemplatePath: filepath.Join(dir, "template.json"),
 		// 故意用 http 而非 https：经代理取 https 时客户端先发 CONNECT，
 		// 假 sing-box 得先接 TLS 才能继续；http 直接发绝对路径 GET，
 		// 足以测 Proven 接线（本测试不测 TLS 本身）。
