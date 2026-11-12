@@ -576,6 +576,12 @@ func (a *app) speedPathStatus() speedPathStat {
 // 样本 + TCP 可达」，DNS/TCP 全灭时失败照样入账，新域名永远停在 state=""
 // （质量闸一律放行），坏域名在下一轮 reconcile 时被整批塞回池。
 func (a *app) recordDomainProbeResults(samples map[string]domainProbeSample) bool {
+	// 空轮次直接返回：本函数末尾的剪枝循环会删掉所有不在 samples 里的
+	// 记录——空 map 会把整本账清空。生产路径（probeActiveDomainLatencies）
+	// 在无目标时根本不会调到这里，但空入参也不该是一次「删库」操作。
+	if len(samples) == 0 {
+		return false
+	}
 	now := time.Now()
 	stats := classifyDomainProbeRound(samples)
 	speedSuccess := stats.SpeedOK

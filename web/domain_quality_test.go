@@ -476,3 +476,27 @@ func TestNewQualitySchedulerRuntimeToleratesCorruptCache(t *testing.T) {
 		t.Fatalf("corrupt cache produced non-empty runtime: %#v", r.data)
 	}
 }
+
+// 空样本轮次不得动账本：末尾剪枝循环以 samples 为准，空 map 会把
+// 整本账清空。生产路径无目标时不会调到这里，但防御不能缺。
+func TestRecordDomainProbeEmptyRoundIsNoop(t *testing.T) {
+	a := newProbeTestApp(t)
+	old := freshRecord(domainStateHealthy)
+	oldAt := time.Now().Add(-time.Hour)
+	old.LastProbeAt = oldAt
+	old.Samples = []domainProbeSample{okSample(10, 50), okSample(11, 52), okSample(10, 50)}
+	a.domainQuality["old.example.com"] = old
+	if broken := a.recordDomainProbeResults(map[string]domainProbeSample{}); broken {
+		t.Fatal("空轮次不应判定为通路故障")
+	}
+	if broken := a.recordDomainProbeResults(nil); broken {
+		t.Fatal("nil 轮次不应判定为通路故障")
+	}
+	rec := a.domainQuality["old.example.com"]
+	if rec == nil {
+		t.Fatal("空轮次清空了账本")
+	}
+	if len(rec.Samples) != 3 || !rec.LastProbeAt.Equal(oldAt) || rec.State != domainStateHealthy {
+		t.Fatalf("空轮次改动了既有记录: %+v", rec)
+	}
+}
