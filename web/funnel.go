@@ -112,7 +112,18 @@ func rankVLESSPassesBySpeedWithProbe(
 	}
 	passed = verified
 	logSpeedProbeSummary(speeds, maxSpeedProbes, minMbps)
+	latencyCeiling := vlessLatencyCeilingMs()
 	sort.SliceStable(passed, func(i, j int) bool {
+		// 延迟天花板：吞吐排序只看速度，看不见往返时间。一个 4 Mbps / 720ms
+		// 的入口下载能跑满，但每一次请求都要多等半秒——浏览、交互全是这个代价。
+		// 2026-11-14 线上实证：cfdata 灌进池子的 4 个 IP 吞吐 3.4~4.3 Mbps、
+		// 握手 550~722ms，而在位的订阅 IP 是 245~292ms，用户感受正是
+		// 「速度没问题但很卡」。超线的无论多快都排到线内之后。
+		leftLaggy := vlessLatencyLaggy(results, passed[i], latencyCeiling)
+		rightLaggy := vlessLatencyLaggy(results, passed[j], latencyCeiling)
+		if leftLaggy != rightLaggy {
+			return !leftLaggy
+		}
 		leftBucket := speedBucket(speeds, passed[i], minMbps)
 		rightBucket := speedBucket(speeds, passed[j], minMbps)
 		if leftBucket != rightBucket {
@@ -164,6 +175,55 @@ func speedBucket(speeds map[string]float64, ip string, minMbps float64) int {
 		return 0
 	}
 	return 2
+}
+
+// vlessLatencyCeilingMs 是排序用的「慢线」分界，不是入池硬闸。
+//
+// 入池硬闸是 poolEntryMaxLatencyMs（默认 800ms），它只回答「能不能进来」；
+// 这条回答的是「进来之后排第几」。两者不能合并：硬闸调紧会让池子变窄，
+// 而慢线成员在候选不够时仍然有用——只是不该优先占座。
+//
+// 默认 450ms 的依据是 2026-11-14 线上实测：在位订阅 IP 245~292ms，
+// 灌进池子的 cfdata IP 550~722ms。旧的 800ms 硬闸把两批一起放行，
+// 而吞吐排序只看速度，于是 4 Mbps/720ms 排到了未测速的 250ms 前面。
+func vlessLatencyCeilingMs() int64 {
+	ms := int64(envInt("PROXY_VLESS_MAX_LATENCY_MS", 450))
+	if ms < 0 || ms > 5000 {
+		ms = 450
+	}
+	return ms
+}
+
+// vlessLatencyLaggy 报告某成员握手是否慢到不该优先占座。
+// results 里查不到成绩时按「不慢」处理：未知不等于差，不能因为没数据就判死。
+func vlessLatencyLaggy(results []proxyScanResult, ip string, ceiling int64) bool {
+	if ceiling <= 0 {
+		return false
+	}
+	for _, result := range results {
+		if result.IP == ip {
+			return result.Latency > 0 && result.Latency > ceiling
+		}
+	}
+	return false
+}
+
+// partitionLaggyLast 把超过延迟天花板的成员稳定地挪到末尾，组内顺序不变。
+// 只分区不淘汰：候选不够时慢线成员照样能用，只是不再优先占座。
+func partitionLaggyLast(passed []string, results []proxyScanResult, ceiling int64) []string {
+	if ceiling <= 0 || len(passed) < 2 {
+		return passed
+	}
+	out := make([]string, 0, len(passed))
+	laggy := make([]string, 0, len(passed))
+	for _, ip := range passed {
+		if vlessLatencyLaggy(results, ip, ceiling) {
+			laggy = append(laggy, ip)
+			continue
+		}
+		out = append(out, ip)
+	}
+	return append(out, laggy...)
 }
 
 // logSpeedProbeSummary 每轮打一行测速汇总。
@@ -530,6 +590,13 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 		passed = orderPassedByColoPreference(passed, results, poolColoPreferenceSet())
 		passed = orderPassedBySegmentHealth(passed, results)
 		passed = spreadBySegment(passed, cfg.PoolSize)
+	}
+	// 排序层已经按慢线分过一次，但 orderPassedByColoPreference /
+	// orderPassedBySegmentHealth / spreadBySegment 都会重排：段轮转是「每段各取
+	// 一个」，一个独占某段的慢线成员会在第一轮就被取走，插到延迟更好但段更挤的
+	// 成员前面。所以入池前必须再分一次——这里是最终顺序，之后只有硬闸。
+	if ceiling := vlessLatencyCeilingMs(); ceiling > 0 {
+		passed = partitionLaggyLast(passed, results, ceiling)
 	}
 	// 入池延迟上限对「全量重挑」同样适用。旧实现只有踢人补位和在位替补查
 	// 800ms，自动换池却按 PROXY_AUTO_MAX_LATENCY（现场 5000ms）放行，于是

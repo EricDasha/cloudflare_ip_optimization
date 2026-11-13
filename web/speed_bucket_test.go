@@ -49,6 +49,103 @@ func TestRankVLESSPassesRanksBelowThresholdLast(t *testing.T) {
 	}
 }
 
+// 延迟天花板：吞吐排序看不见往返时间，一个 4 Mbps / 720ms 的入口下载能跑满，
+// 但每次请求都要多等半秒。2026-11-14 线上实证：cfdata 灌进池子的 4 个 IP
+// 吞吐 3.4~4.3 Mbps、握手 550~722ms，压过了未测速但只有 245~292ms 的订阅 IP。
+func TestRankVLESSPassesDemotesHighLatencyFastIPs(t *testing.T) {
+	t.Setenv("PROXY_VLESS_MIN_DOWNLOAD_MBPS", "3")
+	t.Setenv("PROXY_VLESS_SPEED_PROBES", "10")
+	t.Setenv("PROXY_VLESS_MAX_LATENCY_MS", "450")
+	results := []proxyScanResult{
+		{IP: "198.51.100.10", Latency: 250, SourceRank: 2, Stage: "VLESS_PASS"},
+		{IP: "198.51.100.11", Latency: 720, SourceRank: 2, Stage: "VLESS_PASS"},
+		{IP: "198.51.100.12", Latency: 290, SourceRank: 2, Stage: "VLESS_PASS"},
+	}
+	probe := func(_ context.Context, ip string, _ int, _ vlessProbeConfig, _ map[string]any) (vlessProbeMetrics, error) {
+		if ip == "198.51.100.11" {
+			return vlessProbeMetrics{Duration: 500 * time.Millisecond, Mbps: 4.2}, nil
+		}
+		return vlessProbeMetrics{}, errors.New("download failed")
+	}
+	got := rankVLESSPassesBySpeedWithProbe(
+		context.Background(),
+		[]string{"198.51.100.10", "198.51.100.11", "198.51.100.12"},
+		results,
+		443,
+		vlessProbeConfig{Timeout: time.Second},
+		nil,
+		probe,
+	)
+	want := []string{"198.51.100.10", "198.51.100.12", "198.51.100.11"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v (high-latency IP must sink despite speed)", got, want)
+	}
+}
+
+// 关掉天花板（0）必须回到旧的纯吞吐排序，否则这个开关等于摆设。
+func TestRankVLESSPassesLatencyCeilingDisabled(t *testing.T) {
+	t.Setenv("PROXY_VLESS_MIN_DOWNLOAD_MBPS", "3")
+	t.Setenv("PROXY_VLESS_SPEED_PROBES", "10")
+	t.Setenv("PROXY_VLESS_MAX_LATENCY_MS", "0")
+	results := []proxyScanResult{
+		{IP: "198.51.100.10", Latency: 250, SourceRank: 2, Stage: "VLESS_PASS"},
+		{IP: "198.51.100.11", Latency: 720, SourceRank: 2, Stage: "VLESS_PASS"},
+	}
+	probe := func(_ context.Context, ip string, _ int, _ vlessProbeConfig, _ map[string]any) (vlessProbeMetrics, error) {
+		if ip == "198.51.100.11" {
+			return vlessProbeMetrics{Duration: 500 * time.Millisecond, Mbps: 4.2}, nil
+		}
+		return vlessProbeMetrics{}, errors.New("download failed")
+	}
+	got := rankVLESSPassesBySpeedWithProbe(
+		context.Background(),
+		[]string{"198.51.100.10", "198.51.100.11"},
+		results,
+		443,
+		vlessProbeConfig{Timeout: time.Second},
+		nil,
+		probe,
+	)
+	want := []string{"198.51.100.11", "198.51.100.10"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v (ceiling disabled must keep speed order)", got, want)
+	}
+}
+
+// 没有握手成绩的成员不能因为「查不到」被判成慢线。
+func TestVlessLatencyLaggyTreatsUnknownAsNeutral(t *testing.T) {
+	results := []proxyScanResult{{IP: "198.51.100.1", Latency: 200}}
+	if vlessLatencyLaggy(results, "198.51.100.1", 450) {
+		t.Fatal("200ms must not be laggy under a 450ms ceiling")
+	}
+	if vlessLatencyLaggy(results, "198.51.100.9", 450) {
+		t.Fatal("unknown latency must be treated as neutral, not laggy")
+	}
+	if !vlessLatencyLaggy([]proxyScanResult{{IP: "198.51.100.2", Latency: 700}}, "198.51.100.2", 450) {
+		t.Fatal("700ms must be laggy under a 450ms ceiling")
+	}
+}
+
+// 段轮转会把独占某段的慢线成员在第一轮就取走，所以入池前必须再分一次。
+func TestPartitionLaggyLastPreservesInnerOrder(t *testing.T) {
+	results := []proxyScanResult{
+		{IP: "198.51.100.1", Latency: 250},
+		{IP: "198.51.100.2", Latency: 700},
+		{IP: "198.51.100.3", Latency: 290},
+		{IP: "198.51.100.4", Latency: 900},
+	}
+	got := partitionLaggyLast([]string{"198.51.100.2", "198.51.100.1", "198.51.100.4", "198.51.100.3"}, results, 450)
+	want := []string{"198.51.100.1", "198.51.100.3", "198.51.100.2", "198.51.100.4"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	// 关掉天花板时原样返回。
+	in := []string{"198.51.100.2", "198.51.100.1"}
+	if got := partitionLaggyLast(in, results, 0); !reflect.DeepEqual(got, in) {
+		t.Fatalf("ceiling 0 must be a no-op, got %v", got)
+	}
+}
+
 func TestDropBelowReferenceIPs(t *testing.T) {
 	passed := []string{"198.51.100.1", "198.51.100.2", "198.51.100.3"}
 	results := []proxyScanResult{
