@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/csv"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -111,7 +112,8 @@ func (a *app) cfdataCandidateIPs(limit int) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	a.sortCFdataRows(rows)
+	coloByIP := a.cfdataColoByIP()
+	a.sortCFdataRows(rows, coloByIP)
 	out := make([]string, 0, limit)
 	seen := make(map[string]struct{}, limit)
 	for _, row := range rows {
@@ -134,7 +136,46 @@ func (a *app) cfdataCandidateIPs(limit int) ([]string, error) {
 	if len(out) == 0 {
 		return nil, errors.New("result.csv 中无可用公网 IPv4")
 	}
+	logCFdataColoSpread(out, coloByIP)
 	return out, nil
+}
+
+// logCFdataColoSpread 打出这一批入选 IP 的机房分布。
+//
+// 2026-11-13 实测：cfdata 按延迟挑出的前 250 个里 FRA 117、LAX 85、SIN 42、
+// NRT 4、SJC 2——全是最远的几个机房。这条日志是判断「延迟排序是不是又把我们
+// 送到远端拥塞线路」的唯一依据，所以和分档统计一起留在每轮刷新里。
+func logCFdataColoSpread(ips []string, coloByIP map[string]string) {
+	if len(coloByIP) == 0 {
+		return
+	}
+	counts := make(map[string]int, 8)
+	for _, ip := range ips {
+		colo := coloByIP[ip]
+		if colo == "" {
+			colo = "?"
+		}
+		counts[colo]++
+	}
+	type pair struct {
+		colo string
+		n    int
+	}
+	list := make([]pair, 0, len(counts))
+	for colo, n := range counts {
+		list = append(list, pair{colo, n})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].n != list[j].n {
+			return list[i].n > list[j].n
+		}
+		return list[i].colo < list[j].colo
+	})
+	parts := make([]string, 0, len(list))
+	for _, p := range list {
+		parts = append(parts, fmt.Sprintf("%s=%d", p.colo, p.n))
+	}
+	log.Printf("cfdata colo spread: %s", strings.Join(parts, " "))
 }
 
 // cfdataSpeedTier 把一条扫描结果分档。数字小的先出线。
@@ -166,9 +207,8 @@ func cfdataSpeedTier(mbps, minMbps, loss, maxLoss float64) int {
 // 基线（零丢包 → 低延迟 → 低抖动）仍然保留：它只在同一档内做次序，不再
 // 决定谁排在最前。这样做的理由是实测数据：cfdata 按延迟挑出来的前 250 个，
 // 吞吐中位不到 2 Mbps，而在位成员是 9~10 Mbps，两者毫无相关性。
-func (a *app) sortCFdataRows(rows []cfdataResultRow) {
+func (a *app) sortCFdataRows(rows []cfdataResultRow, coloByIP map[string]string) {
 	mbps := a.ledgerThroughputSnapshot()
-	coloByIP := a.cfdataColoByIP()
 	prior := cfdataColoThroughput(coloByIP, mbps)
 	minMbps := vlessMinDownloadMbps()
 	maxLoss := float64(envInt("CFDATA_MAX_LOSS_PCT", 20))
@@ -201,8 +241,18 @@ func (a *app) sortCFdataRows(rows []cfdataResultRow) {
 		}
 		// 再看得票：这个机房历史上出过多少条能跑满的线路。样本不足三个
 		// 机房不给先验——一两条好线是个别 IP 的运气，不是机房的性质。
-		lp, rp := prior[coloByIP[left.IP]], prior[coloByIP[right.IP]]
-		if lp != rp {
+		// 「没有先验」不等于「先验为零」：拿 0 去比会把没测过的机房判成最差，
+		// 于是已知很差的机房反而排在未知机房前面。只在双方都有先验时比大小，
+		// 只有一方有时按「好机房优先、差机房靠后」处理。
+		lp, lok := prior[coloByIP[left.IP]]
+		rp, rok := prior[coloByIP[right.IP]]
+		if lok != rok {
+			if lok {
+				return lp >= minMbps
+			}
+			return rp < minMbps
+		}
+		if lok && lp != rp {
 			return lp > rp
 		}
 		if left.AvgLatency != right.AvgLatency {

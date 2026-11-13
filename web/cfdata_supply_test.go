@@ -183,3 +183,54 @@ func TestCFdataColoThroughputRequiresThreeSamples(t *testing.T) {
 		t.Fatal("a colo with fewer than 3 samples must not get a prior")
 	}
 }
+
+// 三个 IP 延迟、丢包完全相同，只有机房不同。NRT 有三条 9 Mbps 的成绩、
+// FRA 有三条 1 Mbps 的成绩、AMS 没有任何成绩。正确次序是
+// NRT（已知好）→ AMS（未知）→ FRA（已知差）。
+// 这条钉的是「没有先验 ≠ 先验为零」：拿 0 去比会把 AMS 判到 FRA 后面。
+func TestCFdataColoPriorOrdersUnknownBetweenGoodAndBad(t *testing.T) {
+	t.Setenv("PROXY_VLESS_MIN_DOWNLOAD_MBPS", "3")
+	dir := t.TempDir()
+	body := `IP地址,最小延迟(ms),最大延迟(ms),平均延迟(ms),丢包率(%)
+1.1.1.1,100,100,100,0
+2.2.2.2,100,100,100,0
+3.3.3.3,100,100,100,0
+`
+	if err := os.WriteFile(filepath.Join(dir, cfdataResultFile), []byte(body), 0644); err != nil {
+		t.Fatalf("write result.csv: %v", err)
+	}
+	ipCSV := `IP地址,数据中心,地区,城市,网络延迟
+1.1.1.1,NRT,JP,Tokyo,100
+2.2.2.2,FRA,DE,Frankfurt,100
+3.3.3.3,AMS,NL,Amsterdam,100
+9.9.9.1,NRT,JP,Tokyo,100
+9.9.9.2,NRT,JP,Tokyo,100
+9.9.9.3,NRT,JP,Tokyo,100
+8.8.8.1,FRA,DE,Frankfurt,100
+8.8.8.2,FRA,DE,Frankfurt,100
+8.8.8.3,FRA,DE,Frankfurt,100
+`
+	if err := os.WriteFile(filepath.Join(dir, "ip.csv"), []byte(ipCSV), 0644); err != nil {
+		t.Fatalf("write ip.csv: %v", err)
+	}
+	a := &app{dataDir: dir}
+	a.loadSourceLedger()
+	// 9.9.9.x 是 NRT 的三条好线，8.8.8.x 是 FRA 的三条差线。
+	for i, ip := range []string{"9.9.9.1", "9.9.9.2", "9.9.9.3"} {
+		a.ledgerObserveProbe(ip, true, float64(8+i))
+	}
+	for i, ip := range []string{"8.8.8.1", "8.8.8.2", "8.8.8.3"} {
+		a.ledgerObserveProbe(ip, true, 1+float64(i)*0.1)
+	}
+
+	got, err := a.cfdataCandidateIPs(3)
+	if err != nil {
+		t.Fatalf("cfdataCandidateIPs: %v", err)
+	}
+	want := []string{"1.1.1.1", "3.3.3.3", "2.2.2.2"}
+	for i := range want {
+		if i >= len(got) || got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
