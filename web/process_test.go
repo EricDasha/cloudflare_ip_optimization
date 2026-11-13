@@ -157,6 +157,7 @@ func readFile(t *testing.T, path string) string {
 // cmd.Start()，失败后留下 cmd!=nil + exitCode==nil，status() 误报
 // Running（旧 PID），之后每次 start() 都被「已在运行」挡回。
 func TestManagedProcessFailedStartDoesNotPoisonState(t *testing.T) {
+	requirePOSIXShell(t)
 	dir := t.TempDir()
 	p := newManagedProcess("proc", "/bin/true")
 	if err := p.start(dir, nil, ""); err != nil {

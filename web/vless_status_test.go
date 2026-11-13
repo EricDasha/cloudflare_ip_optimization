@@ -13,6 +13,7 @@ import (
 // 且读超时会先于状态码返回、把报错原因写错。假 sing-box 回 403，
 // 响应头后拖 10 秒才写 body——探针应立即因状态码失败，不等 body。
 func TestProbeVLESSCandidateMetricsFailsFastOnBadStatus(t *testing.T) {
+	requirePOSIXShell(t)
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-sing-box.py")
 	py := `#!/usr/bin/env python3

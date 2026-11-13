@@ -95,6 +95,7 @@ func TestApplyPoolLockedRestartsWhenProcessDown(t *testing.T) {
 // 成功换池必须清掉粘滞的 pool.Error：调用方传 pool:=current，旧报错
 // 会一路带进落盘，GUI 在换池成功后仍挂着上一轮的拦截原因。
 func TestApplyPoolLockedClearsStalePoolError(t *testing.T) {
+	requirePOSIXShell(t)
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-cfnat.sh")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 30\n"), 0755); err != nil {
@@ -132,6 +133,7 @@ func TestApplyPoolLockedClearsStalePoolError(t *testing.T) {
 // Num 7 启动，换池落盘失败触发回滚后，最后一次启动必须是这份参数，
 // 而不是默认配置重算（0.0.0.0:1234/Num 3）+ 旧池原样 IP。
 func TestApplyPoolLockedRollbackRestoresRunningArgs(t *testing.T) {
+	requirePOSIXShell(t)
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "starts.log")
 	script := filepath.Join(dir, "fake-cfnat.sh")
@@ -249,6 +251,7 @@ func TestRefillGapCountsForwardingOnly(t *testing.T) {
 
 // 换池成功后被动健康账只留当前转发成员：离池 IP 的旧记录被裁掉。
 func TestApplyPoolLockedPrunesStaleActiveHealth(t *testing.T) {
+	requirePOSIXShell(t)
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-cfnat.sh")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 30\n"), 0755); err != nil {

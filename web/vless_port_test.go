@@ -13,6 +13,7 @@ import (
 // 假 sing-box 每次启动都报 bind address already in use，
 // 探针应重试 3 次（计数文件 3 行）再返回该错误。
 func TestProbeVLESSCandidateMetricsRetriesOnBindConflict(t *testing.T) {
+	requirePOSIXShell(t)
 	dir := t.TempDir()
 	counter := filepath.Join(dir, "attempts.log")
 	script := filepath.Join(dir, "fake-sing-box.sh")

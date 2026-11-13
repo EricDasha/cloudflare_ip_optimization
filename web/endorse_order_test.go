@@ -12,6 +12,7 @@ import (
 
 // 扶持即置顶：新扶持的成员必须排在已有置顶成员之前。
 func TestHandleActiveEndorsePinsToFront(t *testing.T) {
+	requirePOSIXShell(t)
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-cfnat.sh")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 30\n"), 0755); err != nil {
