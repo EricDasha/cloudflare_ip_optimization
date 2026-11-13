@@ -632,6 +632,26 @@ func (a *app) updateSourceLedger(action string, rules *staleRule, ip string) (ma
 	return map[string]any{"ok": true, "action": action, "ip": key}, nil
 }
 
+// ledgerThroughputSnapshot 返回 IP → 历史最好吞吐(Mbps) 的只读快照。
+//
+// 只收 BestMbps>0 的记录：没测过和测出来是 0 是两件事，混在一起会让调用方
+// 无法区分「未知」与「已知为零」。调用方按「不在表里 = 没测过」处理。
+func (a *app) ledgerThroughputSnapshot() map[string]float64 {
+	a.ledgerMu.Lock()
+	defer a.ledgerMu.Unlock()
+	if len(a.ledger.IPs) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(a.ledger.IPs))
+	for ip, entry := range a.ledger.IPs {
+		if entry == nil || entry.BestMbps <= 0 {
+			continue
+		}
+		out[ip] = entry.BestMbps
+	}
+	return out
+}
+
 // handleSourceLedger 是台账的读写口。
 //
 // GET  ?filter=all|excluded|never-passed&limit=N  读账

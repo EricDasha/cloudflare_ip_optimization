@@ -472,15 +472,26 @@ func (c cfnatConfig) args() []string {
 	}
 }
 
+// defaultCFdataConfig 把 cfdata 的扫描参数全部 env 化。
+//
+// 原先是写死的 100/50/443/500。参考 bestcf 收录的扫描器（CloudflareST 的
+// -tl/-tll/-tlr/-dn/-dt、cf-knife 的并发档位）之后，这些量在换线路、换运营商、
+// 换时段时都需要调，写死等于每次调参都要重新构建镜像。
+//
+//	CFDATA_SCAN_CONCURRENCY  扫描阶段并发（默认 100）
+//	CFDATA_TEST_CONCURRENCY  详细测试阶段并发（默认 50）
+//	CFDATA_PORT              详细测试端口（默认 443；bestcf 上不少表另有 8443 版）
+//	CFDATA_DELAY_MS          延迟阈值（默认 500）
+//	CFDATA_DC                只保留指定数据中心，逗号分隔；留空为全部
 func defaultCFdataConfig() cfdataConfig {
 	return cfdataConfig{
 		ForceUpdate: false,
 		IPType:      4,
-		DataCenter:  "",
-		Scan:        100,
-		Test:        50,
-		Port:        443,
-		Delay:       500,
+		DataCenter:  env("CFDATA_DC", ""),
+		Scan:        envInt("CFDATA_SCAN_CONCURRENCY", 100),
+		Test:        envInt("CFDATA_TEST_CONCURRENCY", 50),
+		Port:        envInt("CFDATA_PORT", 443),
+		Delay:       envInt("CFDATA_DELAY_MS", 500),
 	}
 }
 

@@ -89,3 +89,97 @@ func TestParseFloatPrefix(t *testing.T) {
 		}
 	}
 }
+
+// --- 真实吞吐重排（对标 CloudflareST 的「延迟初筛 → 下载测速 → 按速度排序」）---
+
+func TestCFdataSpeedTierOrdering(t *testing.T) {
+	const min, maxLoss = 3.0, 20.0
+	cases := []struct {
+		name string
+		mbps float64
+		loss float64
+		want int
+	}{
+		{"measured fast", 9.5, 0, 0},
+		{"measured at threshold", 3.0, 0, 0},
+		{"unmeasured", 0, 0, 1},
+		{"measured slow", 1.2, 0, 2},
+		{"unmeasured but lossy", 0, 30, 3},
+		{"measured fast but lossy", 9.5, 40, 3},
+	}
+	for _, c := range cases {
+		if got := cfdataSpeedTier(c.mbps, min, c.loss, maxLoss); got != c.want {
+			t.Errorf("%s: tier = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// 这条钉的是 2026-11-13 实测暴露的问题：cfdata 按延迟排出来的第一名，
+// 真跑数据面只有 0.5 Mbps；而延迟最差的那个反而是 9.5 Mbps。
+// 台账里有成绩之后，排序必须跟着成绩走，不能再跟着延迟走。
+func TestCFdataCandidateIPsPrefersMeasuredThroughput(t *testing.T) {
+	t.Setenv("PROXY_VLESS_MIN_DOWNLOAD_MBPS", "3")
+	a := writeCFdataResult(t, cfdataSampleResult)
+	a.loadSourceLedger()
+	// 172.64.229.135 延迟 72ms（全表最差），但真跑出 9.5 Mbps。
+	a.ledgerObserveProbe("172.64.229.135", true, 9.5)
+
+	got, err := a.cfdataCandidateIPs(2)
+	if err != nil {
+		t.Fatalf("cfdataCandidateIPs: %v", err)
+	}
+	if len(got) != 2 || got[0] != "172.64.229.135" {
+		t.Fatalf("measured-fast IP should rank first, got %v", got)
+	}
+}
+
+func TestCFdataCandidateIPsBuriesMeasuredSlow(t *testing.T) {
+	t.Setenv("PROXY_VLESS_MIN_DOWNLOAD_MBPS", "3")
+	a := writeCFdataResult(t, cfdataSampleResult)
+	a.loadSourceLedger()
+	// 47.245.131.215 延迟 15ms（全表最快），但真跑只有 0.5 Mbps。
+	a.ledgerObserveProbe("47.245.131.215", true, 0.5)
+
+	got, err := a.cfdataCandidateIPs(10)
+	if err != nil {
+		t.Fatalf("cfdataCandidateIPs: %v", err)
+	}
+	if len(got) == 0 || got[0] == "47.245.131.215" {
+		t.Fatalf("measured-slow IP must not lead the list: %v", got)
+	}
+	if got[len(got)-1] != "47.245.131.215" {
+		t.Fatalf("measured-slow IP should sink to the bottom, got %v", got)
+	}
+}
+
+// 没有成绩时必须原样退回延迟排序——这是升级前的行为，不能被新逻辑改掉。
+func TestCFdataCandidateIPsFallsBackToLatencyWithoutMeasurements(t *testing.T) {
+	t.Setenv("PROXY_VLESS_MIN_DOWNLOAD_MBPS", "3")
+	a := writeCFdataResult(t, cfdataSampleResult)
+	a.loadSourceLedger()
+	got, err := a.cfdataCandidateIPs(2)
+	if err != nil {
+		t.Fatalf("cfdataCandidateIPs: %v", err)
+	}
+	if got[0] != "47.245.131.215" || got[1] != "104.16.0.9" {
+		t.Fatalf("got %v, want latency order [47.245.131.215 104.16.0.9]", got)
+	}
+}
+
+func TestCFdataColoThroughputRequiresThreeSamples(t *testing.T) {
+	coloByIP := map[string]string{
+		"1.1.1.1": "NRT", "1.1.1.2": "NRT", "1.1.1.3": "NRT",
+		"2.2.2.1": "SIN", "2.2.2.2": "SIN",
+	}
+	mbps := map[string]float64{
+		"1.1.1.1": 8, "1.1.1.2": 10, "1.1.1.3": 12,
+		"2.2.2.1": 1, "2.2.2.2": 1.5,
+	}
+	got := cfdataColoThroughput(coloByIP, mbps)
+	if got["NRT"] != 10 {
+		t.Fatalf("NRT median = %v, want 10", got["NRT"])
+	}
+	if _, ok := got["SIN"]; ok {
+		t.Fatal("a colo with fewer than 3 samples must not get a prior")
+	}
+}
