@@ -63,15 +63,13 @@ func rankVLESSPassesBySpeedWithProbe(
 	speedCfg.Timeout = time.Duration(speedTimeout) * time.Second
 	times := make(map[string]int64, len(passed))
 	speeds := make(map[string]float64, len(passed))
-	minMbps := envFloat("PROXY_VLESS_MIN_DOWNLOAD_MBPS", 3)
-	if minMbps < 0 || minMbps > 10000 {
-		minMbps = 3
-	}
+	minMbps := vlessMinDownloadMbps()
 	// 测速只对前 maxSpeedProbes 个候选执行：终审池上限本来就只有个位数，
-	// 没必要为排序把每个候选都跑一遍 2MB 下载。
+	// 没必要为排序把每个候选都跑一遍 2MB 下载。上限默认与池宽对齐，
+	// 否则池里总有几个成员零吞吐证据，排序只能退回握手延迟。
 	maxSpeedProbes := len(passed)
-	if maxSpeedProbes > maxVLESSSpeedProbes {
-		maxSpeedProbes = maxVLESSSpeedProbes
+	if limit := maxVLESSSpeedProbes(); maxSpeedProbes > limit {
+		maxSpeedProbes = limit
 	}
 	verified := make([]string, 0, len(passed))
 	for idx, ip := range passed {
@@ -90,7 +88,11 @@ func rankVLESSPassesBySpeedWithProbe(
 			// 软门槛：测速只用于排序与展示，不再一票否决。
 			// 数据面（204）已通过的 IP 一律保留——否则国内网络很难稳定跑到
 			// 20Mbps 门槛，终审会恒为 0 通过，池子永远换不出去。
-			if err == nil && metrics.Mbps >= minMbps {
+			//
+			// 但成绩必须记账：低于参考值的也要写入 speeds。旧实现把「实测
+			// 0.58 Mbps」和「从未测过」一起记成零分，慢 IP 随后靠低延迟
+			// 排到最前——2026-11 掉速事故的成因。
+			if err == nil {
 				times[ip] = metrics.Duration.Milliseconds()
 				speeds[ip] = metrics.Mbps
 			}
@@ -109,13 +111,19 @@ func rankVLESSPassesBySpeedWithProbe(
 		verified = append(verified, ip)
 	}
 	passed = verified
+	logSpeedProbeSummary(speeds, maxSpeedProbes, minMbps)
 	sort.SliceStable(passed, func(i, j int) bool {
-		leftRank := proxyResultSourceRank(results, passed[i])
-		rightRank := proxyResultSourceRank(results, passed[j])
+		leftBucket := speedBucket(speeds, passed[i], minMbps)
+		rightBucket := speedBucket(speeds, passed[j], minMbps)
+		if leftBucket != rightBucket {
+			return leftBucket < rightBucket
+		}
 		leftSpeed, rightSpeed := speeds[passed[i]], speeds[passed[j]]
 		if leftSpeed != rightSpeed {
 			return leftSpeed > rightSpeed
 		}
+		leftRank := proxyResultSourceRank(results, passed[i])
+		rightRank := proxyResultSourceRank(results, passed[j])
 		if leftRank != rightRank {
 			return leftRank < rightRank
 		}
@@ -127,6 +135,94 @@ func rankVLESSPassesBySpeedWithProbe(
 		return proxyResultLatency(results, passed[i]) < proxyResultLatency(results, passed[j])
 	})
 	return passed
+}
+
+// vlessMinDownloadMbps 是「及格线」：低于它的 IP 排到未测成员之后，
+// 并被 dropBelowReferenceIPs 挡在池外。它不再是一票否决的录取门槛，
+// 只是排序与占座的分界线。
+func vlessMinDownloadMbps() float64 {
+	mbps := envFloat("PROXY_VLESS_MIN_DOWNLOAD_MBPS", 3)
+	if mbps < 0 || mbps > 10000 {
+		mbps = 3
+	}
+	return mbps
+}
+
+// speedBucket 把测速结果分成三档，供排序使用：
+//
+//	0 = 实测及格（>= minMbps），1 = 未测（未知），2 = 实测不及格。
+//
+// 三档必须分开。旧实现只把及格成绩写进 speeds，于是「实测 0.58 Mbps」与
+// 「从未测过」同为零分，慢 IP 反而靠握手延迟排到最前。未知不等于差，
+// 但已知的差必须垫底。
+func speedBucket(speeds map[string]float64, ip string, minMbps float64) int {
+	v, ok := speeds[ip]
+	if !ok {
+		return 1
+	}
+	if v >= minMbps {
+		return 0
+	}
+	return 2
+}
+
+// logSpeedProbeSummary 每轮打一行测速汇总。
+// 生产日志此前没有任何速度数字，排查「为什么慢 IP 会进池」只能靠翻状态文件。
+func logSpeedProbeSummary(speeds map[string]float64, probed int, minMbps float64) {
+	if probed == 0 {
+		return
+	}
+	if len(speeds) == 0 {
+		log.Printf("vless speed probes: 0/%d measured (all failed)", probed)
+		return
+	}
+	vals := make([]float64, 0, len(speeds))
+	below := 0
+	for _, v := range speeds {
+		vals = append(vals, v)
+		if v < minMbps {
+			below++
+		}
+	}
+	sort.Float64s(vals)
+	log.Printf("vless speed probes: %d/%d measured, %d below %.1f Mbps, median %.2f Mbps",
+		len(vals), probed, below, minMbps, vals[len(vals)/2])
+}
+
+// dropBelowReferenceIPs 把「实测吞吐低于参考值」的 IP 从入池名单里剔除。
+//
+// 只剔除有成绩且不及格的成员：未测（DownloadMbps==0 且不是测速失败）与
+// 及格的都不受影响——未知不等于差。剔除后若剩余成员少于 minKeep，则宁可
+// 保留也不让池子空掉；纯域名池能跑（现场日志有 0 IP + 29 域名 的正常记录），
+// 但保持最小池是更保守的选择。
+func dropBelowReferenceIPs(passed []string, results []proxyScanResult, minKeep int, minMbps float64) []string {
+	if len(passed) == 0 || minMbps <= 0 {
+		return passed
+	}
+	mbps := make(map[string]float64, len(results))
+	for _, r := range results {
+		mbps[r.IP] = r.DownloadMbps
+	}
+	keep := make([]string, 0, len(passed))
+	dropped := make([]string, 0)
+	for _, ip := range passed {
+		if v := mbps[ip]; v > 0 && v < minMbps {
+			dropped = append(dropped, ip)
+			continue
+		}
+		keep = append(keep, ip)
+	}
+	if len(dropped) == 0 {
+		return passed
+	}
+	if len(keep) < minKeep {
+		log.Printf("proxy auto apply: kept %d below-reference IPs (would leave %d < min pool %d): %v",
+			len(dropped), len(keep), minKeep, dropped)
+		return passed
+	}
+	log.Printf("proxy auto apply: dropped %d below-reference IPs (< %.1f Mbps): %v",
+		len(dropped), minMbps, dropped)
+	return keep
 }
 
 func proxyResultLatency(results []proxyScanResult, ip string) int64 {
@@ -422,6 +518,9 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 		// 片区降权：整片高失败率的段排到末尾（不淘汰，候选不够照样用）。
 		passed = orderPassedBySegmentHealth(passed, results)
 		passed = spreadBySegment(passed, cfg.PoolSize)
+		// 劣质 IP 不占座：实测吞吐低于参考值的成员从入池名单剔除。
+		// 未测成员不受影响（未知不等于差）；剔除会跌破最小池时保留。
+		passed = dropBelowReferenceIPs(passed, results, cfg.MinPool, vlessMinDownloadMbps())
 	} else {
 		for _, result := range results {
 			if result.Error == "" {

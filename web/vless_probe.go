@@ -111,13 +111,16 @@ func ewmaMbpsFromSlices(slices []int64, sliceDur time.Duration) float64 {
 
 // vlessSpeedTestURL 决定 VLESS 数据面测速的下载端点。
 //
-// 默认 speed.cloudflare.com：从生产容器直连时可达（实测约 5.5 Mbps），
-// 但经 sing-box 隧道（VLESS→WS→TLS→目标）常在 20s 预算内跑不完而超时。
-// 故支持 PROXY_VLESS_SPEED_URL 覆盖；其中 {bytes} 会被替换为实际请求字节数。
+// 默认走 disabledBenchSpeedURLDefault（OVH 定长文件），不能再用
+// speed.cloudflare.com：这条 Worker+ProxyIP 隧道对 Cloudflare 目标会零字节
+// 挂死（2026-11-10 实测 256KB/30s 超时）。2026-11-13 核查生产数据，
+// 1500 条 IP 质量记录里没有任何一条拿到过 Mbps——自动排序因此一直是盲选，
+// 池子实际按握手延迟决定成员。域名侧早已改用同一端点，两侧同口径后成绩才可比。
+// 仍支持 PROXY_VLESS_SPEED_URL 覆盖；其中 {bytes} 会被替换为实际请求字节数。
 func vlessSpeedTestURL(size int) string {
 	candidate := strings.TrimSpace(env("PROXY_VLESS_SPEED_URL", ""))
 	if candidate == "" {
-		candidate = "https://" + defaultVLESSSpeedHost + "/__down?bytes={bytes}"
+		candidate = disabledBenchSpeedURLDefault
 	}
 	if !strings.Contains(candidate, "{bytes}") {
 		return candidate

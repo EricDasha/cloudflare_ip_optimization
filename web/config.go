@@ -28,8 +28,13 @@ const (
 	// CF 段（104.16/13、104.24/14、103.31/22、108.162.192/18），实测抽 10 个
 	// 有 8 个 TLS 握手成功。卡在 12 等于把大半可用域名挡在门外。
 	// 放宽到 30：既覆盖足够多的可通域名，又不至于让 cfnat 的 -fixed 参数过长。
-	maxForwardDomains   = 30
-	maxVLESSSpeedProbes = 6
+	maxForwardDomains = 30
+	// maxVLESSSpeedProbesDefault 每轮测速的候选数上限（可用
+	// PROXY_VLESS_SPEED_PROBES 覆盖）。
+	//
+	// 2026-11-13 修正：原值 6 小于现场的 PROXY_AUTO_POOL_SIZE=10，池里永远
+	// 有 4 个成员零吞吐证据，排序只能退回握手延迟。默认提到 10 与池宽对齐。
+	maxVLESSSpeedProbesDefault = 10
 	// minFallbackForwardDomains 质量闸的兜底下限。
 	//
 	// 2026-10-22 二次事故：上游链路故障 3 小时把 16 个优选域名全打成 unstable
@@ -318,6 +323,18 @@ func poolColoPreferenceSet() map[string]struct{} {
 		return nil
 	}
 	return prefer
+}
+
+// maxVLESSSpeedProbes 返回每轮 VLESS 测速的候选数上限。
+//
+// 语义是「测几个」，不是「录取几个」：测得再多也不淘汰，只决定谁有成绩。
+// 上限受 32 约束，避免把一轮自动换池拖成几十分钟的串行下载。
+func maxVLESSSpeedProbes() int {
+	n := envInt("PROXY_VLESS_SPEED_PROBES", maxVLESSSpeedProbesDefault)
+	if n < 1 || n > 32 {
+		n = maxVLESSSpeedProbesDefault
+	}
+	return n
 }
 
 func env(key, def string) string {

@@ -7,12 +7,12 @@ import (
 	"time"
 )
 
-// A4：VLESS 测速端点必须可覆盖——speed.cloudflare.com 经 sing-box 隧道时
-// 常在 20s 预算内跑不完，硬编码会让「测」按钮的测速半边恒为失败。
-func TestVLESSSpeedTestURLDefaultUsesCloudflare(t *testing.T) {
+// A4：VLESS 测速端点必须可覆盖。默认值不能再是 speed.cloudflare.com——
+// 该端点经 Worker+ProxyIP 隧道零字节挂死，自动排序因此从未拿到吞吐成绩。
+func TestVLESSSpeedTestURLDefaultUsesBenchEndpoint(t *testing.T) {
 	t.Setenv("PROXY_VLESS_SPEED_URL", "")
 	got := vlessSpeedTestURL(2097152)
-	want := "https://speed.cloudflare.com/__down?bytes=2097152"
+	want := disabledBenchSpeedURLDefault
 	if got != want {
 		t.Fatalf("vlessSpeedTestURL() = %q, want %q", got, want)
 	}
