@@ -1689,6 +1689,166 @@
     }
   }
 
+  /* ---------- 来源台账（肆） ----------
+     这本账回答的问题和上面两节都不一样：上面是「现在有什么」，这里是
+     「一直以来怎么样」。一个地址考不过一次不要紧，连续几周考不过才是结论；
+     一个源偶尔挂一次不要紧，连续几十轮内容一字不改才是结论。 */
+  let ledgerFilter = "all";
+  let ledgerData = { counts: {}, ips: [], sources: [] };
+
+  async function pullLedger() {
+    const version = beginPoll("ledger");
+    try {
+      const data = await api(`/api/cfnat/source-ledger?filter=${encodeURIComponent(ledgerFilter)}&limit=200`);
+      if (!isCurrentPoll("ledger", version)) return;
+      ledgerData = data || {};
+      renderLedger();
+    } catch (_) { /* 容错 */ }
+  }
+
+  function renderLedger() {
+    const body = $("ledgerBody");
+    if (!body) return;
+    const counts = ledgerData.counts || {};
+    const setNum = (id, v) => { const el = $(id); if (el) el.textContent = v == null ? "–" : String(v); };
+    setNum("ledgerTracked", counts.tracked ?? 0);
+    setNum("ledgerExcluded", counts.excluded ?? 0);
+    setNum("ledgerSources", counts.sources ?? 0);
+    setNum("ledgerStale", counts.stale ?? 0);
+    setNum("ledgerCount", counts.tracked ?? 0);
+    setNum("ledgerSourceCount", counts.sources ?? 0);
+
+    const ips = Array.isArray(ledgerData.ips) ? ledgerData.ips : [];
+    body.replaceChildren();
+    if (!ips.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 7;
+      td.className = "inline-status";
+      td.textContent = "台账还是空的。下一轮候选刷新后开始记账。";
+      tr.append(td);
+      body.append(tr);
+    } else {
+      const frag = document.createDocumentFragment();
+      for (const e of ips) {
+        const tr = document.createElement("tr");
+        if (e.excluded) tr.className = "off";
+        const addr = document.createElement("td");
+        addr.className = "mono";
+        addr.textContent = e.ip;
+        if (e.cfEdge) {
+          addr.append(Object.assign(document.createElement("span"), {
+            className: "chip mono", textContent: "CF", style: "margin-left:6px",
+          }));
+        }
+        tr.append(addr);
+        tr.append(Object.assign(document.createElement("td"), { className: "mono", textContent: String(e.rounds ?? 0) }));
+        tr.append(Object.assign(document.createElement("td"), { className: "mono", textContent: `${e.probeCount ?? 0} / ${e.passCount ?? 0}` }));
+        tr.append(Object.assign(document.createElement("td"), { className: "mono", textContent: e.bestMbps ? `${Number(e.bestMbps).toFixed(1)} Mbps` : "–" }));
+        tr.append(Object.assign(document.createElement("td"), { className: "wrap", textContent: (e.sources || []).join("、") || "—" }));
+
+        const stTd = document.createElement("td");
+        const chip = document.createElement("span");
+        if (e.excluded) {
+          chip.className = "state-chip fail";
+          chip.textContent = "已请出";
+          chip.title = e.excludeReason || "";
+        } else if (e.manual) {
+          chip.className = "state-chip pass";
+          chip.textContent = "人工放行";
+        } else if ((e.passCount ?? 0) > 0) {
+          chip.className = "state-chip pass";
+          chip.textContent = "考过";
+        } else {
+          chip.className = "state-chip pending";
+          chip.textContent = "观察中";
+        }
+        stTd.append(chip);
+        tr.append(stTd);
+
+        const actTd = document.createElement("td");
+        const btn = document.createElement("button");
+        btn.className = "btn mini";
+        btn.type = "button";
+        btn.textContent = e.excluded ? "放行" : "请出";
+        btn.addEventListener("click", () => ledgerAct(e.excluded ? "allow" : "exclude", e.ip));
+        actTd.append(btn);
+        tr.append(actTd);
+        frag.append(tr);
+      }
+      body.append(frag);
+    }
+
+    const srcBody = $("ledgerSourceBody");
+    if (!srcBody) return;
+    const sources = Array.isArray(ledgerData.sources) ? ledgerData.sources : [];
+    srcBody.replaceChildren();
+    if (!sources.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 6;
+      td.className = "inline-status";
+      td.textContent = "还没有来源记录。";
+      tr.append(td);
+      srcBody.append(tr);
+      return;
+    }
+    const sfrag = document.createDocumentFragment();
+    for (const s of sources) {
+      const tr = document.createElement("tr");
+      if (s.stale) tr.className = "off";
+      tr.append(Object.assign(document.createElement("td"), { className: "mono wrap", textContent: s.key }));
+      tr.append(Object.assign(document.createElement("td"), { textContent: s.channel || "—" }));
+      tr.append(Object.assign(document.createElement("td"), { className: "mono", textContent: `${s.fetches ?? 0} / ${s.successes ?? 0}` }));
+      tr.append(Object.assign(document.createElement("td"), { className: "mono", textContent: String(s.lastCount ?? 0) }));
+      tr.append(Object.assign(document.createElement("td"), { className: "mono", textContent: String(s.unchangedRounds ?? 0) }));
+      const stTd = document.createElement("td");
+      const chip = document.createElement("span");
+      if (s.lastError) {
+        chip.className = "state-chip fail";
+        chip.textContent = "抓取失败";
+        chip.title = s.lastError;
+      } else if (s.stale) {
+        chip.className = "state-chip fail";
+        chip.textContent = "疑似停更";
+      } else {
+        chip.className = "state-chip pass";
+        chip.textContent = "在更新";
+      }
+      stTd.append(chip);
+      tr.append(stTd);
+      sfrag.append(tr);
+    }
+    srcBody.append(sfrag);
+  }
+
+  async function ledgerAct(action, ip) {
+    invalidatePoll("ledger");
+    try {
+      await api("/api/cfnat/source-ledger", { method: "POST", body: JSON.stringify({ action, ip }) });
+      toast(action === "allow" ? `${ip} 已放行` : `${ip} 已请出`);
+      await pullLedger();
+    } catch (e) {
+      toast(`台账未更新：${e.message}`);
+    }
+  }
+
+  async function ledgerEvaluate(button) {
+    button.disabled = true;
+    const prev = button.textContent;
+    button.textContent = "…";
+    try {
+      const data = await api("/api/cfnat/source-ledger", { method: "POST", body: JSON.stringify({ action: "evaluate" }) });
+      toast(`判定完成，新请出 ${data.newlyExcluded ?? 0} 个地址`);
+      await pullLedger();
+    } catch (e) {
+      toast(`判定失败：${e.message}`);
+    } finally {
+      button.disabled = false;
+      button.textContent = prev;
+    }
+  }
+
   /* ---------- 日志抽屉 ---------- */
   async function pullLogs() {
     const version = beginPoll("logs");
@@ -1739,6 +1899,18 @@
   on("subHarvestBtn", "click", (e) => subTrigger("harvest", e.currentTarget));
   on("subProbeBtn", "click", (e) => subTrigger("probe", e.currentTarget));
   on("subRefreshBtn", "click", () => pullSubscriptions(true));
+  on("ledgerRefreshBtn", "click", pullLedger);
+  on("ledgerEvalBtn", "click", (e) => ledgerEvaluate(e.currentTarget));
+  on("ledgerFilter", "click", (e) => {
+    const btn = e.target.closest("button[data-filter]");
+    if (!btn) return;
+    ledgerFilter = btn.dataset.filter;
+    for (const b of $("ledgerFilter").querySelectorAll("button[data-filter]")) {
+      b.classList.toggle("on", b === btn);
+    }
+    invalidatePoll("ledger");
+    pullLedger();
+  });
   on("subFilter", "click", (e) => {
     const btn = e.target.closest("button[data-state]");
     if (!btn) return;
@@ -1772,8 +1944,8 @@
     if (SUB_PAGE) {
       // 订阅页：只拉订阅相关数据。不碰 cfnat 连接表、不外呼下游池——那些
       // 数据在这页上用不上，15 秒一次的轮询里白拉一遍纯属浪费。
-      await pullSubscriptions(true);
-      setInterval(() => pullSubscriptions(false), 15000);
+      await Promise.allSettled([pullSubscriptions(true), pullLedger()]);
+      setInterval(() => { pullSubscriptions(false); pullLedger(); }, 15000);
       return;
     }
     updateSupplyHint();

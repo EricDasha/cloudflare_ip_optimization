@@ -459,6 +459,9 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 	// 复测：单源 6s 超时、26 源并发，全部成功；故总预算放宽到 90s。
 	ctx, cancel := context.WithTimeout(parent, 90*time.Second)
 	defer cancel()
+	// 先按台账规则判一次死，再开始灌候选。放在灌入之前是刻意的：本轮新判死
+	// 的地址立刻就不占名额，不必再等六个小时到下一轮。
+	a.evaluateStale(time.Now())
 	resolved := make([]string, 0, candidatePoolTotalCap)
 	sourceByIP := make(map[string]string)
 	sourceErrors := []string{}
@@ -489,6 +492,12 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 			key := ip.To4().String()
 			if !isCloudflareIPv4(ip) {
 				offEdgeCount++
+			}
+			// 台账已判死的地址不再占名额。判据是「见过足够多轮、考过足够多次、
+			// 一次都没把流量送到过」，与「像不像 CF 官方段」无关——这条闸只拦
+			// 事实上的死重，不拦第三方反代。
+			if a.ledgerExcluded(key) {
+				continue
 			}
 			if _, ok := sourceByIP[key]; ok {
 				continue
@@ -604,6 +613,8 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 	if err := a.saveProxyCandidateCache(snapshot); err != nil {
 		log.Printf("save proxy candidate cache: %v", err)
 	}
+	// 记一轮台账：这些地址各自被哪个渠道供出。下一轮的淘汰判定靠它。
+	a.observeCandidateRound(sourceByIP)
 	log.Printf("proxy candidate cache refreshed: %d IPv4, next=%s", len(ips), snapshot.NextRefresh.Format(time.RFC3339))
 	return true, nil
 }
@@ -842,10 +853,12 @@ func (a *app) fetchBestcfForwardDomains(ctx context.Context) []string {
 		body, err := fetchHTTPSBody(ctx, rawURL)
 		if err != nil {
 			a.recordSourceHealth(rawURL, 0, err)
+			a.recordSourceContent(rawURL, "bestcf", "domain", nil, err)
 			return
 		}
 		list := extractForwardDomainList(string(body))
 		a.recordSourceHealth(rawURL, len(list), nil)
+		a.recordSourceContent(rawURL, "bestcf", "domain", list, nil)
 		collected = append(collected, list...)
 	}
 	pull(bestcfForwardDomainTopURL)
@@ -1006,6 +1019,14 @@ func (a *app) resolveProxySources(parent context.Context, sourceIDs []string, re
 	errorsFound := make([]string, 0)
 	for i, target := range targets {
 		a.recordSourceHealth(target.healthKey, len(results[i]), errs[i])
+		// 台账另记一份「内容指纹」：健康账回答「这次抓没抓到」，台账回答
+		// 「这份清单多久没变过了」。两者缺一不可——一个源可以每次都抓成功，
+		// 同时连续几个月吐同一批死地址。
+		kind := "ip"
+		if target.domain != "" {
+			kind = "dns"
+		}
+		a.recordSourceContent(target.healthKey, "bestcf", kind, results[i], errs[i])
 		if errs[i] != nil {
 			errorsFound = append(errorsFound, fmt.Sprintf("%s: %v", target.healthKey, errs[i]))
 		}

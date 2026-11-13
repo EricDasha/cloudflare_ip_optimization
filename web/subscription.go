@@ -215,13 +215,15 @@ func (a *app) harvestSubscriptions(parent context.Context) (int, error) {
 			records[f.maintainer] = record
 			sourceErrors = append(sourceErrors, f.maintainer+": "+f.err.Error())
 			a.recordSourceHealth("sub:"+f.maintainer, 0, f.err)
+			a.recordSourceContent("sub:"+f.maintainer, "subscription", "ip", nil, f.err)
 			continue
 		}
 		text := string(f.body)
 		extracted := 0
 		// 直接 IP 与域名解析共用同一 perMaintainer 上限：旧代码只在解析
 		// 分支计数，一个维护者塞几千个直连 IP 能一次灌满整个本子。
-		for _, ip := range extractPublicIPv4(text) {
+		directIPs := extractPublicIPv4(text)
+		for _, ip := range directIPs {
 			if extracted >= perMaintainer {
 				break
 			}
@@ -261,6 +263,9 @@ func (a *app) harvestSubscriptions(parent context.Context) (int, error) {
 		records[f.maintainer] = record
 		totalExtracted += extracted
 		a.recordSourceHealth("sub:"+f.maintainer, extracted, nil)
+		// 台账记「这个维护者的本子多久没换过内容」。订阅本子最典型的失效
+		// 方式不是抓不到，而是抓到的永远还是上个月那批。
+		a.recordSourceContent("sub:"+f.maintainer, "subscription", "ip", directIPs, nil)
 	}
 
 	added, refreshed := a.mergeSubscriptionHarvest(sources, via, records)
@@ -468,6 +473,9 @@ func (a *app) probeSubscriptions(parent context.Context) (int, error) {
 				a.subMu.Lock()
 				a.recordSubscriptionProbeLocked(ip, outcome)
 				a.subMu.Unlock()
+				// 台账只认数据面结果。WS 握手通过只说明门开着，不说明能把
+				// 流量送出去——第三方 VPS 冒充 CF 边缘时最容易过的就是那一关。
+				a.ledgerObserveProbe(ip, outcome.OK, outcome.Mbps)
 			}(ip)
 		}
 		wg.Wait()

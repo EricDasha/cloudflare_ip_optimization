@@ -101,6 +101,12 @@ type app struct {
 	domainQuality   map[string]*domainQuality
 	sourceHealthMu  sync.Mutex
 	sourceHealth    map[string]*sourceHealthStat
+	// ledgerMu / ledger 是「优选来源台账」：每个候选 IP 被看到过几轮、被真实
+	// 考试考过几次、通过几次，每个来源的清单内容多久没变过。淘汰规则也存在
+	// 这份数据里，页面可改、改完即生效。详见 source_ledger.go。
+	ledgerMu       sync.Mutex
+	ledger         sourceLedgerData
+	ledgerLastSave time.Time
 	throneProbeMu   sync.Mutex
 	throneProbe     map[string]*throneProbeStat
 	throneLastProbe time.Time
@@ -168,6 +174,7 @@ func main() {
 	a.loadSubscriptionSettings()
 	a.loadSubscriptionInventory()
 	a.loadDomainQuality()
+	a.loadSourceLedger()
 	a.seedPoolGuardFromActive()
 	a.quality = newQualitySchedulerRuntime(a.dataDir)
 	if pool := a.proxyActivePoolSnapshot(); len(pool.IPs) > 0 {
@@ -202,6 +209,8 @@ func main() {
 	mux.HandleFunc("/api/cfnat/proxy-probe", a.handleProxyProbe)
 	mux.HandleFunc("/api/cfnat/proxy-promote", a.handleProxyPromote)
 	mux.HandleFunc("/api/cfnat/proxy-candidates", a.handleProxyCandidates)
+	// 来源台账：谁供的货、供了多少、考没考过、多久没变过。淘汰规则也走这条。
+	mux.HandleFunc("/api/cfnat/source-ledger", a.handleSourceLedger)
 	// 在位成员实弹验证：暂停转发 → 逐个验 → 剔除不合格 → 恢复。
 	// 「当前测试」按钮打这条。
 	mux.HandleFunc("/api/cfnat/revalidate", a.handleRevalidate)
@@ -517,6 +526,9 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	for _, result := range results {
 		_, ok := passedSet[result.IP]
 		a.quality.observe(result.IP, snapshot.SourceByIP[result.IP], result.DownloadMbps, result.Latency, ok, now)
+		// 台账另记一份：这个地址到今天为止被考过几次、通过过几次。质量账
+		// 会被上限裁掉旧记录，台账不会——淘汰判定要的正是「长期」。
+		a.ledgerObserveProbe(result.IP, ok, result.DownloadMbps)
 	}
 
 	// 决策：检查是否有 Standby IP 应该晋升为 Active
