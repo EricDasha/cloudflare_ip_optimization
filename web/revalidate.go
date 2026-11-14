@@ -99,7 +99,9 @@ func (a *app) setRevalidatePhase(phase string, tested int) {
 	a.revalidateMu.Lock()
 	a.revalidate.Phase = phase
 	a.revalidate.Tested = tested
+	total := a.revalidate.Total
 	a.revalidateMu.Unlock()
+	a.setScanActivityPhase("revalidate", phase, tested, total)
 }
 
 func (a *app) endRevalidate(report revalidateReport) {
@@ -245,6 +247,7 @@ func (a *app) revalidateActivePool(parent context.Context) (report revalidateRep
 		return report, errors.New("已有优选或验证在运行，请稍后再试")
 	}
 	defer a.proxyScanMu.Unlock()
+	defer a.noteScanActivity("revalidate", "验证在位成员")()
 
 	cfg := defaultProxyAutoConfig()
 	if cfg.Port <= 0 {

@@ -492,6 +492,11 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 		return
 	}
 	defer a.proxyScanMu.Unlock()
+	kind := "background"
+	if manual {
+		kind = "optimize"
+	}
+	defer a.noteScanActivity(kind, "刷新候选")()
 	cfg := defaultProxyAutoConfig()
 	if cfg.Host == "" || cfg.Path == "" {
 		a.setProxyPoolError("PROXY_AUTO_HOST/PATH 未配置，无法优选", nil)

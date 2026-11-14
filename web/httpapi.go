@@ -586,7 +586,7 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 	// 用 TryLock 立即拒绝而非排队：踢人点下去要立刻有结果，排在几分钟的
 	// 考试后面比报错更难理解。锁序仍是 proxyScanMu → cfnatCtlMu。
 	if !a.proxyScanMu.TryLock() {
-		http.Error(w, "优选或补位正在运行，等它结束再踢", http.StatusConflict)
+		http.Error(w, scanBusyMessage(a.scanActivitySnapshot()), http.StatusConflict)
 		return
 	}
 	defer a.proxyScanMu.Unlock()
@@ -649,6 +649,99 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "kicked": member, "remaining": len(newIPs), "ips": newIPs})
 	// 自动补位：后台考试补满 PoolSize，失败静默（六小时全量维护兜底）。
 	go a.refillPoolAfterKick()
+}
+
+// handleSegmentToggle 是「段分布」那排段按钮的开关：把某一段在当前池里的
+// 全部 IP 一起关闭（或一起恢复）。
+//
+// 语义复用 pool.Disabled——成员仍在位、仍可体检，只是不参与转发。为什么不
+// 直接删出池：删出去之后 pruneDisabledMissingIPs 会顺手把这个成员从 Disabled
+// 里清掉，下一次全量刷新它若无其事地回来，用户的操作被静默撤销。留在位上
+// 关闭，标记才留得住，界面上也才显示得出「这一段是我关的」。
+//
+// 只影响当前这一轮：全量重挑会整批换 IP，新池里的段不再带这个标记。这与
+// 「在下一次刷池之前这些段的 IP 都会被禁用」的约定一致。
+func (a *app) handleSegmentToggle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	// 与踢人同一把锁、同一套理由：全量重挑/补位拿的是开考前复制的候选快照，
+	// 放行会让落池那一步把刚关掉的段又写回来。
+	if !a.proxyScanMu.TryLock() {
+		http.Error(w, scanBusyMessage(a.scanActivitySnapshot()), http.StatusConflict)
+		return
+	}
+	defer a.proxyScanMu.Unlock()
+	if !lockTimeout(&a.cfnatCtlMu, 15*time.Second) {
+		http.Error(w, "换池操作正在运行，请稍后再试", http.StatusTooManyRequests)
+		return
+	}
+	defer a.cfnatCtlMu.Unlock()
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var body struct {
+		Segment  string `json:"segment"`
+		Disabled *bool  `json:"disabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "无效的请求体", http.StatusBadRequest)
+		return
+	}
+	seg := strings.TrimSpace(body.Segment)
+	if seg == "" {
+		http.Error(w, "缺少段标识", http.StatusBadRequest)
+		return
+	}
+	// 缺省是「关闭」：按钮的主用途是关掉一个正在拖后腿的段。
+	want := true
+	if body.Disabled != nil {
+		want = *body.Disabled
+	}
+	current := a.proxyActivePoolSnapshot()
+	members := make([]string, 0, 4)
+	for _, raw := range current.IPs {
+		if segmentOf(net.ParseIP(raw)) == seg {
+			members = append(members, raw)
+		}
+	}
+	if len(members) == 0 {
+		http.Error(w, "该段当前没有在位成员", http.StatusNotFound)
+		return
+	}
+	set := make(map[string]struct{}, len(current.Disabled)+len(members))
+	for _, m := range current.Disabled {
+		set[m] = struct{}{}
+	}
+	for _, m := range members {
+		if want {
+			set[m] = struct{}{}
+		} else {
+			delete(set, m)
+		}
+	}
+	next := current
+	next.UpdatedAt = time.Now()
+	next.Disabled = sortedKeys(set)
+	if len(forwardingMembers(next)) == 0 {
+		http.Error(w, "这是最后一个还在转发的成员：先点「立即优选」补充新池", http.StatusConflict)
+		return
+	}
+	if err := a.applyPoolLocked(next, current); err != nil {
+		http.Error(w, "应用换池失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	action := "disabled"
+	if !want {
+		action = "enabled"
+	}
+	log.Printf("segment %s %s: %d IPs (%s)", seg, action, len(members), strings.Join(members, ","))
+	writeJSON(w, map[string]any{
+		"ok":               true,
+		"segment":          seg,
+		"disabled":         want,
+		"members":          members,
+		"disabledSegments": poolDisabledSegments(next),
+	})
 }
 
 func (a *app) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -823,6 +916,13 @@ func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// poolSegments 是当前池的 CF 段分布。段数 < 2 意味着抗单点能力弱，
 		// 2026-10-22 事故就是池里只有一个段，该段一挂全灭。
 		"poolSegments": poolSegmentStats(pool.IPs),
+		// disabledSegments 是「整段都被关掉」的段标识，前端据此把段按钮画成
+		// 关闭态。只列全段关闭的：还有一个成员在转发就不算关，否则界面会
+		// 谎报「整段已停」，而实际还有流量在走。
+		"disabledSegments": poolDisabledSegments(pool),
+		// scanBusy 回答「按钮点了为什么没反应」：现在是谁占着扫描锁、跑到
+		// 哪一步、已经跑了多久。没有它，用户只能看到一句笼统的冲突提示。
+		"scanBusy": a.scanActivitySnapshot(),
 		// poolBlock 是最近一次「换池被拦」的结构化原因（reason/source/at/
 		// nextAllowedAt）。与 proxyAuto.error 的自由文本互补：那个带时间戳但
 		// 仍是句子，这个可以直接当判据用。blocked=false 表示当前无拦截。

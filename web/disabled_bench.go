@@ -354,6 +354,7 @@ func (a *app) probeDisabledWebSockets(parent context.Context, targets []string, 
 		return out, false
 	}
 	defer a.proxyScanMu.Unlock()
+	defer a.noteScanActivity("disabled-bench", "关闭席体检")()
 	scanCfg := cfg
 	scanCfg.Concurrency = 2
 	// 关闭成员要能测出「慢」：超时给到 3 秒，低于它的慢成员才有机会

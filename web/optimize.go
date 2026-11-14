@@ -73,6 +73,7 @@ func (a *app) setOptimizePhase(phase string) {
 	a.optimizeMu.Lock()
 	a.optimize.Phase = phase
 	a.optimizeMu.Unlock()
+	a.setScanActivityPhase("optimize", phase, 0, 0)
 }
 
 func (a *app) endOptimize(report optimizeReport) {

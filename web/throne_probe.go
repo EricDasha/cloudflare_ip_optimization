@@ -654,6 +654,7 @@ func (a *app) findThroneReplacements(victims []string, current proxyActivePool) 
 		return nil, false
 	}
 	defer a.proxyScanMu.Unlock()
+	defer a.noteScanActivity("throne", "替补考试")()
 	snapshot := a.proxyCandidateSnapshot()
 	inPool := make(map[string]bool, len(current.IPs))
 	for _, ip := range current.IPs {

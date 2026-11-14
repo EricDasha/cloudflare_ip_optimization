@@ -73,6 +73,10 @@
   let sourceChannels = [];   // /api/status.sourceChannels 四层渠道汇总
   let speedPath = null;      // /api/status.speedPath 测速通路自检
   let poolSegments = {};     // /api/status.poolSegments：当前池的 CF 段分布
+  // 整段被关掉的段标识。后端只列「全段都关」的，前端据此给段按钮上关闭态。
+  let disabledSegments = [];
+  // scanBusy 回答「按钮点了为什么没反应」：现在是谁占着扫描锁、跑到哪一步。
+  let scanBusy = {};
   let domainFallback = [];   // /api/status.domainFallback：非空＝域名闸正在降级兜底
   let poolBlock = null;      // /api/status.poolBlock：最近一次「换池被拦」的结构化原因
   let qualityByIp = {};      // /api/status.qualityScheduler.records：最近一次探测成绩
@@ -132,6 +136,8 @@
       // 下一次全量 status 轮询才出现。
       if (lanSnapshot) renderLan(lanSnapshot);
       poolSegments = st.poolSegments || {};
+      disabledSegments = Array.isArray(st.disabledSegments) ? st.disabledSegments : [];
+      scanBusy = st.scanBusy || {};
       domainFallback = Array.isArray(st.domainFallback) ? st.domainFallback : [];
       poolBlock = st.poolBlock || null;
       renderPoolHealth();
@@ -307,6 +313,45 @@
   /* ---------- 渲染：在位（壹） ---------- */
   // 段分布与降级标记：2026-10-22 事故里池子只有一个段，该段一挂全灭，
   // 而域名闸在降级兜底时没有任何界面提示——两者都必须一眼可见。
+  // 扫描锁有十几个持有者，撞锁时只说「优选或补位正在运行」等于没说。
+  // 后端把持有者与阶段登记在 /api/status.scanBusy，这里翻成一句人话。
+  function scanBusyText() {
+    if (!scanBusy || !scanBusy.busy) return "";
+    const labels = {
+      optimize: "立即优选", revalidate: "当前测试", refill: "自动补位",
+      background: "后台优化器", "disabled-bench": "关闭席体检",
+      throne: "在位验活", scan: "优选扫描", probe: "手动体检",
+    };
+    let t = (labels[scanBusy.kind] || "优选") + "正在运行";
+    if (scanBusy.phase) t += `（${scanBusy.phase}）`;
+    if (scanBusy.total) t += `，已完成 ${scanBusy.done}/${scanBusy.total}`;
+    const sec = Number(scanBusy.elapsedSec);
+    if (Number.isFinite(sec) && sec > 0) t += ` · 已跑 ${Math.floor(sec / 60)} 分 ${sec % 60} 秒`;
+    return t + "，这期间踢人与关段会被拒绝";
+  }
+
+  // toggleSegment 关掉/恢复某一段：后端把这一段在当前池里的 IP 全部标成
+  // 关闭（仍在位、仍体检，但不转发），下一次全量刷池后标记自然消失。
+  async function toggleSegment(seg, disabled, chip) {
+    if (!seg) return;
+    if (chip) chip.disabled = true;
+    try {
+      const res = await fetch("/api/cfnat/active/segment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ segment: seg, disabled }),
+      });
+      if (!res.ok) throw new Error((await res.text()).trim() || `HTTP ${res.status}`);
+      const data = await res.json();
+      disabledSegments = Array.isArray(data.disabledSegments) ? data.disabledSegments : [];
+      renderPoolHealth();
+      pullStatus();
+    } catch (err) {
+      if (chip) chip.disabled = false;
+      toast(`${disabled ? "关闭" : "恢复"} ${seg} 失败：${err.message}`);
+    }
+  }
+
   function renderPoolHealth() {
     const segs = Object.entries(poolSegments || {});
     const total = segs.reduce((s, [, n]) => s + (Number(n) || 0), 0);
@@ -318,15 +363,27 @@
         const sorted = segs.sort((a, b) => b[1] - a[1]);
         const segCount = sorted.length;
         const weak = segCount < 2;
+        const offCount = sorted.filter(([seg]) => disabledSegments.includes(seg)).length;
         const bars = sorted.map(([seg, n]) => {
           const pct = total ? Math.round((n / total) * 100) : 0;
-          return `<span class="seg-chip" title="${seg} · ${n} 个 · ${pct}%">` +
+          const off = disabledSegments.includes(seg);
+          const hint = off ? "已关闭，点击恢复" : "点击关闭这一段";
+          return `<button type="button" class="seg-chip${off ? " off" : ""}" data-seg="${seg}"` +
+            ` title="${seg} · ${n} 个 · ${pct}% · ${hint}">` +
             `<b class="mono">${seg.split("/")[0].replace(/\.0$/, "")}</b>` +
-            `<i style="width:${Math.max(pct, 4)}%"></i><em class="mono">${n}</em></span>`;
+            `<i style="width:${Math.max(pct, 4)}%"></i><em class="mono">${n}</em></button>`;
         }).join("");
+        const busy = scanBusyText();
         box.innerHTML =
-          `<span class="foot">段分布 · ${segCount} 段${weak ? ' <b class="warn">（单段，抗风险弱）</b>' : ""}</span>` +
-          `<span class="seg-chips">${bars}</span>`;
+          `<span class="foot">段分布 · ${segCount} 段${weak ? ' <b class="warn">（单段，抗风险弱）</b>' : ""}` +
+          `${offCount ? ` · <b class="warn">${offCount} 段已关闭</b>` : ""}` +
+          `<span class="seg-hint">点段即关，下次刷池后失效</span></span>` +
+          `<span class="seg-chips">${bars}</span>` +
+          (busy ? `<span class="foot warn">${busy}</span>` : "");
+        box.querySelectorAll(".seg-chip").forEach((chip) => {
+          chip.addEventListener("click", () => toggleSegment(chip.dataset.seg,
+            !disabledSegments.includes(chip.dataset.seg), chip));
+        });
       }
     }
     const flag = $("degradedFlag");

@@ -140,6 +140,10 @@ type app struct {
 	// 不允许同时跑——它们会争同一份探测预算与 cfnat 控制权。
 	optimizeMu sync.Mutex
 	optimize   optimizeState
+	// scanActMu 保护「此刻谁占着 proxyScanMu」的登记。这把锁有十几个持有者，
+	// 撞锁时只说「优选或补位正在运行」等于什么都没说，见 scan_activity.go。
+	scanActMu sync.Mutex
+	scanAct   scanActivity
 }
 
 func main() {
@@ -220,6 +224,7 @@ func main() {
 	mux.HandleFunc("/api/cfnat/connections", a.handleCFnatConnections)
 	mux.HandleFunc("/api/cfnat/upstreams", a.handleCFnatUpstreams)
 	mux.HandleFunc("/api/cfnat/active/kick", a.handleActiveKick)
+	mux.HandleFunc("/api/cfnat/active/segment", a.handleSegmentToggle)
 	mux.HandleFunc("/api/cfnat/active/endorse", a.handleActiveEndorse)
 	mux.HandleFunc("/api/cfnat/active/select", a.handleActiveSelect)
 	mux.HandleFunc("/api/cfnat/background-optimizer", a.handleBackgroundOptimizer)
@@ -435,6 +440,7 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 		return
 	}
 	defer a.proxyScanMu.Unlock()
+	defer a.noteScanActivity("background", "在位体检与替补")()
 	cfg := defaultProxyAutoConfig()
 	cfg.Concurrency = 4
 	cfg.MaxLatency = 1500

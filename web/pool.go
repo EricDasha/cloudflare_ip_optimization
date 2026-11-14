@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -284,6 +285,41 @@ func pruneDisabledMissingIPs(pool proxyActivePool) []string {
 		}
 		out = append(out, member)
 	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// poolDisabledSegments 返回「整段都被用户关掉」的段标识（升序）。
+//
+// 只列全段关闭的：段里只要还有一个成员在转发，这个段就没关。界面用这份
+// 名单给段按钮上色，判据必须和转发事实一致——否则用户会看到「整段已停」
+// 的标签，而实际还有流量在走。
+func poolDisabledSegments(pool proxyActivePool) []string {
+	if len(pool.IPs) == 0 {
+		return nil
+	}
+	disabled := disabledMemberSet(pool)
+	total := make(map[string]int, 8)
+	off := make(map[string]int, 8)
+	for _, raw := range pool.IPs {
+		seg := segmentOf(net.ParseIP(raw))
+		if seg == "" {
+			continue
+		}
+		total[seg]++
+		if disabled[raw] {
+			off[seg]++
+		}
+	}
+	out := make([]string, 0, len(total))
+	for seg, n := range total {
+		if n > 0 && off[seg] == n {
+			out = append(out, seg)
+		}
+	}
+	sort.Strings(out)
 	if len(out) == 0 {
 		return nil
 	}
@@ -990,6 +1026,7 @@ func (a *app) refillPoolAfterKick() {
 		return
 	}
 	defer a.proxyScanMu.Unlock()
+	defer a.noteScanActivity("refill", "补位考试")()
 	current := a.proxyActivePoolSnapshot()
 	// 缺口按实际转发的成员算：Disabled 成员占着 IPs 名额却不转发，
 	// 按 len(IPs) 算会得出 need=0，池永远补不满。锁位模式下补位无权
