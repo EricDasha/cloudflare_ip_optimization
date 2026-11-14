@@ -92,7 +92,7 @@ func (a *app) handleActiveEndorse(w http.ResponseWriter, r *http.Request) {
 	// 换池锁，刚扶持的成员会在漏斗落池时被旧快照整批覆盖。锁序全局规范
 	// refresh → proxyScan → cfnatCtl。
 	if !a.proxyScanMu.TryLock() {
-		http.Error(w, "优选或补位正在运行，等它结束再扶持", http.StatusConflict)
+		http.Error(w, scanBusyMessageOrDefault(a.scanActivitySnapshot(), "优选或补位正在运行，等它结束再扶持"), http.StatusConflict)
 		return
 	}
 	defer a.proxyScanMu.Unlock()

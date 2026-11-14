@@ -59,6 +59,19 @@ func (a *app) scanActivitySnapshot() map[string]any {
 	act := a.scanAct
 	a.scanActMu.Unlock()
 	if act.Kind == "" {
+		// 立即优选在抢到 proxyScanMu 之前要先刷新候选（最长 3 分钟），
+		// 那段时间没有登记 scanAct，但用户眼里确实在忙。用优化器自身的
+		// 运行状态兜底，避免 scanBusy 在这段关键窗口里谎报空闲。
+		status := a.optimizeStatus()
+		if running, _ := status["running"].(bool); running {
+			phase, _ := status["phase"].(string)
+			out := map[string]any{"busy": true, "kind": "optimize", "phase": phase}
+			if started, ok := status["startedAt"].(time.Time); ok {
+				out["startedAt"] = started
+				out["elapsedSec"] = int(time.Since(started).Seconds())
+			}
+			return out
+		}
 		return map[string]any{"busy": false}
 	}
 	return map[string]any{
@@ -102,4 +115,13 @@ func scanBusyMessage(snapshot map[string]any) string {
 		}
 	}
 	return msg + "，等它结束再操作"
+}
+
+// scanBusyMessageOrDefault 在拿不到具体操作时退回调用方原来的提示，
+// 避免把空字符串写进 HTTP 错误体。
+func scanBusyMessageOrDefault(snapshot map[string]any, fallback string) string {
+	if msg := scanBusyMessage(snapshot); msg != "" {
+		return msg
+	}
+	return fallback
 }

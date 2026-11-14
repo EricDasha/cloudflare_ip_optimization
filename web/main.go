@@ -104,9 +104,9 @@ type app struct {
 	// ledgerMu / ledger 是「优选来源台账」：每个候选 IP 被看到过几轮、被真实
 	// 考试考过几次、通过几次，每个来源的清单内容多久没变过。淘汰规则也存在
 	// 这份数据里，页面可改、改完即生效。详见 source_ledger.go。
-	ledgerMu       sync.Mutex
-	ledger         sourceLedgerData
-	ledgerLastSave time.Time
+	ledgerMu        sync.Mutex
+	ledger          sourceLedgerData
+	ledgerLastSave  time.Time
 	throneProbeMu   sync.Mutex
 	throneProbe     map[string]*throneProbeStat
 	throneLastProbe time.Time
@@ -355,6 +355,12 @@ func (a *app) refreshCandidatesAfterCFdata() {
 		<-ticker.C
 		if a.cfdata.status().Running {
 			continue
+		}
+		if st := a.cfdata.status(); st.LastError != "" {
+			// 扫描失败（如上游 CIDR/locations 拉取失败）时 cfdata 以非零码退出，
+			// 此时 ip.csv 仍是旧数据；继续重算会把陈旧供给当成新一轮成功。
+			log.Printf("post-cfdata candidate refresh skipped: cfdata exited with error: %s", st.LastError)
+			return
 		}
 		refreshCtx, cancelRefresh := context.WithTimeout(context.Background(), 60*time.Second)
 		ok, err := a.refreshProxyCandidates(refreshCtx)
@@ -609,14 +615,26 @@ func (a *app) refreshAndApplyProxyPool(ctx context.Context) {
 
 func (a *app) cfnatStartupConfig() cfnatConfig {
 	cfg := defaultCFnatConfig()
-	a.activeMu.RLock()
-	defer a.activeMu.RUnlock()
-	// 与 applyPoolLocked 一致：登基 IP + 优选域名同为 -fixed 成员（域名拨号时活解析）。
-	fixed := append([]string(nil), a.activePool.IPs...)
-	fixed = append(fixed, a.activePool.Domains...)
-	if len(fixed) > 0 {
-		cfg.Fixed = strings.Join(fixed, ",")
+	cfg.Fallback = strings.TrimSpace(env("CFNAT_FALLBACK", ""))
+	// 先拿快照再算：gatePoolDomains 要读域名质量账，不能在 activeMu 里做，
+	// 否则形成 activeMu → domainQualityMu 的嵌套锁序。
+	pool := a.proxyActivePoolSnapshot()
+	if len(pool.IPs)+len(pool.Domains) == 0 {
+		return cfg
 	}
+	// 冷启动必须与 applyPoolLocked 同一套契约：剔除已关闭成员、过域名质量闸、
+	// 按 Priority/Lock 规划 -fixed。旧实现直接把 IPs+Domains 原样塞进去，
+	// 重启等于把用户刚关掉的成员和判死的域名重新投入转发。
+	pool.Domains = a.gatePoolDomains(pool)
+	pool.Disabled = pruneDisabledMissingIPs(pool)
+	fixed, priority, err := planFixedMembers(pool)
+	if err != nil {
+		// 历史脏盘可能全员关闭/锁位无置顶：宁可不自动启动 cfnat，也不违约转发。
+		log.Printf("cfnat startup config: active pool has no deliverable members: %v", err)
+		return cfg
+	}
+	cfg.Fixed = strings.Join(fixed, ",")
+	cfg.Priority = strings.Join(priority, ",")
 	return cfg
 }
 

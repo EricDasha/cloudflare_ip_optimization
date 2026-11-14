@@ -496,7 +496,7 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 	if manual {
 		kind = "optimize"
 	}
-	defer a.noteScanActivity(kind, "刷新候选")()
+	defer a.noteScanActivity(kind, "漏斗初筛")()
 	cfg := defaultProxyAutoConfig()
 	if cfg.Host == "" || cfg.Path == "" {
 		a.setProxyPoolError("PROXY_AUTO_HOST/PATH 未配置，无法优选", nil)
@@ -570,12 +570,14 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 		}
 		log.Printf("tier3 prescreen: %d candidates -> %d shortlist (rtt<=%dms)", len(candidates), len(shortlist), cfg.MaxLatency)
 	}
+	a.setScanActivityPhase(kind, "WS 精筛", 0, len(shortlist))
 	results := scanProxyWebSockets(parent, shortlist, cfg)
 	applyCandidateSourcePriority(results, snapshot.SourceByIP)
 	passed := make([]string, 0, cfg.PoolSize)
 	finalStage := "WS"
 	if cfg.VLESS.Enabled {
 		finalStage = "VLESS"
+		a.setScanActivityPhase(kind, "VLESS 终审", 0, len(results))
 		passed = probeVLESSPool(parent, results, cfg.Port, min(cfg.VLESS.MaxCandidates, len(results)), cfg.VLESS, vlessTemplate)
 		passed = rankVLESSPassesBySpeed(parent, passed, results, cfg.Port, cfg.VLESS, vlessTemplate)
 		// 机房软偏好：Mbps 序排定后分区重排，截断时充裕取偏好、匮乏放行。
@@ -596,6 +598,9 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 		passed = orderPassedBySegmentHealth(passed, results)
 		passed = spreadBySegment(passed, cfg.PoolSize)
 	}
+	// 台账记终审结论：此前只有后台质量调度器和订阅库存探测记账，
+	// 全量漏斗考过的 IP 在台账里长期显示 0/0，自动淘汰规则因此失真。
+	a.observeFunnelResultsInLedger(results, cfg.VLESS.Enabled)
 	// 排序层已经按慢线分过一次，但 orderPassedByColoPreference /
 	// orderPassedBySegmentHealth / spreadBySegment 都会重排：段轮转是「每段各取
 	// 一个」，一个独占某段的慢线成员会在第一轮就被取走，插到延迟更好但段更挤的

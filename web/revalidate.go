@@ -190,6 +190,10 @@ var revalidateDeps = revalidateDependencies{
 		if a.cfnat.status().Running {
 			return nil
 		}
+		// 与 applyPoolLocked 同口径：恢复转发前同样要过域名质量闸，
+		// 否则重验会把已判死的域名重新塞回 -fixed。
+		pool.Domains = a.gatePoolDomains(pool)
+		pool.Disabled = pruneDisabledMissingIPs(pool)
 		fixed, priority, err := planFixedMembers(pool)
 		if err != nil {
 			return err
@@ -370,6 +374,21 @@ func (a *app) revalidateActivePool(parent context.Context) (report revalidateRep
 	// 「已关闭成员」的身份继续留在池定义里，下次重启又被读回来。
 	pool.Disabled = keepOnly(current.Disabled, kept)
 	pool.Priority = keepOnly(current.Priority, kept)
+
+	// 通过验证的成员可能全在 Disabled 里（或锁位下都不是固定成员）：
+	// 这种池子没有可转发成员，直接进 applyPoolLocked 只会拿到一个
+	// 「没有可转发的成员」错误。按「疑似通路异常」处理，保留原池。
+	if _, _, planErr := planFixedMembers(pool); planErr != nil {
+		report.Aborted = true
+		report.Removed = nil
+		report.Note = "剔除后没有可转发成员，已保留原池未作改动: " + planErr.Error()
+		log.Printf("revalidate: resulting pool has no forwardable member, keeping pool untouched: %v", planErr)
+		if err := restart(current); err != nil {
+			return report, fmt.Errorf("恢复转发失败: %w", err)
+		}
+		restarted = true
+		return report, nil
+	}
 
 	// applyPoolLocked 会先 stop（已是停的，空操作）再 start，
 	// 顺带把新池落盘。这里不直接调 start：落盘失败要能回滚。

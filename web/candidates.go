@@ -662,6 +662,13 @@ func filterPoolAdmissibleIPs(passed []string) ([]string, []string) {
 func (a *app) proxyCandidateSnapshot() proxyCandidateSnapshot {
 	a.candidateMu.RLock()
 	defer a.candidateMu.RUnlock()
+	return a.proxyCandidateSnapshotLocked()
+}
+
+// proxyCandidateSnapshotLocked 与 proxyCandidateSnapshot 等价，但要求调用方
+// 已持有 candidateMu（读锁或写锁）。写路径需要「深拷贝 → 原地修改副本」时
+// 用它，避免解锁后落盘与并发写共享同一底层 map。
+func (a *app) proxyCandidateSnapshotLocked() proxyCandidateSnapshot {
 	snapshot := a.candidates
 	snapshot.Sources = append([]string(nil), snapshot.Sources...)
 	snapshot.IPs = append([]string(nil), snapshot.IPs...)

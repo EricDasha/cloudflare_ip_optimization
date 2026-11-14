@@ -28,7 +28,7 @@ func (a *app) handleActiveSelect(w http.ResponseWriter, r *http.Request) {
 	// （Priority/Disabled 虽被原样复制，但 Lock 位会被丢掉）。
 	// 锁序全局规范 refresh → proxyScan → cfnatCtl。
 	if !a.proxyScanMu.TryLock() {
-		http.Error(w, "优选或补位正在运行，等它结束再操作", http.StatusConflict)
+		http.Error(w, scanBusyMessageOrDefault(a.scanActivitySnapshot(), "优选或补位正在运行，等它结束再操作"), http.StatusConflict)
 		return
 	}
 	defer a.proxyScanMu.Unlock()

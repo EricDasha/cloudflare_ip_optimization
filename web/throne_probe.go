@@ -411,7 +411,7 @@ func (a *app) reapThroneMembers(current proxyActivePool, now time.Time) {
 		}
 	}
 	// 域名没有「就地换人」这一说：域名死了就是下线进观察期，不找替身。
-	replacements, scanned := a.findThroneReplacements(ipVictims, current)
+	replacements, replacementResults, scanned := a.findThroneReplacements(ipVictims, current)
 	var deferred []string
 	if len(ipVictims) > 0 && !scanned {
 		// 「没考成」不等于「没替补」。这一轮扫描锁被别人占着（全量重挑、手动扫描
@@ -506,6 +506,9 @@ func (a *app) reapThroneMembers(current proxyActivePool, now time.Time) {
 		}
 		next.Results = keptResults
 	}
+	// 替补的握手成绩必须随成员一起进池：否则页面上新成员没有延迟/机房，
+	// 前端 isActiveMember 也会在质量调度抽样前把它当成非活跃成员。
+	next.Results = mergePoolResults(next.IPs, next.Results, replacementResults)
 
 	if len(removed) == 0 {
 		// 全员暂留：不动池子、不重启 cfnat，只把「暂留」写进账本并清掉复检标记，
@@ -520,15 +523,22 @@ func (a *app) reapThroneMembers(current proxyActivePool, now time.Time) {
 		a.markThroneHeld(held, now)
 		return
 	}
+	if err := a.applyPoolLocked(next, fresh); err != nil {
+		a.setThroneProbeError("在位验活换池失败: " + err.Error())
+		a.markThroneHeld(held, now)
+		return
+	}
+	// 隔离必须发生在换池成功之后：换池失败时成员还在原位，先写 1 小时
+	// 冷静期会让内存里的隔离态与实际转发状态脱节。
 	for _, domain := range removed {
 		if net.ParseIP(domain) == nil {
 			a.quarantineDomain(domain, now.Add(domainQuarantine))
 		}
 	}
-	if err := a.applyPoolLocked(next, fresh); err != nil {
-		a.setThroneProbeError("在位验活换池失败: " + err.Error())
-		a.markThroneHeld(held, now)
-		return
+	for _, ip := range removed {
+		if net.ParseIP(ip) != nil {
+			a.removeCandidateIP(ip)
+		}
 	}
 	a.markPoolSwitched(next.UpdatedAt)
 	// 已下线的成员不再占账本；暂留的照旧留着，下一轮还会被重新评估。
@@ -640,18 +650,18 @@ func (a *app) markThroneHeld(members []string, now time.Time) {
 //
 // 配置缺失（Host/Path 空）算 true：那是配置问题，不是资源竞争，排复检只会
 // 让系统每 2 分钟白摸一次。
-func (a *app) findThroneReplacements(victims []string, current proxyActivePool) (map[string]string, bool) {
+func (a *app) findThroneReplacements(victims []string, current proxyActivePool) (map[string]string, []proxyScanResult, bool) {
 	if len(victims) == 0 {
-		return nil, true
+		return nil, nil, true
 	}
 	cfg := defaultProxyAutoConfig()
 	if cfg.Host == "" || cfg.Path == "" {
-		return nil, true
+		return nil, nil, true
 	}
 	// 替补考试是网络活，必须在拿换池锁之前完成（锁序见函数头注释）。
 	if !lockTimeout(&a.proxyScanMu, 30*time.Second) {
 		log.Printf("throne probe: replacement scan skipped, proxy scan busy")
-		return nil, false
+		return nil, nil, false
 	}
 	defer a.proxyScanMu.Unlock()
 	defer a.noteScanActivity("throne", "替补考试")()
@@ -672,7 +682,7 @@ func (a *app) findThroneReplacements(victims []string, current proxyActivePool) 
 		pending = append(pending, ip)
 	}
 	if len(pending) == 0 {
-		return nil, true
+		return nil, nil, true
 	}
 	ceiling := poolEntryMaxLatencyMs()
 	scanCfg := cfg
@@ -694,7 +704,7 @@ func (a *app) findThroneReplacements(victims []string, current proxyActivePool) 
 	}
 	if len(fast) == 0 {
 		log.Printf("throne probe: %d candidates scanned, none under the %dms entry ceiling", len(pending), ceiling)
-		return nil, true
+		return nil, nil, true
 	}
 	fast = orderPassedByColoPreference(fast, results, poolColoPreferenceSet())
 	fast = orderPassedBySegmentHealth(fast, results)
@@ -702,7 +712,7 @@ func (a *app) findThroneReplacements(victims []string, current proxyActivePool) 
 	if len(unresolved) > 0 {
 		log.Printf("throne probe: no qualified replacement for %v (%d candidates passed the gate)", unresolved, len(fast))
 	}
-	return picked, true
+	return picked, results, true
 }
 
 // pruneThroneLedger 把验活账本收窄到当前转发成员。

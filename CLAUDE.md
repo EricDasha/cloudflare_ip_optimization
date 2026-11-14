@@ -120,7 +120,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
 | `-ipnum` 截断把域名挤掉 | 已修（`capFixedTargets` 只截 IP） |
 | 验活把慢域名成批判死 | 已修（`throneResultIsTimeout`，域名超时只记 slowStrike） |
 | **cfnat 每 10–30 分钟重启一次** | **D1 已上线，观察中**（在位粘性） |
-| 换池抖动（D2 防抖窗口 + 紧急故障切换） | 只有设计，未实施，见 `.agent/CHANGE-D-DESIGN.md` |
+| 换池抖动（D2 防抖窗口 + 紧急故障切换） | 只有设计，未实施；原设计文档已丢失，现存记录见 `.agent/PROJECT-CONTEXT.md` 的 Change D 段落 |
 | 非 CF 域名走反代 IP 必然 TLS 失败 | 结构性，不修（证书不含该 SNI） |
 
 ## 目录

@@ -149,11 +149,11 @@ type sourceLedgerStat struct {
 	Channel string `json:"channel"` // subscription / bestcf / domain
 	Kind    string `json:"kind"`    // ip / domain
 
-	Fetches   int       `json:"fetches"`
-	Successes int       `json:"successes"`
-	LastCount int       `json:"lastCount"`
+	Fetches    int       `json:"fetches"`
+	Successes  int       `json:"successes"`
+	LastCount  int       `json:"lastCount"`
 	LastSeenAt time.Time `json:"lastSeenAt,omitempty"`
-	LastError string    `json:"lastError,omitempty"`
+	LastError  string    `json:"lastError,omitempty"`
 
 	// Fingerprint 是最近一次清单内容的摘要；内容不变则 UnchangedRounds 递增。
 	Fingerprint     string    `json:"fingerprint,omitempty"`
@@ -327,6 +327,26 @@ func (a *app) ledgerObserveProbe(ip string, ok bool, mbps float64) {
 	}
 	a.ledgerMu.Unlock()
 	a.ledgerSaveThrottled()
+}
+
+// observeFunnelResultsInLedger 把一轮漏斗的真实考试结论写进来源台账。
+//
+// 只记「有结论」的结果：VLESS 启用时，被预算截断、根本没进数据面的
+// WS_PASS 不记账（未知不等于通过，也不等于失败）；WS_FAIL / VLESS_FAIL /
+// VLESS_PASS 都是确定结论。VLESS 未启用时 WS 结论就是终审结论。
+func (a *app) observeFunnelResultsInLedger(results []proxyScanResult, vlessEnabled bool) {
+	for _, result := range results {
+		switch result.Stage {
+		case "VLESS_PASS":
+			a.ledgerObserveProbe(result.IP, true, result.DownloadMbps)
+		case "VLESS_FAIL", "WS_FAIL":
+			a.ledgerObserveProbe(result.IP, false, 0)
+		default:
+			if !vlessEnabled {
+				a.ledgerObserveProbe(result.IP, result.Error == "", result.DownloadMbps)
+			}
+		}
+	}
 }
 
 // ledgerExcluded 报告某 IP 是否已被台账排除。候选刷新逐条调用，
@@ -565,12 +585,13 @@ func round1(v float64) float64 {
 // 校验不过就不落盘，不留半改状态。
 //
 // 动作：
-//   rules    改淘汰规则（整份覆盖后 clamp）
-//   exclude  人工排除某个 IP
-//   allow    人工放行某个 IP（置 Manual，自动规则不再碰）
-//   forget   从台账删掉某个 IP
-//   evaluate 立即执行一次淘汰判定
-//   clear    清空全部排除标记
+//
+//	rules    改淘汰规则（整份覆盖后 clamp）
+//	exclude  人工排除某个 IP
+//	allow    人工放行某个 IP（置 Manual，自动规则不再碰）
+//	forget   从台账删掉某个 IP
+//	evaluate 立即执行一次淘汰判定
+//	clear    清空全部排除标记
 func (a *app) updateSourceLedger(action string, rules *staleRule, ip string) (map[string]any, error) {
 	// evaluate 自己会拿 ledgerMu，必须在加锁之前分派。放在 switch 里先
 	// Unlock 再 return，会撞上函数顶部那个 defer Unlock——重复解锁直接 panic。

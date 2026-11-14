@@ -137,7 +137,15 @@ func main() {
 			}
 		}
 		fmt.Printf("你选择的是: IPv%d\n", ipType)
-		runIPScan(ipType, *scanThreads)
+		if err := runIPScan(ipType, *scanThreads); err != nil {
+			fmt.Println("更新 ip.csv 失败:", err)
+			// 自动模式必须让调用方看见失败：静默拿旧 ip.csv 重写
+			// result.csv 会让控制面误以为新一轮供给刷新成功。
+			if *autoMode {
+				os.Exit(1)
+			}
+			return
+		}
 	}
 
 	// 从 ip.csv 中读取数据中心信息，供用户选择
@@ -200,7 +208,7 @@ func clampThreads(n int, flagName string) int {
 	return n
 }
 
-func runIPScan(ipType int, scanMaxThreads int) {
+func runIPScan(ipType int, scanMaxThreads int) error {
 	// -scan 0 或负数会让 make(chan,<=0) 后第一次发送即永久阻塞。
 	scanMaxThreads = clampThreads(scanMaxThreads, "scan")
 	var filename, url string
@@ -219,18 +227,18 @@ func runIPScan(ipType int, scanMaxThreads int) {
 		content, err = getURLContent(url)
 		if err != nil {
 			fmt.Println("获取 URL 内容出错:", err)
-			return
+			return err
 		}
 		err = saveToFile(filename, content)
 		if err != nil {
 			fmt.Println("保存文件出错:", err)
-			return
+			return err
 		}
 	} else {
 		content, err = getFileContent(filename)
 		if err != nil {
 			fmt.Println("读取本地文件出错:", err)
-			return
+			return err
 		}
 	}
 
@@ -247,45 +255,45 @@ func runIPScan(ipType int, scanMaxThreads int) {
 		resp, err := httpGetClient.Get("https://www.baipiao.eu.org/cloudflare/locations")
 		if err != nil {
 			fmt.Printf("无法下载 locations.json: %v\n", err)
-			return
+			return err
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			fmt.Printf("下载 locations.json 失败，状态码: %d\n", resp.StatusCode)
-			return
+			return fmt.Errorf("下载 locations.json 失败，状态码: %d", resp.StatusCode)
 		}
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			fmt.Printf("无法读取响应体: %v\n", err)
-			return
+			return err
 		}
 		err = json.Unmarshal(body, &locations)
 		if err != nil {
 			fmt.Printf("无法解析JSON: %v\n", err)
-			return
+			return err
 		}
 		err = saveToFile("locations.json", string(body))
 		if err != nil {
 			fmt.Printf("保存 locations.json 失败: %v\n", err)
-			return
+			return err
 		}
 	} else {
 		fmt.Println("本地 locations.json 已存在，无需重新下载")
 		file, err := os.Open("locations.json")
 		if err != nil {
 			fmt.Printf("无法打开 locations.json: %v\n", err)
-			return
+			return err
 		}
 		defer file.Close()
 		body, err := io.ReadAll(file)
 		if err != nil {
 			fmt.Printf("读取 locations.json 失败: %v\n", err)
-			return
+			return err
 		}
 		err = json.Unmarshal(body, &locations)
 		if err != nil {
 			fmt.Printf("解析 locations.json 失败: %v\n", err)
-			return
+			return err
 		}
 	}
 
@@ -375,7 +383,7 @@ func runIPScan(ipType int, scanMaxThreads int) {
 
 	if len(resultChan) == 0 {
 		fmt.Println("未发现有效IP，程序退出。")
-		os.Exit(1)
+		return fmt.Errorf("未发现有效IP")
 	}
 
 	var results []ScanResult
@@ -389,7 +397,7 @@ func runIPScan(ipType int, scanMaxThreads int) {
 	file, err := os.Create("ip.csv")
 	if err != nil {
 		fmt.Printf("无法创建 ip.csv 文件: %v\n", err)
-		return
+		return err
 	}
 	defer file.Close()
 
@@ -401,9 +409,10 @@ func runIPScan(ipType int, scanMaxThreads int) {
 	writer.Flush()
 	if err := writer.Error(); err != nil {
 		fmt.Printf("写入 ip.csv 失败: %v\n", err)
-		return
+		return err
 	}
 	fmt.Println("扫描完成，ip.csv生成成功。")
+	return nil
 }
 
 func selectDataCenterFromCSV(preselectedDC string, interactive bool) (string, []string) {

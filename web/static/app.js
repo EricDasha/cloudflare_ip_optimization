@@ -335,6 +335,12 @@
   async function toggleSegment(seg, disabled, chip) {
     if (!seg) return;
     if (chip) chip.disabled = true;
+    // 段开关改变了 Disabled 集合，在位表的勾选态必须立刻同步：否则在 9 秒
+    // 轮询窗口里，用户下一次勾选/固定会用旧快照把刚关掉的整段重新打开。
+    clearTimeout(selTimer);
+    invalidatePoll("pool");
+    invalidatePoll("status");
+    invalidatePoll("upstreams");
     try {
       const res = await fetch("/api/cfnat/active/segment", {
         method: "POST",
@@ -345,7 +351,7 @@
       const data = await res.json();
       disabledSegments = Array.isArray(data.disabledSegments) ? data.disabledSegments : [];
       renderPoolHealth();
-      pullStatus();
+      await Promise.allSettled([pullPool(), pullStatus(), pullUpstreams()]);
     } catch (err) {
       if (chip) chip.disabled = false;
       toast(`${disabled ? "关闭" : "恢复"} ${seg} 失败：${err.message}`);
@@ -726,10 +732,14 @@
   function currentSelection() {
     const enabled = [];
     for (const b of document.querySelectorAll(".memchk")) if (b.checked) enabled.push(b.dataset.addr);
-    const priority = (poolSnapshot?.active?.priority || []).filter((m) => enabled.includes(m));
+    // Priority（固定身份）与 Disabled（临时停用）正交：后端 planFixedMembers
+    // 自己会跳过被关闭的固定成员。这里若按 enabled 过滤，用户临时取消勾选
+    // 或点「只开活跃」就会静默剥夺固定身份。只有 pinMember 有权改 priority。
+    const priority = [...(poolSnapshot?.active?.priority || [])];
     return { enabled, priority, lock: $("throneLock").checked };
   }
   async function commitSelection(note) {
+    clearTimeout(selTimer);
     const body = currentSelection();
     if (!body.enabled.length) {
       toast("至少要保留一个转发成员");
@@ -760,6 +770,7 @@
     await commitSelection(mode === "active" ? "已只勾活跃成员" : mode === "all" ? "已全部开启" : "已全部关闭");
   }
   async function pinMember(addr, on) {
+    clearTimeout(selTimer);
     const priority = (poolSnapshot?.active?.priority || []).filter((m) => m !== addr);
     if (on) priority.unshift(addr);
     // 「固定」的承诺是「它开始转发」。若这个成员正被关闭着，只写 Priority 是
@@ -1699,7 +1710,7 @@
     body.append(frag);
     const foot = $("subEntryFoot");
     if (foot) {
-      const total = subSummary.total ?? 0;
+      const total = subState === "all" ? (subSummary.total ?? 0) : (subSummary[subState] ?? subEntries.length);
       const shown = subEntries.length;
       foot.textContent = `显示 ${shown} / ${total} 条` +
         (total > shown ? "（只显示前 300 条，用上方筛选缩小范围）" : "");
@@ -1782,7 +1793,9 @@
       const td = document.createElement("td");
       td.colSpan = 7;
       td.className = "inline-status";
-      td.textContent = "台账还是空的。下一轮候选刷新后开始记账。";
+      td.textContent = (counts.tracked ?? 0) > 0 && ledgerFilter !== "all"
+        ? "当前筛选条件下没有匹配记录。"
+        : "台账还是空的。下一轮候选刷新后开始记账。";
       tr.append(td);
       body.append(tr);
     } else {

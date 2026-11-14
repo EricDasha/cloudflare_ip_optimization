@@ -509,7 +509,21 @@ func (a *app) handleProxyPromote(w http.ResponseWriter, r *http.Request) {
 	ip := target.To4().String()
 	current := a.proxyActivePoolSnapshot()
 	if containsString(current.IPs, ip) {
-		writeJSON(w, map[string]any{"ok": true, "promoted": ip, "already": true})
+		if !containsString(current.Disabled, ip) {
+			writeJSON(w, map[string]any{"ok": true, "promoted": ip, "already": true})
+			return
+		}
+		// 池内但被停用：顶替语义应当是「解禁」，而不是假幂等返回。
+		now := time.Now()
+		pool := current
+		pool.UpdatedAt = now
+		pool.Disabled = withoutStringValue(current.Disabled, ip)
+		if err := a.applyPoolLocked(pool, current); err != nil {
+			http.Error(w, "解禁失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		a.markPoolSwitched(now)
+		writeJSON(w, map[string]any{"ok": true, "promoted": ip, "enabled": true})
 		return
 	}
 	// 空池播种：皇位空悬时单 IP 直接登基（worstPoolMember 空池返回 ""，
@@ -546,8 +560,9 @@ func (a *app) handleProxyPromote(w http.ResponseWriter, r *http.Request) {
 		IP: ip, Latency: latency, Colo: colo, Stage: "WS_PASS",
 		Note: fmt.Sprintf("入池体检 %d/3 通过", 3-fails),
 	})
-	// 先踢在位最差者：按质量记录里延迟最差者，无记录则末位。
-	victim := a.worstPoolMember(current.IPs)
+	// 先踢在位最差者：按质量记录里延迟最差者，无记录则末位；固定成员
+	// 优先避让，否则锁位（只转固定）时可能把唯一固定成员顶掉导致换池失败。
+	victim := a.worstPoolMember(current.IPs, current.Priority...)
 	pool := current
 	pool.UpdatedAt = time.Now()
 	pool.IPs = replacePoolMember(current.IPs, victim, ip)
@@ -586,7 +601,7 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 	// 用 TryLock 立即拒绝而非排队：踢人点下去要立刻有结果，排在几分钟的
 	// 考试后面比报错更难理解。锁序仍是 proxyScanMu → cfnatCtlMu。
 	if !a.proxyScanMu.TryLock() {
-		http.Error(w, scanBusyMessage(a.scanActivitySnapshot()), http.StatusConflict)
+		http.Error(w, scanBusyMessageOrDefault(a.scanActivitySnapshot(), "优选或补位正在运行，等它结束再操作"), http.StatusConflict)
 		return
 	}
 	defer a.proxyScanMu.Unlock()
@@ -625,6 +640,19 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "最后一个在位成员不能踢：先点「立即优选」补充新池", http.StatusConflict)
 		return
 	}
+	// 踢出域名必须同步清理 Priority 与 Disabled，否则后台 reconcilePoolDomains
+	// 会把仍列在 Priority 里的域名当成「该回来」的成员重新加回池子。
+	// 同时用 planFixedMembers 预演：只剩 Disabled 成员时提前拒绝，别等
+	// applyPoolLocked 在深处报 500。
+	kicked := current
+	kicked.IPs = newIPs
+	kicked.Domains = newDomains
+	kicked.Priority = withoutStringValue(current.Priority, member)
+	kicked.Disabled = withoutStringValue(current.Disabled, member)
+	if _, _, err := planFixedMembers(kicked); err != nil {
+		http.Error(w, "踢除后没有可转发成员，请先补位："+err.Error(), http.StatusConflict)
+		return
+	}
 	keptResults := make([]proxyScanResult, 0, len(current.Results))
 	for _, result := range current.Results {
 		if result.IP != member {
@@ -636,6 +664,8 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 	pool.UpdatedAt = now
 	pool.IPs = newIPs
 	pool.Domains = newDomains
+	pool.Priority = kicked.Priority
+	pool.Disabled = kicked.Disabled
 	pool.Results = keptResults
 	if err := a.applyPoolLocked(pool, current); err != nil {
 		http.Error(w, "踢除换池失败: "+err.Error(), http.StatusInternalServerError)
@@ -647,8 +677,10 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 	a.markPoolSwitched(now)
 	log.Printf("active pool kicked %s: %d IPs + %d domains remain", member, len(newIPs), len(newDomains))
 	writeJSON(w, map[string]any{"ok": true, "kicked": member, "remaining": len(newIPs), "ips": newIPs})
-	// 自动补位：后台考试补满 PoolSize，失败静默（六小时全量维护兜底）。
-	go a.refillPoolAfterKick()
+	// 自动补位：只补 IP、且确有缺口时才开考；踢域名不该触发只考 IP 的补位。
+	if isIP && refillGap(pool, defaultProxyAutoConfig().PoolSize) > 0 {
+		go a.refillPoolAfterKick()
+	}
 }
 
 // handleSegmentToggle 是「段分布」那排段按钮的开关：把某一段在当前池里的
@@ -669,7 +701,7 @@ func (a *app) handleSegmentToggle(w http.ResponseWriter, r *http.Request) {
 	// 与踢人同一把锁、同一套理由：全量重挑/补位拿的是开考前复制的候选快照，
 	// 放行会让落池那一步把刚关掉的段又写回来。
 	if !a.proxyScanMu.TryLock() {
-		http.Error(w, scanBusyMessage(a.scanActivitySnapshot()), http.StatusConflict)
+		http.Error(w, scanBusyMessageOrDefault(a.scanActivitySnapshot(), "优选或补位正在运行，等它结束再操作"), http.StatusConflict)
 		return
 	}
 	defer a.proxyScanMu.Unlock()

@@ -298,8 +298,9 @@ func (a *app) handleCFdataPushCandidates(w http.ResponseWriter, r *http.Request)
 
 func (a *app) mergeCfdataIPsIntoCandidates(ips []string) {
 	a.candidateMu.Lock()
-	defer a.candidateMu.Unlock()
-	snapshot := a.candidates
+	// 深拷贝后只改副本：浅拷贝原地写 SourceByIP 会让锁外落盘的
+	// json.Marshal 与并发的除名/合并撞上同一底层 map。
+	snapshot := a.proxyCandidateSnapshotLocked()
 	if snapshot.SourceByIP == nil {
 		snapshot.SourceByIP = make(map[string]string)
 	}
@@ -318,6 +319,9 @@ func (a *app) mergeCfdataIPsIntoCandidates(ips []string) {
 	}
 	if len(snapshot.IPs) > 0 {
 		a.candidates = snapshot
+	}
+	a.candidateMu.Unlock()
+	if len(snapshot.IPs) > 0 {
 		_ = a.saveProxyCandidateCache(snapshot)
 	}
 }

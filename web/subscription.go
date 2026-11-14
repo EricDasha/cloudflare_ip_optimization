@@ -389,6 +389,11 @@ func (a *app) probeSubscriptions(parent context.Context) (int, error) {
 
 	now := time.Now()
 	passed := 0
+	type ledgerVerdict struct {
+		ip string
+		ok bool
+	}
+	var ledgerVerdicts []ledgerVerdict
 	a.subMu.Lock()
 	for ip, result := range survivor {
 		if vlessReady && result.Error == "" {
@@ -407,8 +412,15 @@ func (a *app) probeSubscriptions(parent context.Context) (int, error) {
 			ErrorClass: result.ErrorClass,
 		}
 		a.recordSubscriptionProbeLocked(ip, outcome)
+		// WS 阶段已经有确定结论的同样写台账：VLESS 关闭时它就是终审结论；
+		// VLESS 开启时这里只剩握手失败的死 IP——它们若从不记账，
+		// ProbeCount 永远为 0，自动淘汰规则永远淘汰不掉。
+		ledgerVerdicts = append(ledgerVerdicts, ledgerVerdict{ip: ip, ok: outcome.OK})
 	}
 	a.subMu.Unlock()
+	for _, verdict := range ledgerVerdicts {
+		a.ledgerObserveProbe(verdict.ip, verdict.ok, 0)
+	}
 
 	if vlessReady {
 		probeCfg := vlessCfg

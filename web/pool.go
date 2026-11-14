@@ -88,6 +88,8 @@ func (a *app) proxyActivePoolSnapshot() proxyActivePool {
 	pool := a.activePool
 	pool.IPs = append([]string(nil), pool.IPs...)
 	pool.Domains = append([]string(nil), pool.Domains...)
+	pool.Disabled = append([]string(nil), pool.Disabled...)
+	pool.Priority = append([]string(nil), pool.Priority...)
 	pool.Results = append([]proxyScanResult(nil), pool.Results...)
 	if pool.MemberChannels != nil {
 		channels := make(map[string]string, len(pool.MemberChannels))
@@ -901,6 +903,17 @@ func sameIPSet(a, b []string) bool {
 	return true
 }
 
+// withoutStringValue 返回去掉 want 的副本，绝不修改调用方切片。
+func withoutStringValue(values []string, want string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != want {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -964,13 +977,24 @@ func sameStringSet(a, b []string) bool {
 }
 
 // worstPoolMember 挑在位池最差成员：优先拿质量记录里平均延迟最高者，
-// 无记录者视为最差（末位保护：绝不动第一个成员）。
-func (a *app) worstPoolMember(ips []string) string {
+// 无记录者视为最差（末位保护：绝不动第一个成员）。pinned 里的固定成员
+// 优先避让；只有除首位外全是固定成员时才退回全量挑选，避免顶替失败。
+func (a *app) worstPoolMember(ips []string, pinned ...string) string {
 	if len(ips) == 0 {
 		return ""
 	}
 	if len(ips) == 1 {
 		return ips[0]
+	}
+	candidates := make([]string, 0, len(ips)-1)
+	for _, ip := range ips[1:] {
+		if len(pinned) > 0 && containsString(pinned, ip) {
+			continue
+		}
+		candidates = append(candidates, ip)
+	}
+	if len(candidates) == 0 {
+		candidates = ips[1:]
 	}
 	scores := make(map[string]float64, len(ips))
 	if a.quality != nil {
@@ -983,9 +1007,9 @@ func (a *app) worstPoolMember(ips []string) string {
 			}
 		}
 	}
-	worst := ips[len(ips)-1]
+	worst := candidates[len(candidates)-1]
 	worstLatency := scores[worst]
-	for _, ip := range ips[1:] {
+	for _, ip := range candidates {
 		if scores[ip] > worstLatency {
 			worst = ip
 			worstLatency = scores[ip]
@@ -1068,6 +1092,10 @@ func (a *app) refillPoolAfterKick() {
 	ceiling := poolEntryMaxLatencyMs()
 	if cfg.VLESS.Enabled {
 		passed = probeVLESSPool(ctx, results, cfg.Port, min(cfg.VLESS.MaxCandidates, need*3), cfg.VLESS, template)
+		// 补位与全量漏斗同口径：先按实测吞吐排序，再按段健康降权/打散，
+		// 最后剔除吞吐低于参考值的成员。旧实现只判 VLESS 通不通，会把
+		// 龟速 IP 和同一 /16 扎堆的候选直接塞回在位池。
+		passed = rankVLESSPassesBySpeed(ctx, passed, results, cfg.Port, cfg.VLESS, template)
 	} else {
 		for _, result := range results {
 			if result.Error == "" {
@@ -1075,6 +1103,12 @@ func (a *app) refillPoolAfterKick() {
 			}
 		}
 	}
+	passed = orderPassedBySegmentHealth(passed, results)
+	passed = spreadBySegment(passed, cfg.PoolSize)
+	if cfg.VLESS.Enabled {
+		passed = dropBelowReferenceIPs(passed, results, cfg.MinPool, vlessMinDownloadMbps())
+	}
+	a.observeFunnelResultsInLedger(results, cfg.VLESS.Enabled)
 	// 只保留延迟达标的候选；全都不达标则宁可让池子短一点也不塞废物。
 	fast := make([]string, 0, len(passed))
 	slowRejected := 0
@@ -1150,9 +1184,14 @@ func withoutPoolIP(ips []string, ip string) ([]string, bool) {
 }
 
 // removeCandidateIP 把 IP 从候选缓存除名并落盘（踢出皇位后防止立刻被回选）。
+//
+// 必须深拷贝再改：a.candidates 是结构体值，但 IPs/Sources/Errors 切片和
+// SourceByIP map 都是引用。浅拷贝后原地 delete 会改到共享底层 map，而落盘
+// 在锁外做 json.Marshal 遍历；并发的另一次除名或 cfdata 合并写入会直接触发
+// Go runtime 不可 recover 的 "concurrent map iteration and map write"。
 func (a *app) removeCandidateIP(ip string) {
 	a.candidateMu.Lock()
-	snapshot := a.candidates
+	snapshot := a.proxyCandidateSnapshotLocked()
 	filtered := make([]string, 0, len(snapshot.IPs))
 	for _, item := range snapshot.IPs {
 		if item != ip {

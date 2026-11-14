@@ -28,6 +28,50 @@ func ageEntry(t *testing.T, a *app, ip string, d time.Duration) {
 	entry.FirstSeen = entry.FirstSeen.Add(-d)
 }
 
+func TestObserveFunnelResultsInLedgerRecordsOnlyConclusiveStages(t *testing.T) {
+	a := newLedgerTestApp(t)
+	results := []proxyScanResult{
+		{IP: "1.1.1.1", Stage: "VLESS_PASS", DownloadMbps: 42},
+		{IP: "2.2.2.2", Stage: "VLESS_FAIL", Error: "timeout"},
+		{IP: "3.3.3.3", Stage: "WS_FAIL", Error: "handshake"},
+		// 预算截断、没进数据面的 WS_PASS：未知，不能记成通过。
+		{IP: "4.4.4.4", Stage: "WS_PASS"},
+	}
+	a.observeFunnelResultsInLedger(results, true)
+
+	a.ledgerMu.Lock()
+	defer a.ledgerMu.Unlock()
+	for _, ip := range []string{"1.1.1.1", "2.2.2.2", "3.3.3.3"} {
+		entry := a.ledger.IPs[ip]
+		if entry == nil || entry.ProbeCount == 0 {
+			t.Fatalf("%s should be recorded as probed", ip)
+		}
+	}
+	if entry := a.ledger.IPs["1.1.1.1"]; entry.PassCount != 1 || entry.BestMbps != 42 {
+		t.Fatalf("pass entry = %+v", entry)
+	}
+	if entry := a.ledger.IPs["4.4.4.4"]; entry != nil && entry.ProbeCount != 0 {
+		t.Fatalf("unprobed WS_PASS must stay unknown, got %+v", entry)
+	}
+}
+
+func TestObserveFunnelResultsInLedgerTreatsWSAsFinalWhenVLESSOff(t *testing.T) {
+	a := newLedgerTestApp(t)
+	a.observeFunnelResultsInLedger([]proxyScanResult{
+		{IP: "5.5.5.5", Stage: "WS_PASS"},
+		{IP: "6.6.6.6", Stage: "WS_FAIL", Error: "refused"},
+	}, false)
+
+	a.ledgerMu.Lock()
+	defer a.ledgerMu.Unlock()
+	if entry := a.ledger.IPs["5.5.5.5"]; entry == nil || entry.PassCount != 1 {
+		t.Fatalf("WS pass should be final without VLESS: %+v", entry)
+	}
+	if entry := a.ledger.IPs["6.6.6.6"]; entry == nil || entry.ProbeCount != 1 || entry.PassCount != 0 {
+		t.Fatalf("WS fail should be final without VLESS: %+v", entry)
+	}
+}
+
 func TestSourceLedgerEvictsNeverPassedThirdParty(t *testing.T) {
 	a := newLedgerTestApp(t)
 	a.ledgerMu.Lock()
