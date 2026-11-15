@@ -805,7 +805,10 @@ func candidateHTTPClient(timeout time.Duration) *http.Client {
 			DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
 				return dialer.DialContext(ctx, "tcp4", addr)
 			},
-			ForceAttemptHTTP2:     true,
+			// 候选源是静态文件 CDN，HTTP/1.1 足够；Go 的 HTTP/2 实现在
+			// raw.githubusercontent.com 上偶发 `http2: timeout awaiting
+			// response headers`，退回 HTTP/1.1 可消掉这类假超时。
+			ForceAttemptHTTP2:     false,
 			MaxIdleConns:          64,
 			MaxIdleConnsPerHost:   8,
 			IdleConnTimeout:       30 * time.Second,

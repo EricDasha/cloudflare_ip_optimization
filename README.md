@@ -292,6 +292,10 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 | `PROXY_VLESS_SPEED_BYTES` | 每个通过节点的下载测速字节数（仅前 6 个候选，软门槛） | `2097152` |
 | `PROXY_VLESS_SPEED_TIMEOUT` | 每个下载测速超时，秒 | `20` |
 | `PROXY_VLESS_MIN_DOWNLOAD_MBPS` | 下载测速软门槛，仅影响排序与展示 | `3` |
+| `PROXY_VLESS_DATA_LATENCY_CEILING_MS` | 数据面延迟天花板，超线按「低于参考值」处理；0 关闭 | `1200` |
+| `PROXY_VLESS_SPEED_INTERVAL_MS` | 串行测速间隔，毫秒；0 关闭 | `250` |
+| `PROXY_VLESS_SPEED_EARLY_ABORT` | 观察 3 秒仍低于参考值 40% 时提前放弃测速 | `true` |
+| `PROXY_TRACE_L7` | 入池前用 `/cdn-cgi/trace` 复验 https/TLS/kex/colo；探测失败放行 | `true` |
 | `SING_BOX_BIN` | sing-box 二进制路径 | `/usr/local/bin/sing-box` |
 
 ### 劣质成员怎么被换掉

@@ -142,15 +142,17 @@ services:
       PROXY_VLESS_TIMEOUT: "15"
       PROXY_VLESS_MAX_CANDIDATES: "20"
       # 测速为软门槛：只影响排序与展示，不再否决已通过 204 的候选。
-      # 注意：PROXY_VLESS_SPEED_URL 未设时默认落在 speed.cloudflare.com，
-      # 与上面域名测速踩的是同一个坑（链路到不了 CF 目标）。故 IP 侧吞吐
-      # 排序目前恒为空、形同虚设。改法是把它也指向非 CF 定长文件——这会
-      # 改变优选排序、进而影响换池，属独立决策，需明示后再动。
-      # 关闭成员体检不共享这个坑：它有自己的 PROXY_DISABLED_BENCH_SPEED_URL，
-      # 默认已指向非 CF 的 OVH 定长文件。
+      # 测速端点默认走非 CF 的 OVH 定长文件（disabledBenchSpeedURLDefault）；
+      # 仍可用 PROXY_VLESS_SPEED_URL 覆盖，{bytes} 会替换为实际字节数。
       PROXY_VLESS_SPEED_BYTES: "2097152"
       PROXY_VLESS_SPEED_TIMEOUT: "20"
       PROXY_VLESS_MIN_DOWNLOAD_MBPS: "3"
+      # 数据面延迟超线按「低于参考值」处理；串行测速间隔 250ms；
+      # 观察 3 秒仍低于参考值 40% 时提前放弃；入池前 trace L7 复验。
+      PROXY_VLESS_DATA_LATENCY_CEILING_MS: "1200"
+      PROXY_VLESS_SPEED_INTERVAL_MS: "250"
+      PROXY_VLESS_SPEED_EARLY_ABORT: "true"
+      PROXY_TRACE_L7: "true"
       SING_BOX_BIN: /usr/local/bin/sing-box
     volumes:
       - ./data:/data

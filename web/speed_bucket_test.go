@@ -185,3 +185,37 @@ func TestDropBelowReferenceIPsBackfillsFastestOnly(t *testing.T) {
 		t.Fatalf("backfill = %v, want %v", got, want)
 	}
 }
+
+// 数据面延迟超线的成员与吞吐不足同属「低于参考值」；未测（0）不判慢。
+func TestDropBelowReferenceIPsHonorsDataLatencyCeiling(t *testing.T) {
+	passed := []string{"198.51.100.1", "198.51.100.2", "198.51.100.3"}
+	results := []proxyScanResult{
+		{IP: "198.51.100.1", DownloadMbps: 15, DataLatency: 2000}, // 快但数据面 2 秒 → 剔除
+		{IP: "198.51.100.2", DataLatency: 180},                    // 未测吞吐、延迟正常 → 保留
+		{IP: "198.51.100.3"},                                      // 全未知 → 保留
+	}
+	got := dropBelowReferenceIPsWithDataCeiling(passed, results, 1, 3, 1200)
+	want := []string{"198.51.100.2", "198.51.100.3"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	// 关闭天花板后恢复旧行为：只看吞吐。
+	got = dropBelowReferenceIPsWithDataCeiling(passed, results, 1, 3, 0)
+	if !reflect.DeepEqual(got, passed) {
+		t.Fatalf("ceiling 0 must be a no-op, got %v", got)
+	}
+}
+
+// 补位时优先延迟正常的慢线，而不是「吞吐很高但每次交互都慢半拍」的入口。
+func TestDropBelowReferenceIPsBackfillPrefersLowDataLatency(t *testing.T) {
+	passed := []string{"198.51.100.1", "198.51.100.2"}
+	results := []proxyScanResult{
+		{IP: "198.51.100.1", DownloadMbps: 15, DataLatency: 1600}, // 快但延迟超线
+		{IP: "198.51.100.2", DownloadMbps: 2, DataLatency: 200},   // 慢但延迟正常
+	}
+	got := dropBelowReferenceIPsWithDataCeiling(passed, results, 1, 3, 1200)
+	want := []string{"198.51.100.2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("backfill = %v, want %v", got, want)
+	}
+}

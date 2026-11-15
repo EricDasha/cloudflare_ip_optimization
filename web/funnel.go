@@ -64,6 +64,18 @@ func rankVLESSPassesBySpeedWithProbe(
 	times := make(map[string]int64, len(passed))
 	speeds := make(map[string]float64, len(passed))
 	minMbps := vlessMinDownloadMbps()
+	// 提前放弃阈值取参考值的 40%：远低于及格线的线路，读满 2MB 只是
+	// 把时间预算耗光，结论不会变。观察期 3 秒由采样器负责。
+	if envBool("PROXY_VLESS_SPEED_EARLY_ABORT", true) && minMbps > 0 {
+		speedCfg.EarlyAbortMbps = minMbps * 0.4
+	}
+	// 串行测速之间留间隔，避免连续 2MB 下载把同一条出口压出瞬时丢包。
+	// 默认 250ms，可用 PROXY_VLESS_SPEED_INTERVAL_MS 调整（0 关闭）。
+	intervalMs := envInt("PROXY_VLESS_SPEED_INTERVAL_MS", 250)
+	if intervalMs < 0 || intervalMs > 2000 {
+		intervalMs = 250
+	}
+	speedInterval := time.Duration(intervalMs) * time.Millisecond
 	// 测速只对前 maxSpeedProbes 个候选执行：终审池上限本来就只有个位数，
 	// 没必要为排序把每个候选都跑一遍 2MB 下载。上限默认与池宽对齐，
 	// 否则池里总有几个成员零吞吐证据，排序只能退回握手延迟。
@@ -74,6 +86,13 @@ func rankVLESSPassesBySpeedWithProbe(
 	verified := make([]string, 0, len(passed))
 	for idx, ip := range passed {
 		if idx < maxSpeedProbes {
+			if idx > 0 && speedInterval > 0 {
+				select {
+				case <-parent.Done():
+					return passed
+				case <-time.After(speedInterval):
+				}
+			}
 			ctx, cancel := context.WithTimeout(parent, speedCfg.Timeout)
 			metrics, err := probe(ctx, ip, port, speedCfg, template)
 			cancel()
@@ -103,6 +122,11 @@ func rankVLESSPassesBySpeedWithProbe(
 						results[i].Note = "测速未完成（软门槛，仅影响排序）：" + err.Error()
 					} else if metrics.Mbps < minMbps {
 						results[i].Note = fmt.Sprintf("测速 %.2f Mbps 低于参考值 %.2f Mbps（软门槛，仅影响排序）", metrics.Mbps, minMbps)
+						if metrics.EarlyAbort {
+							results[i].Note += "，已提前放弃"
+						}
+					} else if metrics.EarlyAbort {
+						results[i].Note = "测速提前放弃（样本已足，仅影响排序）"
 					}
 					break
 				}
@@ -261,17 +285,44 @@ func logSpeedProbeSummary(speeds map[string]float64, probed int, minMbps float64
 // 最慢的一个上。最小池要的是「至少 minKeep 个可用落点」，不是「保留所有
 // 落点」——补足名额只需挑最快的几个慢 IP，其余仍应剔除。
 func dropBelowReferenceIPs(passed []string, results []proxyScanResult, minKeep int, minMbps float64) []string {
-	if len(passed) == 0 || minMbps <= 0 {
+	return dropBelowReferenceIPsWithDataCeiling(passed, results, minKeep, minMbps, vlessDataLatencyCeilingMs())
+}
+
+// vlessDataLatencyCeilingMs 是数据面延迟的天花板。
+//
+// 握手延迟只覆盖 TCP/TLS/WS 三段；VLESS 数据面还要经过 Worker 和 ProxyIP。
+// 2026-11-16 线上实例：116.49.234.130 握手 232ms 合格，数据面 1618ms，且
+// 因为测速没跑出成绩（DownloadMbps==0）被当成「未知」保留进池。用户感受
+// 就是「能连、但每个请求都慢半拍」。超过天花板与吞吐不达标同属「低于
+// 参考值」，可以被补位逻辑剔除；未测（DataLatency==0）仍然不判慢。
+func vlessDataLatencyCeilingMs() int64 {
+	ms := int64(envInt("PROXY_VLESS_DATA_LATENCY_CEILING_MS", 1200))
+	if ms < 0 || ms > 10000 {
+		ms = 1200
+	}
+	return ms
+}
+
+func dropBelowReferenceIPsWithDataCeiling(passed []string, results []proxyScanResult, minKeep int, minMbps float64, dataCeiling int64) []string {
+	if len(passed) == 0 || (minMbps <= 0 && dataCeiling <= 0) {
 		return passed
 	}
 	mbps := make(map[string]float64, len(results))
+	dataLatency := make(map[string]int64, len(results))
 	for _, r := range results {
 		mbps[r.IP] = r.DownloadMbps
+		dataLatency[r.IP] = r.DataLatency
+	}
+	isSlow := func(ip string) bool {
+		if v := mbps[ip]; v > 0 && minMbps > 0 && v < minMbps {
+			return true
+		}
+		return dataCeiling > 0 && dataLatency[ip] > dataCeiling
 	}
 	keep := make([]string, 0, len(passed))
 	slow := make([]string, 0)
 	for _, ip := range passed {
-		if v := mbps[ip]; v > 0 && v < minMbps {
+		if isSlow(ip) {
 			slow = append(slow, ip)
 			continue
 		}
@@ -285,9 +336,18 @@ func dropBelowReferenceIPs(passed []string, results []proxyScanResult, minKeep i
 	}
 	if len(keep) < minKeep {
 		need := minKeep - len(keep)
-		// 按实测吞吐降序挑补位成员；同速保持原顺序，避免结果抖动。
+		// 补位顺序：先吞吐不足但延迟正常的，再数据面延迟超线的。
+		// 一个 15 Mbps / 1600ms 的入口下载很快，但每次交互都要多等一秒半，
+		// 不该抢在 2 Mbps / 200ms 的成员前面占最后一个名额。
 		ranked := append([]string(nil), slow...)
-		sort.SliceStable(ranked, func(i, j int) bool { return mbps[ranked[i]] > mbps[ranked[j]] })
+		sort.SliceStable(ranked, func(i, j int) bool {
+			leftLaggy := dataCeiling > 0 && dataLatency[ranked[i]] > dataCeiling
+			rightLaggy := dataCeiling > 0 && dataLatency[ranked[j]] > dataCeiling
+			if leftLaggy != rightLaggy {
+				return !leftLaggy
+			}
+			return mbps[ranked[i]] > mbps[ranked[j]]
+		})
 		if need > len(ranked) {
 			need = len(ranked)
 		}
@@ -301,7 +361,7 @@ func dropBelowReferenceIPs(passed []string, results []proxyScanResult, minKeep i
 				out = append(out, ip)
 				continue
 			}
-			if v := mbps[ip]; v > 0 && v < minMbps {
+			if isSlow(ip) {
 				continue
 			}
 			out = append(out, ip)
@@ -310,8 +370,8 @@ func dropBelowReferenceIPs(passed []string, results []proxyScanResult, minKeep i
 			need, minKeep, len(slow)-need, ranked[need:])
 		return out
 	}
-	log.Printf("proxy auto apply: dropped %d below-reference IPs (< %.1f Mbps): %v",
-		len(slow), minMbps, slow)
+	log.Printf("proxy auto apply: dropped %d below-reference IPs (< %.1f Mbps or data latency > %dms): %v",
+		len(slow), minMbps, dataCeiling, slow)
 	return keep
 }
 
@@ -619,6 +679,10 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 	a.setScanActivityPhase(kind, "WS 精筛", 0, len(shortlist))
 	results := scanProxyWebSockets(runCtx, shortlist, cfg)
 	applyCandidateSourcePriority(results, snapshot.SourceByIP)
+	// WS 失败候选补一次 trace 诊断：只补 colo/备注，不改变 Stage 与 Error，
+	// 也不参与准入。TLS 都没通的候选与「TLS 通了但 WS 路径不对」的候选
+	// 从此能在状态页里分开看。
+	attachTraceDiagnostics(runCtx, results, cfg)
 	passed := make([]string, 0, cfg.PoolSize)
 	finalStage := "WS"
 	if cfg.VLESS.Enabled {
@@ -631,8 +695,11 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 		// 片区降权：整片高失败率的段排到末尾（不淘汰，候选不够照样用）。
 		passed = orderPassedBySegmentHealth(passed, results)
 		passed = spreadBySegment(passed, cfg.PoolSize)
-		// 劣质 IP 不占座：实测吞吐低于参考值的成员从入池名单剔除。
-		// 未测成员不受影响（未知不等于差）；剔除会跌破最小池时保留。
+		// L7 复验：trace 明确不合格的候选不占座；探测失败一律放行。
+		passed = filterTraceL7(runCtx, passed, results, cfg)
+		// 劣质 IP 不占座：实测吞吐低于参考值或数据面延迟超线的成员从入池
+		// 名单剔除。未测成员不受影响（未知不等于差）；剔除会跌破最小池时
+		// 按「延迟正常优先、吞吐次之」补足。
 		passed = dropBelowReferenceIPs(passed, results, cfg.MinPool, vlessMinDownloadMbps())
 	} else {
 		for _, result := range results {
@@ -643,6 +710,7 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 		passed = orderPassedByColoPreference(passed, results, poolColoPreferenceSet())
 		passed = orderPassedBySegmentHealth(passed, results)
 		passed = spreadBySegment(passed, cfg.PoolSize)
+		passed = filterTraceL7(runCtx, passed, results, cfg)
 	}
 	// 台账记终审结论：此前只有后台质量调度器和订阅库存探测记账，
 	// 全量漏斗考过的 IP 在台账里长期显示 0/0，自动淘汰规则因此失真。
@@ -695,6 +763,10 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 			if admitted, rejected := filterPoolAdmissibleIPs(extra); len(rejected) > 0 {
 				log.Printf("proxy pool DEGRADED: 拒绝降级 %d 个候选（未通过准入闸）: %v", len(rejected), rejected)
 				extra = admitted
+			}
+			// 降级候选同样过 L7 复验：否则被硬条件拒掉的候选会从后门回到池里。
+			if len(extra) > 0 {
+				extra = filterTraceL7(runCtx, extra, results, cfg)
 			}
 			if len(extra) > 0 {
 				passed = append(passed, extra...)

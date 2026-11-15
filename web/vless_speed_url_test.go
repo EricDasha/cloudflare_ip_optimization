@@ -91,6 +91,30 @@ func TestEWMAMbpsFromSlices(t *testing.T) {
 	}
 }
 
+type trickleReader struct{}
+
+func (trickleReader) Read(p []byte) (int, error) {
+	p[0] = 'x'
+	return 1, nil
+}
+
+// 观察期过后持续低于阈值的线路应提前收手，而不是读满整个时间预算。
+func TestSpeedSamplerEarlyAbort(t *testing.T) {
+	sampler := newSpeedSampler(trickleReader{})
+	sampler.started = time.Now().Add(-4 * time.Second)
+	sampler.earlyAbortMbps = 10
+	total, err := sampler.copyTo(io.Discard)
+	if err != nil {
+		t.Fatalf("copyTo: %v", err)
+	}
+	if !sampler.early {
+		t.Fatal("slow stream should have triggered early abort")
+	}
+	if total == 0 {
+		t.Fatal("early abort must keep the bytes already read")
+	}
+}
+
 // speedSampler 必须把 body 逐片记满：字节数一毫不差，EOF 正常收尾。
 func TestSpeedSamplerCountsEveryByte(t *testing.T) {
 	body := make([]byte, 100_000)

@@ -32,6 +32,9 @@ type vlessProbeConfig struct {
 	MaxCandidates  int
 	ReadLimit      int64
 	MinBytes       int64
+	// EarlyAbortMbps 非零时启用「提前放弃」：观察期过后持续低于该速率
+	// 的候选不必读满整个预算。只影响测速耗时，不影响判定口径。
+	EarlyAbortMbps float64
 }
 
 // defaultVLESSSpeedHost 是 VLESS 测速的默认下载主机（Cloudflare 官方测速端点）。
@@ -45,22 +48,27 @@ const vlessSpeedPartialFloor = 64 * 1024
 const speedSamplerSlice = 250 * time.Millisecond
 
 type vlessProbeMetrics struct {
-	Bytes    int64
-	Duration time.Duration
-	Mbps     float64
+	Bytes      int64
+	Duration   time.Duration
+	Mbps       float64
+	EarlyAbort bool
 }
 
 // speedSampler 分片采样读取器：边读边按固定时间片记字节账。
 // 意义：CDN 突发尖峰会被 EWMA 衰减，持续速率主导排序（CFST 同源思想）。
 type speedSampler struct {
-	r        io.Reader
-	slices   []int64
-	deadline time.Time
-	current  int64
+	r              io.Reader
+	slices         []int64
+	deadline       time.Time
+	current        int64
+	started        time.Time
+	earlyAbortMbps float64
+	early          bool
 }
 
 func newSpeedSampler(r io.Reader) *speedSampler {
-	return &speedSampler{r: r, deadline: time.Now().Add(speedSamplerSlice)}
+	now := time.Now()
+	return &speedSampler{r: r, deadline: now.Add(speedSamplerSlice), started: now}
 }
 
 func (s *speedSampler) copyTo(dst io.Writer) (int64, error) {
@@ -90,6 +98,18 @@ func (s *speedSampler) copyTo(dst io.Writer) (int64, error) {
 			s.slices = append(s.slices, s.current)
 			s.current = 0
 			s.deadline = now.Add(speedSamplerSlice)
+		}
+		// 提前放弃：观察期 3 秒，持续低于阈值 40% 的线路不必读满预算。
+		// 3 秒是为了让 TCP 慢启动走完，避免把「刚起步」误判成「一直慢」。
+		if s.earlyAbortMbps > 0 {
+			elapsed := time.Since(s.started)
+			if elapsed >= 3*time.Second {
+				mbps := float64(total*8) / elapsed.Seconds() / 1_000_000
+				if mbps < s.earlyAbortMbps {
+					s.early = true
+					return total, nil
+				}
+			}
 		}
 	}
 }
@@ -525,6 +545,7 @@ func probeVLESSCandidateMetricsOnce(ctx context.Context, candidateIP string, can
 	}
 	started := time.Now()
 	sampler := newSpeedSampler(io.LimitReader(resp.Body, cfg.ReadLimit))
+	sampler.earlyAbortMbps = cfg.EarlyAbortMbps
 	n, readErr := sampler.copyTo(io.Discard)
 	metrics.Bytes = n
 	metrics.Duration = time.Since(started)
@@ -544,6 +565,15 @@ func probeVLESSCandidateMetricsOnce(ctx context.Context, candidateIP string, can
 			return metrics, nil
 		}
 		return metrics, fmt.Errorf("读取 VLESS 测试响应失败: %w", readErr)
+	}
+	if sampler.early {
+		// 提前放弃只省时间，不改判定：实读字节不足时仍按失败处理，
+		// 够样本就返回诚实低速分，让下游照常排序与剔除。
+		if metrics.Bytes < vlessSpeedPartialFloor {
+			return metrics, fmt.Errorf("VLESS 提前放弃且样本不足: %d/%d bytes", metrics.Bytes, vlessSpeedPartialFloor)
+		}
+		metrics.EarlyAbort = true
+		return metrics, nil
 	}
 	if metrics.Bytes < cfg.MinBytes {
 		return metrics, fmt.Errorf("VLESS 下载数据不足: %d/%d bytes", metrics.Bytes, cfg.MinBytes)
