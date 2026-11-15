@@ -272,6 +272,7 @@ ssh nas "curl -s -o /dev/null -w '%{http_code}' --noproxy '*' \
 | 2026-11-16 01:15 | `rollback-20261116-011500` | `4bd1f1bf29d6` | `_backup/pre-source-quality-20261116-011500/` |
 | 2026-11-16 01:34 | `rollback-20261116-013444` | `63d3c8faa18d` | `_backup/pre-p0-20261116-013444/` |
 | 2026-11-16 01:42 | `rollback-20261116-014244` | `9c747986074c` | `_backup/pre-speedfill-20261116-014244/` |
+| 2026-11-16 02:10 | `rollback-20261116-021040` | `9c747986074c` | `_backup/pre-p1p2-20261116-021040/` |
 
 2026-11-14 部署 `0781c9c`（池状态与台账修复）：冷启动排除禁用段、`-priority` 生效，立即优选 998 候选→10 IP/31 域名，1234 数据面连续 10 次 200（约 0.24s）。
 
@@ -280,6 +281,9 @@ ssh nas "curl -s -o /dev/null -w '%{http_code}' --noproxy '*' \
 2026-11-16 部署 `9808eb0`（P0：trace/L7 与延迟天花板）：新增 `web/trace_probe.go`，对 WS 失败候选做 `/cdn-cgi/trace` 诊断，最终名单校验 `visit_scheme=https`、`tls!=off`、`kex!=none`、`colo` 非空，探测失败一律放行；`PROXY_VLESS_DATA_LATENCY_CEILING_MS=1200` 把数据面延迟超线的成员按「低于参考值」处理；测速串行间隔 250ms、低于目标 40% 且观察 3 秒后提前放弃；来源抓取关闭 HTTP/2，修 raw.githubusercontent.com 的假超时。首次优选 10 IP/31 域名，9 个有成绩的 10.7~15.6 Mbps，1234 连续 3 次 200。
 
 2026-11-16 部署 `ee38186`（终审补测）：排序阶段只测前 10 个候选，片区轮转/补位会把未测成员带进最终名单；新增 `fillMissingSpeedMetrics` 只给最终名单里没有吞吐证据的成员补测，最多两轮「补测→劣质剔除」。本次优选 9 IP/31 域名，全部有实测吞吐（3.44~15.74 Mbps），trace L7 检查 10 个终审成员（0 拒绝、0 未验证），补测 3 个、剔除 1 个 47.80.24.151；1234 连续 5 次 200（0.22~0.26s）。
+
+2026-11-16 部署 `4cb9fd0`（P1/P2 + 多端口实验）：trace L7 在原有 https/tls/kex/colo 之上增加 `ip`、`uag` 回显、`CF-RAY`、`Server` 四条硬条件；shortlist 每个候选做 3 次 WS 握手，按丢包率→20ms 延迟档→抖动→精确延迟排序；池内单机房软上限 3（`PROXY_POOL_COLO_CAP`），跌破最小池时按原顺序回填；每个探测 goroutine 加 `recover`；`proxy-active.json`/来源账本改为 temp+fsync+rename；启动时预检自定义测速端点，失败回退 OVH；cfnat 新增 `-addr2`/`-port2` 第二入口，共享同一 IPManager。本次优选 997 候选→7 IP/31 域名，colo 配额挡下 13 个候选，trace L7 检查 7 个终审成员（0 拒绝、0 未验证）；7 个 IP 吞吐 8.16~16.05 Mbps、数据面延迟 565~774ms、分布为 NRT×3/HKG×3/ICN×1；1234 连续 5 次 200（0.245~0.259s）。
+多端口实验结论：1235 已监听并转发到目标 8443，但当前池成员（腾讯云等反代 IP）只开放 443，日志明确 `connection refused`/`i/o timeout`，1235 三次测试均 000；真实 CF 边缘 IP（104.18.42.163、172.64.229.73）的 8443/2053 实测 200。结论：端口多样性不是 cfnat 的问题，是当前候选池的 IP 类型不支持备用端口；要跑通需要把域名成员排在 alt 入口前面，或换用真实 CF 边缘 IP 池，二者都涉及改 `-num`/目标顺序，暂不推进。
 
 **回滚命令**：
 
