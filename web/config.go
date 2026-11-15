@@ -227,7 +227,12 @@ func defaultSubscriptionConverter() string {
 // subscriptionMaintainers 第三方订阅维护者域名清单（逗号/空白分隔）。
 // 默认内置用户给出的 8 个维护者；环境变量可覆盖。
 func subscriptionMaintainers() []string {
-	raw := strings.TrimSpace(env("PROXY_SUBSCRIPTION_MAINTAINERS", "owo.o00o.ooo cm.soso.edu.kg zrf.zrf.me sub.keaeye.icu sub.mot.cloudns.biz sub.mia.xx.kg sub.lzjbaby.com sub.xdu.qzz.io"))
+	// 2026-11-15 按实测通过率清理默认清单：
+	//   - sub.mot.cloudns.biz 通过率 2.9%，基本是死源；
+	//   - owo.o00o.ooo 通过率 22.6%，拉低整层质量且拖慢采集。
+	// 两个都从默认值移除。已部署实例的维护者清单存在 /data 的
+	// proxy-subscriptions.json 里，部署时需同步清理，否则本函数不生效。
+	raw := strings.TrimSpace(env("PROXY_SUBSCRIPTION_MAINTAINERS", "cm.soso.edu.kg zrf.zrf.me sub.keaeye.icu sub.mia.xx.kg sub.lzjbaby.com sub.xdu.qzz.io"))
 	seen := make(map[string]struct{})
 	out := make([]string, 0, 16)
 	for _, host := range strings.FieldsFunc(raw, func(r rune) bool {

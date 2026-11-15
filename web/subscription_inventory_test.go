@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -202,6 +203,33 @@ func TestSubscriptionPassedIPsOrdering(t *testing.T) {
 	}
 	if got := a.subscriptionPassedIPs(2); len(got) != 2 {
 		t.Fatalf("remaining cap ignored: %v", got)
+	}
+}
+
+// 劣质维护者的 IP 按吞吐打折排序，但不影响 pass 语义。
+func TestSubscriptionPassedIPsPenalizesLowQualityMaintainer(t *testing.T) {
+	a := newInventoryTestApp(t)
+	now := time.Now()
+	a.subInv.Entries["10.0.0.1"] = &subEntry{
+		State: subStatePass, Mbps: 20, LatencyMs: 100, FirstSeen: now,
+		Sources: []string{"sub.danfeng.eu.org"},
+	}
+	a.subInv.Entries["10.0.0.2"] = &subEntry{
+		State: subStatePass, Mbps: 10, LatencyMs: 200, FirstSeen: now,
+		Sources: []string{"zrf.zrf.me"},
+	}
+	a.subInv.Entries["10.0.0.3"] = &subEntry{
+		State: subStatePass, Mbps: 15, LatencyMs: 150, FirstSeen: now,
+		Sources: []string{"sub.danfeng.eu.org", "zrf.zrf.me"},
+	}
+	got := a.subscriptionPassedIPs(10)
+	// 10.0.0.1 打折后 13，排在 15 与 10 之间；多来源取最好系数，10.0.0.3 不打折。
+	want := []string{"10.0.0.3", "10.0.0.1", "10.0.0.2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("penalized passed = %v, want %v", got, want)
+	}
+	if quality := subscriptionSourceQuality(nil); quality != 1 {
+		t.Fatalf("unknown source quality = %v, want 1", quality)
 	}
 }
 

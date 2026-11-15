@@ -366,10 +366,13 @@ var proxyCandidateSources = map[string]proxyCandidateSource{
 			// `error code: 1034`（Cloudflare 跨账户 CNAME 被封），该域已废。
 			// GitHub 原始列表。
 			// 2026-10-22 复测（NAS，单源 6s、26 源并发）：命中率 94%~100%，
-			// 是全部渠道里质量最高的一批，不可删。此前日志里的 6 条
-			// `context deadline` 是 30s 总预算把并发批次一起判死所致，
-			// 已把 refreshProxyCandidates 的总超时放宽到 90s。
-			"https://raw.githubusercontent.com/Senflare/Senflare-IP/main/IPlist-Pro.txt",          // 29/29
+			// 是全部渠道里质量最高的一批。此前日志里的 6 条 `context deadline`
+			// 有两层原因：30s 总预算把并发批次一起判死（已放宽到 90s），
+			// 以及 Go 默认 Transport 优先走 IPv6，而 NAS 的 IPv6 出口到
+			// raw.githubusercontent.com 不通（fetchHTTPSBody 已改为强制 tcp4）。
+			//
+			// 2026-11-15 复测：六条里只有 Senflare 真死（NAS 顺序 curl 12s
+			// 超时、无响应），已移除；其余五条均 200（0.5~1.6s），保留。
 			"https://raw.githubusercontent.com/einsitang/my-fast-cf-ip/master/fastips.txt",        // 20/20
 			"https://raw.githubusercontent.com/yuanxiawan/cfipv4db/main/cfip.txt",                 // 15/16
 			"https://raw.githubusercontent.com/gshtwy/CF-DNS-Clone/main/wetest-cloudflare-v4.txt", // 14/14
@@ -434,16 +437,23 @@ func applyCandidateSourcePriority(results []proxyScanResult, sourceByIP map[stri
 	for i := range results {
 		results[i].SourceRank = rank(results[i].IP)
 	}
+	// 来源只做同分裁决，不再压过延迟。
+	//
+	// 2026-11-15 线上故障：shortlist 只有 60 个名额，这里原先按
+	// user → cfdata → subscription → bestcf 排序，于是 cfdata 的 250 个候选
+	// 即使握手 550~722ms 也全部排在 bestcf 的 10~20 Mbps 候选之前；bestcf
+	// 连进 WS 终审的机会都没有，生效池里自然一个 bestcf 成员都看不到。
+	// 注释本来就写着「来源决定什么时候测，不决定性能排名」——现在让代码
+	// 与这句话一致：先按延迟取最快的 60 个，来源只在延迟相同时分先后。
 	sort.SliceStable(results, func(i, j int) bool {
 		leftOK, rightOK := results[i].Error == "", results[j].Error == ""
 		if leftOK != rightOK {
 			return leftOK
 		}
-		leftRank, rightRank := results[i].SourceRank, results[j].SourceRank
-		if leftRank != rightRank {
-			return leftRank < rightRank
+		if results[i].Latency != results[j].Latency {
+			return results[i].Latency < results[j].Latency
 		}
-		return results[i].Latency < results[j].Latency
+		return results[i].SourceRank < results[j].SourceRank
 	})
 }
 
@@ -775,19 +785,47 @@ func extractPublicIPv4(text string) []string {
 	return result
 }
 
+// candidateHTTPClient 返回候选源抓取专用的 HTTP 客户端。
+//
+// 2026-11-15 线上故障：NAS 上 curl 逐个访问 GitHub raw 全部 200（0.5~1.6s），
+// 但 Go 并发抓取六条 raw 全部报 `context deadline exceeded (Client.Timeout
+// exceeded while awaiting headers)`。同一台机器、同一时刻，差别只在 Go 的
+// 拨号器会同时尝试 AAAA/A 记录，而 NAS 的 IPv6 出口不可用——Happy Eyeballs
+// 的 300ms 回退在 8s 总预算里被多条并发连接摊薄，最终全批超时。
+//
+// 候选源全是公网 IPv4 服务，强制 tcp4 是这里唯一正确的选择：既避开不可用的
+// IPv6 路径，也让 26 个源并发时每条连接都有确定的出口。超时同时放宽到 12s，
+// 给跨洋 TLS 握手留余量；ResponseHeaderTimeout 仍单独兜底，防止半开连接挂死。
+func candidateHTTPClient(timeout time.Duration) *http.Client {
+	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
+				return dialer.DialContext(ctx, "tcp4", addr)
+			},
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          64,
+			MaxIdleConnsPerHost:   8,
+			IdleConnTimeout:       30 * time.Second,
+			TLSHandshakeTimeout:   6 * time.Second,
+			ResponseHeaderTimeout: 10 * time.Second,
+		},
+	}
+}
+
 func fetchHTTPSBody(parent context.Context, rawURL string) ([]byte, error) {
 	target, err := url.Parse(rawURL)
 	if err != nil || target.Scheme != "https" || target.Hostname() == "" {
 		return nil, errors.New("候选源 URL 必须是 HTTPS")
 	}
-	client := &http.Client{
-		Timeout: 8 * time.Second,
-		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			if !allowHTTPSRedirect(req, target) {
-				return http.ErrUseLastResponse
-			}
-			return nil
-		},
+	client := candidateHTTPClient(12 * time.Second)
+	client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+		if !allowHTTPSRedirect(req, target) {
+			return http.ErrUseLastResponse
+		}
+		return nil
 	}
 	request, err := http.NewRequestWithContext(parent, http.MethodGet, target.String(), nil)
 	if err != nil {

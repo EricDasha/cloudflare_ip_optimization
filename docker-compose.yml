@@ -85,7 +85,8 @@ services:
       # 这里的 MAINTAINERS 只是「首次启动的种子」：之后维护者清单以页面上编辑的
       # data/proxy-subscriptions.json 为准，改这里不会覆盖页面上的增删。
       PROXY_SUBSCRIPTION_CONVERTER: "https://vlesdy.trojanjd.dpdns.org/sub"
-      PROXY_SUBSCRIPTION_MAINTAINERS: "owo.o00o.ooo,cm.soso.edu.kg,zrf.zrf.me,sub.keaeye.icu,sub.mot.cloudns.biz,sub.mia.xx.kg,sub.lzjbaby.com,sub.xdu.qzz.io"
+      # 2026-11-15 按实测通过率移除 owo.o00o.ooo(22.6%)、sub.mot.cloudns.biz(2.9%)。
+      PROXY_SUBSCRIPTION_MAINTAINERS: "cm.soso.edu.kg,zrf.zrf.me,sub.keaeye.icu,sub.mia.xx.kg,sub.lzjbaby.com,sub.xdu.qzz.io"
       PROXY_SUBSCRIPTION_TOKEN: "${PROXY_SUBSCRIPTION_TOKEN:-}"
       PROXY_SUBSCRIPTION_REFRESH_ENABLED: "true"
       # 收与考分开两条节奏：

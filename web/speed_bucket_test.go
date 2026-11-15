@@ -167,3 +167,21 @@ func TestDropBelowReferenceIPs(t *testing.T) {
 		t.Fatalf("zero reference must be a no-op: got %v", got)
 	}
 }
+
+// 跌破最小池时只补最快的慢 IP 到 minKeep，不是把全部慢 IP 原样留下。
+func TestDropBelowReferenceIPsBackfillsFastestOnly(t *testing.T) {
+	passed := []string{"198.51.100.1", "198.51.100.2", "198.51.100.3", "198.51.100.4", "198.51.100.5"}
+	results := []proxyScanResult{
+		{IP: "198.51.100.1", DownloadMbps: 20},
+		{IP: "198.51.100.2", DownloadMbps: 1.2},
+		{IP: "198.51.100.3", DownloadMbps: 2.4},
+		{IP: "198.51.100.4", DownloadMbps: 1.8},
+		{IP: "198.51.100.5", DownloadMbps: 2.9},
+	}
+	got := dropBelowReferenceIPs(passed, results, 3, 3)
+	// 及格 1 个，需补 2 个：2.9 与 2.4 入选，1.8/1.2 剔除。
+	want := []string{"198.51.100.1", "198.51.100.3", "198.51.100.5"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("backfill = %v, want %v", got, want)
+	}
+}

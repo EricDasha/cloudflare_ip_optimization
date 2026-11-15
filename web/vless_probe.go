@@ -304,11 +304,28 @@ func vlessProbeOrder(results []proxyScanResult) []int {
 			order = append(order, i)
 		}
 	}
-	sort.SliceStable(order, func(i, j int) bool {
-		if results[order[i]].SourceRank != results[order[j]].SourceRank {
-			return results[order[i]].SourceRank < results[order[j]].SourceRank
+	// 人工指定的 user 候选永远先测；其余来源只按握手延迟排队。
+	//
+	// 旧实现让 cfdata 的 rank 压过 bestcf 的延迟，shortlist 前 10 个终审
+	// 名额被 cfdata 的 550~722ms 候选占满，bestcf 的 10~20 Mbps 候选连
+	// 测速机会都没有。user 是主席亲手指定的，保留插队权；cfdata /
+	// subscription / bestcf 都是机器供给，谁快谁先测。
+	tier := func(rank int) int {
+		if rank == 0 {
+			return 0
 		}
-		return results[order[i]].Latency < results[order[j]].Latency
+		return 1
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		left, right := results[order[i]], results[order[j]]
+		leftTier, rightTier := tier(left.SourceRank), tier(right.SourceRank)
+		if leftTier != rightTier {
+			return leftTier < rightTier
+		}
+		if left.Latency != right.Latency {
+			return left.Latency < right.Latency
+		}
+		return left.SourceRank < right.SourceRank
 	})
 	return order
 }
@@ -320,14 +337,31 @@ func fastestVLESSPasses(results []proxyScanResult, poolSize int) []string {
 			passed = append(passed, i)
 		}
 	}
+	// 数据面实测延迟优先，来源只在同分时裁决。
+	//
+	// 旧实现先比 SourceRank，cfdata 的慢候选会压过 bestcf 的快候选；
+	// 结果就是「来源好的慢节点」长期占池，而实测更快的社区节点永远
+	// 进不来。user 候选保留插队权（人工指定优先），其余来源一律按
+	// 数据面实测说话。
+	tier := func(rank int) int {
+		if rank == 0 {
+			return 0
+		}
+		return 1
+	}
 	sort.SliceStable(passed, func(i, j int) bool {
-		if results[passed[i]].SourceRank != results[passed[j]].SourceRank {
-			return results[passed[i]].SourceRank < results[passed[j]].SourceRank
+		left, right := results[passed[i]], results[passed[j]]
+		leftTier, rightTier := tier(left.SourceRank), tier(right.SourceRank)
+		if leftTier != rightTier {
+			return leftTier < rightTier
 		}
-		if results[passed[i]].DataLatency == results[passed[j]].DataLatency {
-			return results[passed[i]].Latency < results[passed[j]].Latency
+		if left.DataLatency != right.DataLatency {
+			return left.DataLatency < right.DataLatency
 		}
-		return results[passed[i]].DataLatency < results[passed[j]].DataLatency
+		if left.Latency != right.Latency {
+			return left.Latency < right.Latency
+		}
+		return left.SourceRank < right.SourceRank
 	})
 	if len(passed) > poolSize {
 		passed = passed[:poolSize]

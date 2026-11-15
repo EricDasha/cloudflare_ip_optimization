@@ -252,9 +252,14 @@ func logSpeedProbeSummary(speeds map[string]float64, probed int, minMbps float64
 // dropBelowReferenceIPs 把「实测吞吐低于参考值」的 IP 从入池名单里剔除。
 //
 // 只剔除有成绩且不及格的成员：未测（DownloadMbps==0 且不是测速失败）与
-// 及格的都不受影响——未知不等于差。剔除后若剩余成员少于 minKeep，则宁可
-// 保留也不让池子空掉；纯域名池能跑（现场日志有 0 IP + 29 域名 的正常记录），
-// 但保持最小池是更保守的选择。
+// 及格的都不受影响——未知不等于差。剔除后若剩余成员少于 minKeep，不是
+// 把全部慢 IP 原样留下，而是按吞吐从高到低补足到 minKeep。
+//
+// 2026-11-15 修正：旧实现「不够 minKeep 就返回 passed」在生产上退化成
+// 「一个都不剔」。当时池里 10 个 IP 只有 2 个过 3 Mbps，minKeep=3，于是
+// 8 个 1.2~2.3 Mbps 的慢 IP 全被保留，cfnat 的 sticky 又把设备粘到其中
+// 最慢的一个上。最小池要的是「至少 minKeep 个可用落点」，不是「保留所有
+// 落点」——补足名额只需挑最快的几个慢 IP，其余仍应剔除。
 func dropBelowReferenceIPs(passed []string, results []proxyScanResult, minKeep int, minMbps float64) []string {
 	if len(passed) == 0 || minMbps <= 0 {
 		return passed
@@ -264,24 +269,49 @@ func dropBelowReferenceIPs(passed []string, results []proxyScanResult, minKeep i
 		mbps[r.IP] = r.DownloadMbps
 	}
 	keep := make([]string, 0, len(passed))
-	dropped := make([]string, 0)
+	slow := make([]string, 0)
 	for _, ip := range passed {
 		if v := mbps[ip]; v > 0 && v < minMbps {
-			dropped = append(dropped, ip)
+			slow = append(slow, ip)
 			continue
 		}
 		keep = append(keep, ip)
 	}
-	if len(dropped) == 0 {
+	if len(slow) == 0 {
 		return passed
+	}
+	if minKeep < 1 {
+		minKeep = 1
 	}
 	if len(keep) < minKeep {
-		log.Printf("proxy auto apply: kept %d below-reference IPs (would leave %d < min pool %d): %v",
-			len(dropped), len(keep), minKeep, dropped)
-		return passed
+		need := minKeep - len(keep)
+		// 按实测吞吐降序挑补位成员；同速保持原顺序，避免结果抖动。
+		ranked := append([]string(nil), slow...)
+		sort.SliceStable(ranked, func(i, j int) bool { return mbps[ranked[i]] > mbps[ranked[j]] })
+		if need > len(ranked) {
+			need = len(ranked)
+		}
+		selected := make(map[string]struct{}, need)
+		for _, ip := range ranked[:need] {
+			selected[ip] = struct{}{}
+		}
+		out := make([]string, 0, len(keep)+need)
+		for _, ip := range passed {
+			if _, ok := selected[ip]; ok {
+				out = append(out, ip)
+				continue
+			}
+			if v := mbps[ip]; v > 0 && v < minMbps {
+				continue
+			}
+			out = append(out, ip)
+		}
+		log.Printf("proxy auto apply: kept %d fastest below-reference IPs to reach min pool %d (dropped %d slower): %v",
+			need, minKeep, len(slow)-need, ranked[need:])
+		return out
 	}
 	log.Printf("proxy auto apply: dropped %d below-reference IPs (< %.1f Mbps): %v",
-		len(dropped), minMbps, dropped)
+		len(slow), minMbps, slow)
 	return keep
 }
 

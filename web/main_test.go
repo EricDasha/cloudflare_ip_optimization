@@ -131,9 +131,10 @@ func TestSameIPSetIgnoresOrder(t *testing.T) {
 	}
 }
 
-func TestCandidateSourcePriorityUsesDeclaredOrder(t *testing.T) {
-	// 供给层：user > cfdata > subscription > bestcf。
-	// preferred(域名直连 fixed) 与 official(官方段) 已砍，未知来源落 rank 末尾。
+func TestCandidateSourcePriorityUsesLatencyBeforeRank(t *testing.T) {
+	// 排序口径：错误 → 握手延迟 → 来源 rank。
+	// 来源不再压过延迟——cfdata 的 550~722ms 候选不能因为「来源靠前」
+	// 就挤掉 bestcf 的 100ms 候选；rank 只在延迟相同时兜底。
 	results := []proxyScanResult{
 		{IP: "203.0.113.6", Latency: 1},
 		{IP: "203.0.113.1", Latency: 6},
@@ -154,10 +155,27 @@ func TestCandidateSourcePriorityUsesDeclaredOrder(t *testing.T) {
 	for i, result := range results {
 		got[i] = result.IP
 	}
-	// user(0) → cfdata(1) → subscription(2) → bestcf(3) → 未知/已砍来源按 rank 末尾、层内延迟序
-	want := []string{"203.0.113.1", "203.0.113.4", "203.0.113.2", "203.0.113.5", "203.0.113.6", "203.0.113.3"}
+	want := []string{"203.0.113.6", "203.0.113.2", "203.0.113.3", "203.0.113.4", "203.0.113.5", "203.0.113.1"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("candidate source order = %v, want %v", got, want)
+	}
+}
+
+func TestCandidateSourcePriorityUsesRankOnEqualLatency(t *testing.T) {
+	results := []proxyScanResult{
+		{IP: "203.0.113.1", Latency: 50},
+		{IP: "203.0.113.2", Latency: 50},
+		{IP: "203.0.113.3", Latency: 50},
+	}
+	applyCandidateSourcePriority(results, map[string]string{
+		"203.0.113.1": "bestcf",
+		"203.0.113.2": "user",
+		"203.0.113.3": "cfdata",
+	})
+	got := []string{results[0].IP, results[1].IP, results[2].IP}
+	want := []string{"203.0.113.2", "203.0.113.3", "203.0.113.1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("equal-latency source order = %v, want %v", got, want)
 	}
 }
 
@@ -322,7 +340,7 @@ func TestPoolBlockStatusTracksAndClears(t *testing.T) {
 func TestSubscriptionMaintainersDefaultList(t *testing.T) {
 	t.Setenv("PROXY_SUBSCRIPTION_MAINTAINERS", "")
 	got := subscriptionMaintainers()
-	for _, want := range []string{"owo.o00o.ooo", "cm.soso.edu.kg", "zrf.zrf.me"} {
+	for _, want := range []string{"cm.soso.edu.kg", "zrf.zrf.me", "sub.xdu.qzz.io"} {
 		found := false
 		for _, host := range got {
 			if host == want {
@@ -332,6 +350,15 @@ func TestSubscriptionMaintainersDefaultList(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("default maintainers missing %q: %v", want, got)
+		}
+	}
+	// 2026-11-15 实测通过率过低，已从默认清单移除；老实例的持久化清单
+	// 仍需部署时清理，这里的默认值只影响新装。
+	for _, bad := range []string{"owo.o00o.ooo", "sub.mot.cloudns.biz"} {
+		for _, host := range got {
+			if host == bad {
+				t.Fatalf("low-quality maintainer %q still in defaults: %v", bad, got)
+			}
 		}
 	}
 }
@@ -560,13 +587,14 @@ func TestVLESSProbeOrderUsesWebSocketLatency(t *testing.T) {
 }
 
 func TestFastestVLESSPassesUsesDataLatency(t *testing.T) {
+	// 数据面实测延迟压过来源 rank：bestcf 的 300ms 必须排在 cfdata 的 600ms 前。
 	results := []proxyScanResult{
-		{IP: "198.51.100.1", Latency: 100, DataLatency: 900, Stage: "VLESS_PASS"},
-		{IP: "198.51.100.2", Latency: 200, DataLatency: 300, SourceRank: 1, Stage: "VLESS_PASS"},
-		{IP: "198.51.100.3", Latency: 50, DataLatency: 600, Stage: "VLESS_PASS"},
+		{IP: "198.51.100.1", Latency: 100, DataLatency: 900, SourceRank: 0, Stage: "VLESS_PASS"},
+		{IP: "198.51.100.2", Latency: 200, DataLatency: 300, SourceRank: 3, Stage: "VLESS_PASS"},
+		{IP: "198.51.100.3", Latency: 50, DataLatency: 600, SourceRank: 1, Stage: "VLESS_PASS"},
 	}
 	got := fastestVLESSPasses(results, 2)
-	want := []string{"198.51.100.3", "198.51.100.1"}
+	want := []string{"198.51.100.1", "198.51.100.2"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("fastestVLESSPasses() = %v, want %v", got, want)
 	}
@@ -583,7 +611,8 @@ func TestCandidateSourcePriorityKeepsFailuresOut(t *testing.T) {
 		"198.51.100.2": "official",
 		"198.51.100.3": "bestcf",
 	})
-	want := []string{"198.51.100.1", "198.51.100.2", "198.51.100.3"}
+	// 失败项排最后；两个通过项按延迟 10ms < 20ms 排。
+	want := []string{"198.51.100.2", "198.51.100.1", "198.51.100.3"}
 	got := []string{results[0].IP, results[1].IP, results[2].IP}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("source priority = %v, want %v", got, want)

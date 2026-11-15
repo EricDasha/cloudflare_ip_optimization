@@ -70,17 +70,17 @@ type subEntry struct {
 // subFetchRecord 是一个维护者的单次拉取留痕。旧实现只有累计计数，
 // 「这一次到底成没成、要到多少」无从查证，排障只能靠猜。
 type subFetchRecord struct {
-	At        time.Time `json:"at"`
-	OK        bool      `json:"ok"`
-	Status    int       `json:"status,omitempty"`
-	DurationMs int64    `json:"durationMs"`
-	Extracted int       `json:"extracted"`
-	Error     string    `json:"error,omitempty"`
+	At         time.Time `json:"at"`
+	OK         bool      `json:"ok"`
+	Status     int       `json:"status,omitempty"`
+	DurationMs int64     `json:"durationMs"`
+	Extracted  int       `json:"extracted"`
+	Error      string    `json:"error,omitempty"`
 }
 
 type subscriptionInventory struct {
-	UpdatedAt time.Time              `json:"updatedAt"`
-	Entries   map[string]*subEntry   `json:"entries"`
+	UpdatedAt time.Time                   `json:"updatedAt"`
+	Entries   map[string]*subEntry        `json:"entries"`
 	Fetches   map[string][]subFetchRecord `json:"fetches,omitempty"`
 	// LastHarvestAt / LastProbeAt 分开记：收一次和考一次是两件独立的事，
 	// 合成一个时间戳就又会回到「看不出卡在哪一段」的老问题。
@@ -431,6 +431,41 @@ func (a *app) pruneSubscriptionInventoryLocked(now time.Time) int {
 	return removed
 }
 
+// subscriptionMaintainerPenalty 是按实测通过率给维护者打的折扣。
+//
+// 这些维护者没有被默认清单删除，但它们的 IP 在排序时按吞吐乘以折扣，
+// 相当于「同速度下排后面」。2026-11-15 实测通过率：
+//   - sub.danfeng.eu.org 58.4%，质量一般，保留但降权；
+//   - sub.mot.cloudns.biz 2.9%、owo.o00o.ooo 22.6%，已从默认清单移除，
+//     这里仍保留折扣，防止老实例的持久化清单把它们带回来时又占前排。
+//
+// 折扣只影响 subscription 层内部的先后，不改变「pass 就能进候选」的语义。
+var subscriptionMaintainerPenalty = map[string]float64{
+	"sub.danfeng.eu.org":  0.35,
+	"sub.mot.cloudns.biz": 0.90,
+	"owo.o00o.ooo":        0.70,
+}
+
+// subscriptionSourceQuality 返回一个 IP 的来源质量系数（0~1）。
+// 多来源时取最好的那个——只要有一个高质量维护者也供过这条 IP，就不该被
+// 另一个差维护者的折扣拖累。
+func subscriptionSourceQuality(sources []string) float64 {
+	best := 0.0
+	for _, source := range sources {
+		quality := 1.0
+		if penalty, ok := subscriptionMaintainerPenalty[source]; ok {
+			quality = 1 - penalty
+		}
+		if quality > best {
+			best = quality
+		}
+	}
+	if best == 0 {
+		return 1
+	}
+	return best
+}
+
 // subscriptionPassedIPs 返回本子里考过的 IP，按质量降序。
 // 这是候选汇合时 subscription 层真正的取用口径——不再是「存进池的那批」，
 // 而是「本子里state=pass 的那批」，两者语义一致但后者带完整成绩。
@@ -441,6 +476,7 @@ func (a *app) subscriptionPassedIPs(remaining int) []string {
 	a.subMu.RLock()
 	type scored struct {
 		ip    string
+		score float64
 		mbps  float64
 		lat   int64
 		first time.Time
@@ -450,10 +486,14 @@ func (a *app) subscriptionPassedIPs(remaining int) []string {
 		if entry == nil || entry.State != subStatePass {
 			continue
 		}
-		items = append(items, scored{ip, entry.Mbps, entry.LatencyMs, entry.FirstSeen})
+		quality := subscriptionSourceQuality(entry.Sources)
+		items = append(items, scored{ip, entry.Mbps * quality, entry.Mbps, entry.LatencyMs, entry.FirstSeen})
 	}
 	a.subMu.RUnlock()
 	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].score != items[j].score {
+			return items[i].score > items[j].score
+		}
 		if items[i].mbps != items[j].mbps {
 			return items[i].mbps > items[j].mbps
 		}
