@@ -198,6 +198,7 @@ func main() {
 			log.Printf("auto-start cfnat failed: %v", err)
 		}
 	}
+	go preflightSpeedSources(context.Background())
 	go a.runProxyCandidateRefreshLoop()
 	go a.runBackgroundOptimizerLoop()
 	go a.runSubscriptionSweepLoop()

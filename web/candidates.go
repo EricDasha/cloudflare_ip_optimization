@@ -801,7 +801,10 @@ func candidateHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
+			// 显式关闭环境代理：候选源抓取是控制面自己的出站请求，
+			// 不能因为 NAS 上存在 HTTP_PROXY 就绕道本地代理，否则抓取
+			// 失败会被误记成源站不可用。
+			Proxy: nil,
 			DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
 				return dialer.DialContext(ctx, "tcp4", addr)
 			},

@@ -250,6 +250,8 @@ func main() {
 	ipsType := flag.String("ips", "4", "指定生成IPv4还是IPv6地址 (4或6)")
 	num := flag.Int("num", 1, "单连接拨号失败时按顺序尝试的目标数量")
 	port := flag.Int("port", 443, "转发的目标端口")
+	altAddr := flag.String("addr2", "", "实验性第二监听地址（如 0.0.0.0:1235）；留空关闭")
+	altPort := flag.Int("port2", 0, "第二监听口转发的目标端口；0 表示沿用 -port")
 	random := flag.Bool("random", true, "是否随机生成IP，如果为false，则从CIDR中拆分出所有IP")
 	sticky := flag.Bool("sticky", true, "设备粘性：同一客户端 IP 恒定走同一上游，且不同设备尽量各占一个出口（拨号失败才顺延）")
 	maxThreads := flag.Int("task", 100, "并发请求最大协程数")
@@ -271,6 +273,68 @@ func main() {
 	defer listener.Close()
 
 	log.Printf("正在监听 %s 并转发到 %d 个目标地址，有效延迟：%d ms", *localAddr, *num, *Delay)
+
+	// 单条客户端连接的接入逻辑抽出来，主监听口和实验性第二入口共用。
+	// 两个入口共享同一个 IPManager，因此设备粘性、轮换顺序和 fallback
+	// 完全一致；差别只在「拨号目标端口」。
+	acceptConn := func(conn net.Conn, targetPort int) {
+		clientAddr := conn.RemoteAddr().String()
+		atomic.AddInt32(&activeConnections, 1)
+		log.Printf("客户端来源: %s 连接建立，当前活跃连接数: %d", clientAddr, atomic.LoadInt32(&activeConnections))
+		// 多目标参数仅作为“失败时按顺序回退”，不再并发竞速，
+		// 从而保证一次前端逻辑连接只产生一个真实上游会话。
+		// 粘性模式：每台设备独占一个上游；拨号失败按序回退不变。
+		clientHost, _, _ := net.SplitHostPort(clientAddr)
+		var primary []string
+		if *sticky {
+			primary = ipManager.nextTargetsForClient(clientHost, targetPort, *num)
+		} else {
+			primary = ipManager.nextTargets(targetPort, *num)
+		}
+		var fallback []string
+		if fallbackManager != nil {
+			fallback = fallbackManager.nextTargets(targetPort, 1)
+		}
+		// 只有粘性模式下才纠正钉位：轮转模式本来就不该有「设备记忆」。
+		manager := ipManager
+		if !*sticky {
+			manager = nil
+		}
+		go handleConnection(conn, manager, clientHost, append(primary, fallback...), time.Duration(*Delay)*time.Millisecond)
+	}
+
+	if strings.TrimSpace(*altAddr) != "" {
+		altTargetPort := *altPort
+		if altTargetPort <= 0 || altTargetPort > 65535 {
+			altTargetPort = *port
+		}
+		altListener, err := net.Listen("tcp", *altAddr)
+		if err != nil {
+			log.Printf("无法监听第二入口 %s: %v（主入口继续运行）", *altAddr, err)
+		} else {
+			defer altListener.Close()
+			log.Printf("正在监听 %s 并转发到目标端口 %d（实验性第二入口）", *altAddr, altTargetPort)
+			go func() {
+				for {
+					if tcpListener, ok := altListener.(*net.TCPListener); ok {
+						_ = tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
+					}
+					conn, err := altListener.Accept()
+					if err != nil {
+						if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+							continue
+						}
+						if opErr, ok := err.(*net.OpError); ok && strings.Contains(opErr.Error(), "use of closed network connection") {
+							return
+						}
+						log.Printf("第二入口接受连接时发生错误: %v", err)
+						continue
+					}
+					acceptConn(conn, altTargetPort)
+				}
+			}()
+		}
+	}
 
 	for {
 		startTime := time.Now()
@@ -452,29 +516,7 @@ func main() {
 				continue
 			}
 
-			clientAddr := conn.RemoteAddr().String()
-			atomic.AddInt32(&activeConnections, 1)
-			log.Printf("客户端来源: %s 连接建立，当前活跃连接数: %d", clientAddr, atomic.LoadInt32(&activeConnections))
-			// 多目标参数仅作为“失败时按顺序回退”，不再并发竞速，
-			// 从而保证一次前端逻辑连接只产生一个真实上游会话。
-			// 粘性模式：每台设备独占一个上游；拨号失败按序回退不变。
-			clientHost, _, _ := net.SplitHostPort(clientAddr)
-			var primary []string
-			if *sticky {
-				primary = ipManager.nextTargetsForClient(clientHost, *port, *num)
-			} else {
-				primary = ipManager.nextTargets(*port, *num)
-			}
-			var fallback []string
-			if fallbackManager != nil {
-				fallback = fallbackManager.nextTargets(*port, 1)
-			}
-			// 只有粘性模式下才纠正钉位：轮转模式本来就不该有「设备记忆」。
-			manager := ipManager
-			if !*sticky {
-				manager = nil
-			}
-			go handleConnection(conn, manager, clientHost, append(primary, fallback...), time.Duration(*Delay)*time.Millisecond)
+			acceptConn(conn, *port)
 		}
 	}
 }

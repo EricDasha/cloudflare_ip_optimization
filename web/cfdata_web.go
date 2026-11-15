@@ -160,6 +160,7 @@ func downloadSpeedViaCloudflareIP(ctx context.Context, ip string, size int) (map
 	host := defaultVLESSSpeedHost
 	dialer := &net.Dialer{Timeout: 8 * time.Second}
 	transport := &http.Transport{
+		Proxy:           nil,
 		TLSClientConfig: &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12},
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			_, port, err := net.SplitHostPort(addr)
@@ -168,7 +169,7 @@ func downloadSpeedViaCloudflareIP(ctx context.Context, ip string, size int) (map
 			}
 			return dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
 		},
-		ForceAttemptHTTP2:     true,
+		ForceAttemptHTTP2:     false,
 		TLSHandshakeTimeout:   8 * time.Second,
 		ResponseHeaderTimeout: 10 * time.Second,
 		IdleConnTimeout:       15 * time.Second,

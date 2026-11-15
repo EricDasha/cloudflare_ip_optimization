@@ -556,6 +556,64 @@ func spreadBySegment(ips []string, poolSize int) []string {
 	return out
 }
 
+// poolColoCap 是单个 CF 机房在池内的软上限。
+//
+// 同一 colo 的多个 IP 共享同一套边缘容量，放 5 个进去不会让可用带宽
+// 变成 5 倍，只会让「这个机房一挂，池子一起挂」的概率变大。guanfang-youxuan
+// 用 capPerColo=3，这里沿用；0 表示关闭。
+func poolColoCap() int {
+	n := envInt("PROXY_POOL_COLO_CAP", 3)
+	if n < 0 {
+		n = 0
+	}
+	if n > 10 {
+		n = 10
+	}
+	return n
+}
+
+// capPassedPerColo 按机房配额裁剪候选，并在跌破最小池时按原顺序回填。
+//
+// 回填是刻意的：配额是软约束，池子空掉比同机房多一个严重得多。无 colo
+// 情报的候选不参与配额（未知不等于差）。
+func capPassedPerColo(ips []string, results []proxyScanResult, limit, minKeep int) []string {
+	if limit <= 0 || len(ips) == 0 {
+		return ips
+	}
+	coloOf := make(map[string]string, len(ips))
+	for _, result := range results {
+		if result.Colo != "" {
+			coloOf[result.IP] = result.Colo
+		}
+	}
+	counts := make(map[string]int, 8)
+	kept := make([]string, 0, len(ips))
+	deferred := make([]string, 0)
+	for _, ip := range ips {
+		colo := coloOf[ip]
+		if colo == "" || counts[colo] < limit {
+			kept = append(kept, ip)
+			if colo != "" {
+				counts[colo]++
+			}
+			continue
+		}
+		deferred = append(deferred, ip)
+	}
+	if len(kept) < minKeep && len(deferred) > 0 {
+		need := minKeep - len(kept)
+		if need > len(deferred) {
+			need = len(deferred)
+		}
+		kept = append(kept, deferred[:need]...)
+		deferred = deferred[need:]
+	}
+	if len(deferred) > 0 {
+		log.Printf("proxy auto apply: colo cap %d deferred %d candidates", limit, len(deferred))
+	}
+	return kept
+}
+
 // admitPassedUnderCeiling 把已通过终审的名单按「入池延迟上限」再裁一遍。
 // 顺序不变；results 里找不到成绩的成员保守保留（调用方给的 passed 本就来自 results）。
 //
@@ -770,6 +828,7 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 		passed = orderPassedByColoPreference(passed, results, poolColoPreferenceSet())
 		// 片区降权：整片高失败率的段排到末尾（不淘汰，候选不够照样用）。
 		passed = orderPassedBySegmentHealth(passed, results)
+		passed = capPassedPerColo(passed, results, poolColoCap(), cfg.MinPool)
 		passed = spreadBySegment(passed, cfg.PoolSize)
 		// L7 复验：trace 明确不合格的候选不占座；探测失败一律放行。
 		passed = filterTraceL7(runCtx, passed, results, cfg)
@@ -794,6 +853,7 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 		}
 		passed = orderPassedByColoPreference(passed, results, poolColoPreferenceSet())
 		passed = orderPassedBySegmentHealth(passed, results)
+		passed = capPassedPerColo(passed, results, poolColoCap(), cfg.MinPool)
 		passed = spreadBySegment(passed, cfg.PoolSize)
 		passed = filterTraceL7(runCtx, passed, results, cfg)
 	}
@@ -941,22 +1001,62 @@ func scanProxyWebSockets(parent context.Context, ips []string, cfg proxyAutoConf
 	results := make([]proxyScanResult, len(ips))
 	sem := make(chan struct{}, cfg.Concurrency)
 	var wg sync.WaitGroup
+	attempts := wsProbeAttempts()
 	for i, ip := range ips {
 		wg.Add(1)
 		go func(i int, ip string) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			started := time.Now()
-			ctx, cancel := context.WithTimeout(parent, time.Duration(cfg.MaxLatency)*time.Millisecond)
-			defer cancel()
-			colo, err := probeProxyWebSocket(ctx, ip, cfg)
-			latency := time.Since(started).Milliseconds()
-			results[i] = proxyScanResult{IP: ip, Latency: latency, Colo: colo, Stage: "WS_PASS"}
-			if err != nil {
-				results[i].Stage = "WS_FAIL"
-				results[i].Error = err.Error()
-				results[i].ErrorClass = classifyProbeError(err)
+			defer func() {
+				if r := recover(); r != nil {
+					results[i] = proxyScanResult{
+						IP:         ip,
+						Stage:      "WS_FAIL",
+						Error:      fmt.Sprintf("probe panic: %v", r),
+						ErrorClass: "panic",
+					}
+				}
+			}()
+			latencies := make([]int64, 0, attempts)
+			colo := ""
+			var lastErr error
+			for attempt := 0; attempt < attempts; attempt++ {
+				if parent.Err() != nil {
+					break
+				}
+				started := time.Now()
+				ctx, cancel := context.WithTimeout(parent, time.Duration(cfg.MaxLatency)*time.Millisecond)
+				c, err := probeProxyWebSocket(ctx, ip, cfg)
+				cancel()
+				if err != nil {
+					lastErr = err
+					continue
+				}
+				latencies = append(latencies, time.Since(started).Milliseconds())
+				if c != "" && colo == "" {
+					colo = c
+				}
+			}
+			if len(latencies) == 0 {
+				results[i] = proxyScanResult{IP: ip, Stage: "WS_FAIL"}
+				if lastErr != nil {
+					results[i].Error = lastErr.Error()
+					results[i].ErrorClass = classifyProbeError(lastErr)
+				} else {
+					results[i].Error = "WS 探测未执行"
+					results[i].ErrorClass = "canceled"
+				}
+				return
+			}
+			avg, jitter := latencyAverageAndJitter(latencies)
+			results[i] = proxyScanResult{
+				IP:       ip,
+				Latency:  avg,
+				Colo:     colo,
+				Stage:    "WS_PASS",
+				LossRate: float64(attempts-len(latencies)) / float64(attempts),
+				JitterMs: jitter,
 			}
 		}(i, ip)
 	}
@@ -965,9 +1065,61 @@ func scanProxyWebSockets(parent context.Context, ips []string, cfg proxyAutoConf
 		if (results[i].Error == "") != (results[j].Error == "") {
 			return results[i].Error == ""
 		}
+		// 先丢包，再按 20ms 分档，再看抖动，最后才比精确延迟。
+		// 单次握手的 5ms 差值没有统计意义；3 次里丢 1 次才是真问题。
+		if results[i].LossRate != results[j].LossRate {
+			return results[i].LossRate < results[j].LossRate
+		}
+		leftBucket := results[i].Latency / 20
+		rightBucket := results[j].Latency / 20
+		if leftBucket != rightBucket {
+			return leftBucket < rightBucket
+		}
+		if results[i].JitterMs != results[j].JitterMs {
+			return results[i].JitterMs < results[j].JitterMs
+		}
 		return results[i].Latency < results[j].Latency
 	})
 	return results
+}
+
+// wsProbeAttempts 是 shortlist 上每个候选的 WS 握手次数。
+//
+// 只作用于 shortlist（默认 60 个），不碰 990 个初筛候选，所以不扩大
+// 全量探测压力。3 次才能区分「偶发丢手」和「稳定可用」：1 次成功可能是
+// 运气，3 次里丢 1 次在粘性转发下就是每三次断一次。
+func wsProbeAttempts() int {
+	n := envInt("PROXY_WS_PROBES", 3)
+	if n < 1 {
+		n = 1
+	}
+	if n > 3 {
+		n = 3
+	}
+	return n
+}
+
+func latencyAverageAndJitter(samples []int64) (int64, int64) {
+	if len(samples) == 0 {
+		return 0, 0
+	}
+	var sum int64
+	for _, sample := range samples {
+		sum += sample
+	}
+	avg := sum / int64(len(samples))
+	if avg < 1 {
+		avg = 1
+	}
+	var deviation int64
+	for _, sample := range samples {
+		if sample > avg {
+			deviation += sample - avg
+		} else {
+			deviation += avg - sample
+		}
+	}
+	return avg, deviation / int64(len(samples))
 }
 
 // measurePoolEntryLatency 三次 WS 握手取最优延迟（毫秒）、机房码与失败次数。
@@ -1070,8 +1222,13 @@ type proxyScanResult struct {
 	DataLatency  int64   `json:"dataLatency,omitempty"`
 	DownloadMbps float64 `json:"downloadMbps,omitempty"`
 	SourceRank   int     `json:"sourceRank,omitempty"`
-	Stage        string  `json:"stage,omitempty"`
-	Error        string  `json:"error,omitempty"`
+	// LossRate 是 shortlist 多次 WS 握手的失败比例（0~1），JitterMs 是
+	// 成功样本的平均绝对偏差。单次握手看不出「偶发丢手」，而粘性转发下
+	// 丢一次就是断一次，所以排序先看这两个再比延迟。
+	LossRate float64 `json:"lossRate,omitempty"`
+	JitterMs int64   `json:"jitterMs,omitempty"`
+	Stage    string  `json:"stage,omitempty"`
+	Error    string  `json:"error,omitempty"`
 	// ErrorClass 是 Error 的归类（timeout/refused/unreachable/handshake/protocol/other）。
 	// 原始报错文本随版本平台变化，直接统计没法用；归类后才能看出「整片被掐」
 	// 与「个别地址没了」的区别。
@@ -1126,6 +1283,19 @@ func scanProxyIPs(parent context.Context, ips []string, cfg proxyScanConfig) []p
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			// 单个探测 panic 不能带走整轮扫描：CFData-WEB 的 bounded
+			// worker 在每个 worker 里 recover，这里照做，并把 panic 记成
+			// 该候选的失败原因，其余候选继续跑。
+			defer func() {
+				if r := recover(); r != nil {
+					results[i] = proxyScanResult{
+						IP:         ip,
+						Stage:      "TLS_FAIL",
+						Error:      fmt.Sprintf("probe panic: %v", r),
+						ErrorClass: "panic",
+					}
+				}
+			}()
 			started := time.Now()
 			timeout := time.Duration(cfg.MaxLatency+1000) * time.Millisecond
 			if timeout < 2*time.Second {

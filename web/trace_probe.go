@@ -27,7 +27,16 @@ type cfTrace struct {
 	TLS         string
 	Kex         string
 	UAG         string
+	CFRay       string
+	Server      string
 }
+
+// traceProbeUserAgent 是 trace 探测固定使用的 UA。
+//
+// `/cdn-cgi/trace` 会把请求 UA 原样回显到 `uag=`。cfnb 的 L7 验活把
+// 「回显 UA 必须等于请求 UA」列为硬条件：一个真正的 CF 边缘会忠实回显，
+// 中间层改写或伪造的应答则不会。固定常量让这条检查可复现。
+const traceProbeUserAgent = "cloudflare-tools-trace-probe"
 
 func parseCFTrace(body string) cfTrace {
 	var trace cfTrace
@@ -71,6 +80,9 @@ func (t cfTrace) summary() string {
 	if t.IP != "" {
 		parts = append(parts, "client_ip="+t.IP)
 	}
+	if t.UAG != "" {
+		parts = append(parts, "uag="+t.UAG)
+	}
 	return strings.Join(parts, " ")
 }
 
@@ -94,6 +106,25 @@ func traceL7RejectReason(trace cfTrace) string {
 	}
 	if trace.Colo == "" {
 		return "trace 未返回 colo"
+	}
+	// 以下四条来自 cfnb 的 L7 硬条件。它们回答的是「这个应答是不是 CF 边缘
+	// 亲自生成的」：colo/ip 缺一不可，CF-RAY 是边缘签发的射线 ID，Server
+	// 必须是 cloudflare；uag 则验证边缘忠实回显了我们发出的 UA。
+	//
+	// 注意仍然不比较 trace.IP 与本机公网 IP：直连 CF 边缘时它本来就等于
+	// 本机出口，那条检查只适用于「反代 IP」场景（cfnb 的用途），照搬会
+	// 把所有正常候选判死。
+	if trace.IP == "" {
+		return "trace 未返回 ip"
+	}
+	if trace.UAG != traceProbeUserAgent {
+		return "trace uag 不匹配"
+	}
+	if trace.CFRay == "" {
+		return "trace 缺少 CF-RAY"
+	}
+	if !strings.Contains(strings.ToLower(trace.Server), "cloudflare") {
+		return "trace server 不是 cloudflare"
 	}
 	return ""
 }
@@ -161,7 +192,7 @@ func probeCFTrace(parent context.Context, ip string, port int, host string) (cfT
 		return trace, err
 	}
 	req.Host = host
-	req.Header.Set("User-Agent", "cloudflare-tools-trace-probe")
+	req.Header.Set("User-Agent", traceProbeUserAgent)
 	resp, err := client.Do(req)
 	if err != nil {
 		return trace, err
@@ -175,8 +206,10 @@ func probeCFTrace(parent context.Context, ip string, port int, host string) (cfT
 		return trace, fmt.Errorf("trace 状态码 %d", resp.StatusCode)
 	}
 	trace = parseCFTrace(string(body))
+	trace.CFRay = strings.TrimSpace(resp.Header.Get("CF-RAY"))
+	trace.Server = strings.TrimSpace(resp.Header.Get("Server"))
 	if trace.Colo == "" {
-		trace.Colo = coloFromCFRay(resp.Header.Get("CF-RAY"))
+		trace.Colo = coloFromCFRay(trace.CFRay)
 	}
 	return trace, nil
 }

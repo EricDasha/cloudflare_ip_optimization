@@ -42,6 +42,14 @@ func fetchSubscriptionBody(parent context.Context, converter, maintainer, token 
 	}
 	client := &http.Client{
 		Timeout: time.Duration(subFetchTimeout) * time.Second,
+		Transport: &http.Transport{
+			// 订阅转换器必须直连：NAS 上的 HTTP_PROXY 会把订阅流量
+			// 绕进本地代理，失败时还会污染来源账本。
+			Proxy:                 nil,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 20 * time.Second,
+			IdleConnTimeout:       30 * time.Second,
+		},
 		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
 			if !allowHTTPSRedirect(req, parsed) {
 				return http.ErrUseLastResponse

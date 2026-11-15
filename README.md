@@ -196,6 +196,8 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 | 变量 | 对应 cfnat 参数 | 默认 |
 |---|---|---|
 | `CFNAT_ADDR` | `-addr` | `0.0.0.0:1234` |
+| `CFNAT_ALT_ADDR` | `-addr2`（实验性第二入口，留空关闭） | 空 |
+| `CFNAT_ALT_PORT` | `-port2`（第二入口的目标端口，0 沿用 `-port`） | `0` |
 | `CFNAT_COLO` | `-colo` | 空 |
 | `CFNAT_DELAY` | `-delay` | `300` |
 | `CFNAT_DOMAIN` | `-domain` | `cloudflaremirrors.com/debian` |
@@ -210,6 +212,8 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 | `CFNAT_TASK` | `-task` | `100` |
 | `CFNAT_TLS` | `-tls` | `true` |
 | `CFNAT_CODE` | `-code` | `200` |
+
+多端口实验：设置 `CFNAT_ALT_ADDR=0.0.0.0:1235`、`CFNAT_ALT_PORT=8443` 后，同一个 cfnat 进程会多监听一个 1235，所有连接改拨目标的 8443 端口；1234 仍走 `CFNAT_PORT`。两个入口共享同一份池和粘性表，只用于对比「443 被干扰时换端口是否更稳」，不改变 `-ipnum/-num/-sticky` 语义。
 
 启用固定转发 IP 池后，CFnat 只在新 TCP 连接建立时按顺序轮换池中的 IP；一个前端连接从拨号到关闭始终绑定同一个上游，不会在数据面并发竞速，也不会主动连接自身监听口做协议健康检查。
 
@@ -295,7 +299,9 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 | `PROXY_VLESS_DATA_LATENCY_CEILING_MS` | 数据面延迟天花板，超线按「低于参考值」处理；0 关闭 | `1200` |
 | `PROXY_VLESS_SPEED_INTERVAL_MS` | 串行测速间隔，毫秒；0 关闭 | `250` |
 | `PROXY_VLESS_SPEED_EARLY_ABORT` | 观察 3 秒仍低于参考值 40% 时提前放弃测速 | `true` |
-| `PROXY_TRACE_L7` | 入池前用 `/cdn-cgi/trace` 复验 https/TLS/kex/colo；探测失败放行 | `true` |
+| `PROXY_TRACE_L7` | 入池前用 `/cdn-cgi/trace` 复验 https/TLS/kex/colo/ip/uag/CF-RAY/Server；探测失败放行 | `true` |
+| `PROXY_WS_PROBES` | shortlist 每个候选的 WS 握手次数（1–3），用于丢包/抖动排序 | `3` |
+| `PROXY_POOL_COLO_CAP` | 单机房池内软上限；0 关闭，跌破最小池时回填 | `3` |
 | `SING_BOX_BIN` | sing-box 二进制路径 | `/usr/local/bin/sing-box` |
 
 ### 劣质成员怎么被换掉

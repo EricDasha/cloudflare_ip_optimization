@@ -423,6 +423,9 @@ func disabledBenchSpeedURL(size int) string {
 	raw := strings.TrimSpace(env("PROXY_DISABLED_BENCH_SPEED_URL", ""))
 	if raw == "" {
 		raw = strings.TrimSpace(env("PROXY_VLESS_SPEED_URL", ""))
+		if customSpeedURLUnhealthy.Load() {
+			raw = ""
+		}
 	}
 	if raw == "" {
 		raw = disabledBenchSpeedURLDefault

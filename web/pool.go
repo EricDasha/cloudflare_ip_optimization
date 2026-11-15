@@ -75,11 +75,7 @@ func (a *app) saveProxyActivePool(pool proxyActivePool) error {
 		return err
 	}
 	path := filepath.Join(a.dataDir, proxyActivePoolFile)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeFileAtomic(path, data, 0600)
 }
 
 func (a *app) proxyActivePoolSnapshot() proxyActivePool {

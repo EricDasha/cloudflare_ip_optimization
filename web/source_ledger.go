@@ -210,11 +210,7 @@ func (a *app) saveSourceLedgerLocked() error {
 		return err
 	}
 	path := filepath.Join(a.dataDir, sourceLedgerFile)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := writeFileAtomic(path, data, 0600); err != nil {
 		return err
 	}
 	a.ledgerLastSave = time.Now()

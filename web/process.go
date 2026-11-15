@@ -351,7 +351,12 @@ func (p *managedProcess) stop() error {
 }
 
 type cfnatConfig struct {
-	Addr     string `json:"addr"`
+	Addr string `json:"addr"`
+	// AltAddr/AltPort 是实验性的第二个监听口：同一个进程、同一个 IPManager，
+	// 但用不同的目标端口。用于验证「换端口能否绕开对 443 的干扰」。
+	// 留空即关闭，不影响原有单端口行为。
+	AltAddr  string `json:"altAddr,omitempty"`
+	AltPort  int    `json:"altPort,omitempty"`
 	Code     int    `json:"code"`
 	Colo     string `json:"colo"`
 	Delay    int    `json:"delay"`
@@ -382,6 +387,8 @@ type cfdataConfig struct {
 func defaultCFnatConfig() cfnatConfig {
 	return cfnatConfig{
 		Addr:     env("CFNAT_ADDR", "0.0.0.0:1234"),
+		AltAddr:  env("CFNAT_ALT_ADDR", ""),
+		AltPort:  envInt("CFNAT_ALT_PORT", 0),
 		Code:     envInt("CFNAT_CODE", 200),
 		Colo:     env("CFNAT_COLO", ""),
 		Delay:    envInt("CFNAT_DELAY", 300),
@@ -404,6 +411,18 @@ func normalizeCFnat(c cfnatConfig) cfnatConfig {
 	d := defaultCFnatConfig()
 	if c.Addr == "" {
 		c.Addr = d.Addr
+	}
+	// 空配置（例如 /api/cfnat/start 不带 body）沿用环境变量里的第二入口，
+	// 否则一次手动启动就会把实验入口静默关掉。
+	if strings.TrimSpace(c.AltAddr) == "" {
+		c.AltAddr = strings.TrimSpace(d.AltAddr)
+		c.AltPort = d.AltPort
+	}
+	c.AltAddr = strings.TrimSpace(c.AltAddr)
+	if c.AltAddr == "" {
+		c.AltPort = 0
+	} else if c.AltPort < 0 || c.AltPort > 65535 {
+		c.AltPort = 0
 	}
 	// 越界一律回落默认值：只填 0 会让 -1/99999 之类透传到 cfnat
 	// 命令行（-port -1、-delay -1 拨号无超时、-code 99999 永不命中）。
@@ -452,7 +471,7 @@ func normalizeCFnat(c cfnatConfig) cfnatConfig {
 // Go 的 flag 包对 bool 旗标不消费后随参数，"-flag true" 会把 true 当位置参数并
 // 就此截断后续解析（历史遗留：-task/-tls 曾长期因此未被读入）。
 func (c cfnatConfig) args() []string {
-	return []string{
+	args := []string{
 		"-addr", c.Addr,
 		"-code", strconv.Itoa(c.Code),
 		"-colo", c.Colo,
@@ -470,6 +489,10 @@ func (c cfnatConfig) args() []string {
 		"-task", strconv.Itoa(c.Task),
 		"-tls=" + strconv.FormatBool(c.TLS),
 	}
+	if c.AltAddr != "" {
+		args = append(args, "-addr2", c.AltAddr, "-port2", strconv.Itoa(c.AltPort))
+	}
+	return args
 }
 
 // defaultCFdataConfig 把 cfdata 的扫描参数全部 env 化。

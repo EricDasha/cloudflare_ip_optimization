@@ -139,7 +139,7 @@ func ewmaMbpsFromSlices(slices []int64, sliceDur time.Duration) float64 {
 // 仍支持 PROXY_VLESS_SPEED_URL 覆盖；其中 {bytes} 会被替换为实际请求字节数。
 func vlessSpeedTestURL(size int) string {
 	candidate := strings.TrimSpace(env("PROXY_VLESS_SPEED_URL", ""))
-	if candidate == "" {
+	if candidate == "" || customSpeedURLUnhealthy.Load() {
 		candidate = disabledBenchSpeedURLDefault
 	}
 	if !strings.Contains(candidate, "{bytes}") {
