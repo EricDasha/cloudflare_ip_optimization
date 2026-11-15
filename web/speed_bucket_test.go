@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -217,5 +218,38 @@ func TestDropBelowReferenceIPsBackfillPrefersLowDataLatency(t *testing.T) {
 	want := []string{"198.51.100.2"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("backfill = %v, want %v", got, want)
+	}
+}
+
+// 最终名单里没测过速的成员必须补测；已经测过的、已经试过但失败的都不重试。
+func TestFillMissingSpeedMetricsProbesOnlyUnmeasuredFinalists(t *testing.T) {
+	t.Setenv("PROXY_VLESS_SPEED_INTERVAL_MS", "0")
+	t.Setenv("PROXY_VLESS_SPEED_PROBES", "10")
+	results := []proxyScanResult{
+		{IP: "198.51.100.1", DownloadMbps: 10},        // 已测
+		{IP: "198.51.100.2"},                          // 未测 → 补
+		{IP: "198.51.100.3", Note: "测速未完成（软门槛）：boom"}, // 试过失败 → 不重试
+	}
+	calls := 0
+	probe := func(context.Context, string, int, vlessProbeConfig, map[string]any) (vlessProbeMetrics, error) {
+		calls++
+		return vlessProbeMetrics{Mbps: 8, Duration: time.Second}, nil
+	}
+	passed := []string{"198.51.100.1", "198.51.100.2", "198.51.100.3"}
+	if !fillMissingSpeedMetrics(context.Background(), passed, results, 443, vlessProbeConfig{}, nil, probe) {
+		t.Fatal("expected one fill probe")
+	}
+	if calls != 1 {
+		t.Fatalf("probe calls = %d, want 1", calls)
+	}
+	if results[1].DownloadMbps != 8 {
+		t.Fatalf("filled Mbps = %v, want 8", results[1].DownloadMbps)
+	}
+	if !strings.HasPrefix(results[1].Note, "测速 8.00 Mbps") {
+		t.Fatalf("filled note = %q", results[1].Note)
+	}
+	// 第二轮没有可补的成员，必须返回 false，避免调用方无限重跑。
+	if fillMissingSpeedMetrics(context.Background(), passed, results, 443, vlessProbeConfig{}, nil, probe) {
+		t.Fatal("second fill should be a no-op")
 	}
 }

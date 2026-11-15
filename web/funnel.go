@@ -31,6 +31,37 @@ type proxyScanConfig struct {
 	TLS          bool     `json:"tls"`
 }
 
+// vlessSpeedProbeConfig 统一构造测速参数：预算、超时、及格线与提前放弃
+// 阈值必须由排序和补测共用，否则同一批候选会出现两套口径。
+func vlessSpeedProbeConfig(base vlessProbeConfig) (vlessProbeConfig, int) {
+	speedCfg := base
+	speedBytes := envInt("PROXY_VLESS_SPEED_BYTES", 2097152)
+	if speedBytes < 1048576 || speedBytes > 33554432 {
+		speedBytes = 2097152
+	}
+	speedTimeout := envInt("PROXY_VLESS_SPEED_TIMEOUT", 20)
+	if speedTimeout < 5 || speedTimeout > 120 {
+		speedTimeout = 20
+	}
+	speedCfg.TestURL = vlessSpeedTestURL(speedBytes)
+	speedCfg.ExpectedStatus = http.StatusOK
+	speedCfg.ReadLimit = int64(speedBytes)
+	speedCfg.MinBytes = int64(speedBytes)
+	speedCfg.Timeout = time.Duration(speedTimeout) * time.Second
+	// 提前放弃阈值取参考值的 40%：远低于及格线的线路，读满 2MB 只是
+	// 把时间预算耗光，结论不会变。观察期 3 秒由采样器负责。
+	if minMbps := vlessMinDownloadMbps(); envBool("PROXY_VLESS_SPEED_EARLY_ABORT", true) && minMbps > 0 {
+		speedCfg.EarlyAbortMbps = minMbps * 0.4
+	}
+	// 串行测速之间留间隔，避免连续 2MB 下载把同一条出口压出瞬时丢包。
+	// 默认 250ms，可用 PROXY_VLESS_SPEED_INTERVAL_MS 调整（0 关闭）。
+	intervalMs := envInt("PROXY_VLESS_SPEED_INTERVAL_MS", 250)
+	if intervalMs < 0 || intervalMs > 2000 {
+		intervalMs = 250
+	}
+	return speedCfg, intervalMs
+}
+
 func rankVLESSPassesBySpeed(parent context.Context, passed []string, results []proxyScanResult, port int, base vlessProbeConfig, template map[string]any) []string {
 	return rankVLESSPassesBySpeedWithProbe(parent, passed, results, port, base, template, probeVLESSCandidateMetrics)
 }
@@ -47,34 +78,10 @@ func rankVLESSPassesBySpeedWithProbe(
 	if len(passed) == 0 {
 		return passed
 	}
-	speedCfg := base
-	speedBytes := envInt("PROXY_VLESS_SPEED_BYTES", 2097152)
-	if speedBytes < 1048576 || speedBytes > 33554432 {
-		speedBytes = 2097152
-	}
-	speedTimeout := envInt("PROXY_VLESS_SPEED_TIMEOUT", 20)
-	if speedTimeout < 5 || speedTimeout > 120 {
-		speedTimeout = 20
-	}
-	speedCfg.TestURL = vlessSpeedTestURL(speedBytes)
-	speedCfg.ExpectedStatus = http.StatusOK
-	speedCfg.ReadLimit = int64(speedBytes)
-	speedCfg.MinBytes = int64(speedBytes)
-	speedCfg.Timeout = time.Duration(speedTimeout) * time.Second
+	speedCfg, intervalMs := vlessSpeedProbeConfig(base)
 	times := make(map[string]int64, len(passed))
 	speeds := make(map[string]float64, len(passed))
 	minMbps := vlessMinDownloadMbps()
-	// 提前放弃阈值取参考值的 40%：远低于及格线的线路，读满 2MB 只是
-	// 把时间预算耗光，结论不会变。观察期 3 秒由采样器负责。
-	if envBool("PROXY_VLESS_SPEED_EARLY_ABORT", true) && minMbps > 0 {
-		speedCfg.EarlyAbortMbps = minMbps * 0.4
-	}
-	// 串行测速之间留间隔，避免连续 2MB 下载把同一条出口压出瞬时丢包。
-	// 默认 250ms，可用 PROXY_VLESS_SPEED_INTERVAL_MS 调整（0 关闭）。
-	intervalMs := envInt("PROXY_VLESS_SPEED_INTERVAL_MS", 250)
-	if intervalMs < 0 || intervalMs > 2000 {
-		intervalMs = 250
-	}
 	speedInterval := time.Duration(intervalMs) * time.Millisecond
 	// 测速只对前 maxSpeedProbes 个候选执行：终审池上限本来就只有个位数，
 	// 没必要为排序把每个候选都跑一遍 2MB 下载。上限默认与池宽对齐，
@@ -170,6 +177,75 @@ func rankVLESSPassesBySpeedWithProbe(
 		return proxyResultLatency(results, passed[i]) < proxyResultLatency(results, passed[j])
 	})
 	return passed
+}
+
+// fillMissingSpeedMetrics 给已经进入最终名单、但还没测过速的成员补一次。
+//
+// 排序阶段只测前 maxVLESSSpeedProbes 个候选，后面的候选仍可能因为片区
+// 轮转、延迟闸或补位进池。没有吞吐证据的成员只能靠数据面延迟兜底，
+// 容易把「延迟正常但带宽很窄」的线路放进来。补测只覆盖最终名单，
+// 不扩大整轮扫描的测速总量。
+//
+// 返回是否真的补测过，调用方据此决定要不要重新跑一次劣质剔除。
+func fillMissingSpeedMetrics(parent context.Context, passed []string, results []proxyScanResult, port int, base vlessProbeConfig, template map[string]any, probe func(context.Context, string, int, vlessProbeConfig, map[string]any) (vlessProbeMetrics, error)) bool {
+	speedCfg, intervalMs := vlessSpeedProbeConfig(base)
+	speedInterval := time.Duration(intervalMs) * time.Millisecond
+	minMbps := vlessMinDownloadMbps()
+	limit := maxVLESSSpeedProbes()
+	probed := 0
+	for _, ip := range passed {
+		if probed >= limit {
+			break
+		}
+		result := proxyScanResultForIP(results, ip)
+		if result == nil || result.DownloadMbps > 0 {
+			continue
+		}
+		// Note 以「测速」开头说明已经试过（成功记了成绩，失败记了原因）。
+		// 失败不重试：同一条出口连续测两次不会变好，只会多耗流量。
+		if strings.HasPrefix(result.Note, "测速") {
+			continue
+		}
+		if probed > 0 && speedInterval > 0 {
+			select {
+			case <-parent.Done():
+				return probed > 0
+			case <-time.After(speedInterval):
+			}
+		}
+		ctx, cancel := context.WithTimeout(parent, speedCfg.Timeout)
+		metrics, err := probe(ctx, ip, port, speedCfg, template)
+		cancel()
+		if err == nil {
+			result.DownloadMbps = metrics.Mbps
+			if metrics.Mbps < minMbps {
+				result.Note = fmt.Sprintf("测速 %.2f Mbps 低于参考值 %.2f Mbps（补测，仅影响排序）", metrics.Mbps, minMbps)
+				if metrics.EarlyAbort {
+					result.Note += "，已提前放弃"
+				}
+			} else if metrics.EarlyAbort {
+				result.Note = "测速提前放弃（补测，样本已足）"
+			} else {
+				result.Note = fmt.Sprintf("测速 %.2f Mbps（补测）", metrics.Mbps)
+			}
+		} else {
+			result.Note = "测速未完成（补测，仅影响排序）：" + err.Error()
+		}
+		probed++
+	}
+	if probed > 0 {
+		log.Printf("vless speed fill: probed %d unmeasured finalists", probed)
+	}
+	return probed > 0
+}
+
+func proxyScanResultForIP(results []proxyScanResult, ip string) *proxyScanResult {
+	for i := range results {
+		if results[i].IP == ip {
+			return &results[i]
+		}
+	}
+	return nil
 }
 
 // vlessMinDownloadMbps 是「及格线」：低于它的 IP 排到未测成员之后，
@@ -701,6 +777,15 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 		// 名单剔除。未测成员不受影响（未知不等于差）；剔除会跌破最小池时
 		// 按「延迟正常优先、吞吐次之」补足。
 		passed = dropBelowReferenceIPs(passed, results, cfg.MinPool, vlessMinDownloadMbps())
+		// 排序阶段只测前 N 个；片区轮转/延迟闸/补位可能把未测成员带进
+		// 最终名单。给这些成员补一次吞吐证据，再按同一口径剔除一次，
+		// 避免「没有成绩」被当成「没有问题」。
+		for round := 0; round < 2; round++ {
+			if !fillMissingSpeedMetrics(runCtx, passed, results, cfg.Port, cfg.VLESS, vlessTemplate, probeVLESSCandidateMetrics) {
+				break
+			}
+			passed = dropBelowReferenceIPs(passed, results, cfg.MinPool, vlessMinDownloadMbps())
+		}
 	} else {
 		for _, result := range results {
 			if result.Error == "" {

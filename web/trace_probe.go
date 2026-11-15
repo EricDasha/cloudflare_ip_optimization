@@ -266,13 +266,24 @@ func filterTraceL7(parent context.Context, passed []string, results []proxyScanR
 
 	kept := make([]string, 0, len(passed))
 	rejected := make([]string, 0)
+	unverified := 0
 	for _, outcome := range outcomes {
 		if outcome.err != nil {
+			unverified++
 			kept = append(kept, outcome.ip)
 			continue
 		}
 		if reason := traceL7RejectReason(outcome.trace); reason != "" {
 			rejected = append(rejected, fmt.Sprintf("%s(%s)", outcome.ip, reason))
+			for i := range results {
+				if results[i].IP == outcome.ip {
+					if results[i].Colo == "" {
+						results[i].Colo = outcome.trace.Colo
+					}
+					results[i].Note = "trace L7 拒绝: " + reason
+					break
+				}
+			}
 			continue
 		}
 		kept = append(kept, outcome.ip)
@@ -290,5 +301,8 @@ func filterTraceL7(parent context.Context, passed []string, results []proxyScanR
 	if len(rejected) > 0 {
 		log.Printf("proxy auto apply: trace L7 rejected %d finalists: %v", len(rejected), rejected)
 	}
+	// 即使零拒绝也留一行：否则「L7 跑了但全过」和「L7 根本没跑」在日志里
+	// 长得一模一样，线上无法判断闸门是否生效。
+	log.Printf("proxy auto apply: trace L7 checked %d finalists (%d rejected, %d unverified)", len(passed), len(rejected), unverified)
 	return kept
 }
