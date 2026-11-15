@@ -188,6 +188,9 @@ var optimizeDeps = optimizeDependencies{
 // 刷新失败不直接终止：手里已有的候选快照依然可以重考，这比「因为一个源
 // 拉不到就什么都不做」有用。真正没得跑的情况只有「候选为空」。
 func (a *app) runOptimize(parent context.Context) (report optimizeReport) {
+	// 用户手动优选是最高顺位：登记后取消正在跑的后台扫描，后台在检查点让位。
+	done := a.beginManualScan()
+	defer done()
 	report = optimizeReport{StartedAt: time.Now()}
 	before := optimizeDeps.snapshot(a)
 	report.BeforeIPs = len(before.IPs)

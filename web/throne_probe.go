@@ -257,7 +257,14 @@ func (a *app) throneNextDelay() time.Duration {
 //
 // 常态轮次摸全池；存在「快速复检」待办时只摸那几个嫌疑成员——整池每 2 分钟
 // 扫一遍既没必要，也会让高频节拍变成真实负载。
-func (a *app) probeThroneOnce(parent context.Context) {
+func (a *app) probeThroneOnce(_ context.Context) {
+	if a.manualScanPending() {
+		return
+	}
+	bgCtx, ok := a.backgroundScanContext()
+	if !ok {
+		return
+	}
 	current := a.proxyActivePoolSnapshot()
 	// 只摸真正参与转发的成员。被用户关闭的成员不进 -fixed，它们由
 	// disabled_bench.go 单独体检（延迟 + 下载速度）并决定去留；让这条链
@@ -285,9 +292,14 @@ func (a *app) probeThroneOnce(parent context.Context) {
 	if need := time.Duration(len(targets)/cfg.Concurrency+1) * time.Duration(cfg.MaxLatency) * time.Millisecond; need > budget {
 		budget = need
 	}
-	ctx, cancel := context.WithTimeout(parent, budget)
+	ctx, cancel := context.WithTimeout(bgCtx, budget)
 	defer cancel()
 	results := scanProxyWebSockets(ctx, targets, cfg)
+	if ctx.Err() != nil {
+		// 用户操作抢占导致的取消不能记成成员失败，否则会把健康成员误判死。
+		log.Printf("throne probe canceled by manual operation: %v", ctx.Err())
+		return
+	}
 	now := time.Now()
 	a.recordThroneProbeResults(results, now)
 	a.reapThroneMembers(current, now)
@@ -664,6 +676,13 @@ func (a *app) findThroneReplacements(victims []string, current proxyActivePool) 
 		return nil, nil, false
 	}
 	defer a.proxyScanMu.Unlock()
+	if a.manualScanPending() {
+		return nil, nil, false
+	}
+	bgCtx, ok := a.backgroundScanContext()
+	if !ok {
+		return nil, nil, false
+	}
 	defer a.noteScanActivity("throne", "替补考试")()
 	snapshot := a.proxyCandidateSnapshot()
 	inPool := make(map[string]bool, len(current.IPs))
@@ -691,9 +710,12 @@ func (a *app) findThroneReplacements(victims []string, current proxyActivePool) 
 	if scanCfg.MaxLatency < 500 {
 		scanCfg.MaxLatency = 500
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(bgCtx, 90*time.Second)
 	defer cancel()
 	results := scanProxyWebSockets(ctx, pending, scanCfg)
+	if ctx.Err() != nil {
+		return nil, nil, false
+	}
 	applyCandidateSourcePriority(results, snapshot.SourceByIP)
 	fast := make([]string, 0, need)
 	for _, result := range results {

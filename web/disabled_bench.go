@@ -343,10 +343,17 @@ func (a *app) probeDisabledBenchOnce(parent context.Context) (deferred bool) {
 
 // probeDisabledWebSockets 对一组 IP 做 WS 101 握手验活。返回结果表与
 // 「是否真的跑成了」——扫描锁被占时返回 false，调用方据此延后而不是误判。
-func (a *app) probeDisabledWebSockets(parent context.Context, targets []string, cfg proxyAutoConfig) (map[string]proxyScanResult, bool) {
+func (a *app) probeDisabledWebSockets(_ context.Context, targets []string, cfg proxyAutoConfig) (map[string]proxyScanResult, bool) {
 	out := make(map[string]proxyScanResult, len(targets))
 	if len(targets) == 0 {
 		return out, true
+	}
+	if a.manualScanPending() {
+		return out, false
+	}
+	bgCtx, ok := a.backgroundScanContext()
+	if !ok {
+		return out, false
 	}
 	// 全量重挑/补位会把 proxyScanMu 攥住一到几分钟，20 秒的窗口经常整段错过。
 	// 体检本身只需要几秒，等久一点比反复撞墙划算：90 秒足以熬过一轮考试。
@@ -364,10 +371,14 @@ func (a *app) probeDisabledWebSockets(parent context.Context, targets []string, 
 	if slow := int(throneProbeSlowMs()) + 1500; slow > scanCfg.MaxLatency {
 		scanCfg.MaxLatency = slow
 	}
-	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
+	ctx, cancel := context.WithTimeout(bgCtx, 45*time.Second)
 	defer cancel()
 	for _, r := range scanProxyWebSockets(ctx, targets, scanCfg) {
 		out[r.IP] = r
+	}
+	if ctx.Err() != nil {
+		log.Printf("disabled bench canceled by manual operation: %v", ctx.Err())
+		return out, false
 	}
 	return out, true
 }
@@ -613,6 +624,13 @@ func (a *app) findDisabledBenchReplacements(victims []string, victimStats map[st
 	if len(pending) == 0 {
 		return swaps, reasons, nil
 	}
+	if a.manualScanPending() {
+		return swaps, reasons, nil
+	}
+	bgCtx, ok := a.backgroundScanContext()
+	if !ok {
+		return swaps, reasons, nil
+	}
 	if !lockTimeout(&a.proxyScanMu, 60*time.Second) {
 		log.Printf("disabled bench: replacement scan busy, keeping %d weak members", len(victims))
 		return swaps, reasons, nil
@@ -625,10 +643,15 @@ func (a *app) findDisabledBenchReplacements(victims []string, victimStats map[st
 	if scanCfg.MaxLatency < 500 {
 		scanCfg.MaxLatency = 500
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(bgCtx, 45*time.Second)
 	results := scanProxyWebSockets(ctx, pending, scanCfg)
+	canceled := bgCtx.Err() != nil
 	cancel()
 	a.proxyScanMu.Unlock()
+	if canceled {
+		log.Printf("disabled bench replacement scan canceled by manual operation: %v", bgCtx.Err())
+		return swaps, reasons, nil
+	}
 	applyCandidateSourcePriority(results, snapshot.SourceByIP)
 
 	type candidate struct {
@@ -661,7 +684,10 @@ func (a *app) findDisabledBenchReplacements(victims []string, victimStats map[st
 			return
 		}
 		speedProbes++
-		probeCtx, probeCancel := context.WithTimeout(context.Background(), speedCfg.Timeout)
+		if bgCtx.Err() != nil {
+			return
+		}
+		probeCtx, probeCancel := context.WithTimeout(bgCtx, speedCfg.Timeout)
 		metrics, err := probeVLESSCandidateMetrics(probeCtx, ip, cfg.Port, speedCfg, template)
 		probeCancel()
 		if err != nil {
@@ -706,6 +732,10 @@ func (a *app) findDisabledBenchReplacements(victims []string, victimStats map[st
 		swaps[victim] = candidate
 		reasons[victim] = reason
 		used[candidate] = true
+	}
+	if bgCtx.Err() != nil {
+		log.Printf("disabled bench replacement scan canceled by manual operation: %v", bgCtx.Err())
+		return make(map[string]string), make(map[string]string), nil
 	}
 	return swaps, reasons, resultByIP
 }

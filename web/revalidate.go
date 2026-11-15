@@ -224,6 +224,9 @@ var revalidateDeps = revalidateDependencies{
 // 抢席位放在调用方而不是这里，是为了让 HTTP 入口在起协程之前就能分辨
 // 「开跑了」和「已有一轮在跑」——否则用户连点两次都收到成功，第二次静默作废。
 func (a *app) revalidateActivePool(parent context.Context) (report revalidateReport, err error) {
+	// 用户手动验证同样是最高顺位：先取消后台扫描再排队等锁。
+	done := a.beginManualScan()
+	defer done()
 	current := a.proxyActivePoolSnapshot()
 	report = revalidateReport{StartedAt: time.Now()}
 	// 无论从哪条路返回都要把席位还回去，否则页面会永远显示「验证中」。

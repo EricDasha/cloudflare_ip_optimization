@@ -1,56 +1,58 @@
 package main
 
 import (
-	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
+	"time"
 )
 
-// 漏斗考试期间不能放行踢人：漏斗用的是开考前复制的候选快照，被踢的 IP
-// 会照样通过考试、在落池时被写回来，用户的操作被静默撤销。
-func TestKickRefusedWhilePoolScanRunning(t *testing.T) {
+// 用户操作是最高顺位：后台扫描持锁时不能立刻 409，而是先取消后台扫描、
+// 排队等锁；锁一释放就继续执行，不能把用户挡在门外。
+func TestManualScanLockWaitsInsteadOfRejecting(t *testing.T) {
 	a := &app{}
 	a.proxyScanMu.Lock()
-	defer a.proxyScanMu.Unlock()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		a.proxyScanMu.Unlock()
+	}()
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/cfnat/active/kick",
-		strings.NewReader(`{"ip":"1.2.3.4"}`))
-	a.handleActiveKick(rec, req)
-
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("扫描在跑时踢人 = %d, want 409", rec.Code)
+	started := time.Now()
+	release, ok := a.lockScanForManual(rec)
+	if !ok {
+		t.Fatalf("用户操作被拒绝 = %d, want 排队后执行: %s", rec.Code, rec.Body.String())
+	}
+	defer release()
+	if elapsed := time.Since(started); elapsed < 50*time.Millisecond {
+		t.Fatalf("用户操作没有等待后台扫描退出，耗时 %v", elapsed)
 	}
 }
 
-// 顶替/勾选/扶持与踢人同一口径：漏斗考试期间放行它们，刚做的手动操作
-// 会在漏斗落池时被开考前的旧快照整批覆盖（顶替的 IP 直接丢、锁位被清）。
-func TestManualPoolOpsRefusedWhilePoolScanRunning(t *testing.T) {
-	cases := []struct {
-		name    string
-		path    string
-		body    string
-		handler func(a *app, w http.ResponseWriter, r *http.Request)
-	}{
-		{"顶替", "/api/cfnat/proxy-promote", `{"ip":"1.2.3.4"}`,
-			func(a *app, w http.ResponseWriter, r *http.Request) { a.handleProxyPromote(w, r) }},
-		{"勾选", "/api/cfnat/active/select", `{"enabled":["1.2.3.4"],"priority":[],"lock":false}`,
-			func(a *app, w http.ResponseWriter, r *http.Request) { a.handleActiveSelect(w, r) }},
-		{"扶持", "/api/cfnat/active/endorse", `{"members":"1.2.3.4"}`,
-			func(a *app, w http.ResponseWriter, r *http.Request) { a.handleActiveEndorse(w, r) }},
+// 用户操作一开始，后台扫描的上下文必须被取消；后台据此在检查点让位。
+func TestManualScanCancelsBackgroundContext(t *testing.T) {
+	a := &app{}
+	bgCtx, ok := a.backgroundScanContext()
+	if !ok {
+		t.Fatal("后台上下文应可创建")
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			a := &app{}
-			a.proxyScanMu.Lock()
-			defer a.proxyScanMu.Unlock()
-			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
-			tc.handler(a, rec, req)
-			if rec.Code != http.StatusConflict {
-				t.Fatalf("扫描在跑时%s = %d, want 409", tc.name, rec.Code)
-			}
-		})
+	if bgCtx.Err() != nil {
+		t.Fatal("初始后台上下文不应已取消")
+	}
+
+	done := a.beginManualScan()
+	select {
+	case <-bgCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("用户操作开始后后台上下文未被取消")
+	}
+	if !a.manualScanPending() {
+		t.Fatal("用户操作期间 manualScanPending 应为 true")
+	}
+	done()
+	if a.manualScanPending() {
+		t.Fatal("用户操作结束后 manualScanPending 应为 false")
+	}
+	if _, ok := a.backgroundScanContext(); !ok {
+		t.Fatal("用户操作结束后后台上下文应可重建")
 	}
 }

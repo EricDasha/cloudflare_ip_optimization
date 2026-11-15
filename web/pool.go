@@ -1050,6 +1050,15 @@ func (a *app) refillPoolAfterKick() {
 		return
 	}
 	defer a.proxyScanMu.Unlock()
+	if a.manualScanPending() {
+		log.Printf("kick refill skipped: manual operation pending")
+		return
+	}
+	bgCtx, ok := a.backgroundScanContext()
+	if !ok {
+		log.Printf("kick refill skipped: manual operation pending")
+		return
+	}
 	defer a.noteScanActivity("refill", "补位考试")()
 	current := a.proxyActivePoolSnapshot()
 	// 缺口按实际转发的成员算：Disabled 成员占着 IPs 名额却不转发，
@@ -1082,7 +1091,7 @@ func (a *app) refillPoolAfterKick() {
 	if len(pending) == 0 {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	ctx, cancel := context.WithTimeout(bgCtx, 6*time.Minute)
 	defer cancel()
 	results := scanProxyWebSockets(ctx, pending, cfg)
 	applyCandidateSourcePriority(results, snapshot.SourceByIP)
@@ -1154,6 +1163,10 @@ func (a *app) refillPoolAfterKick() {
 	}
 	if len(added) == 0 {
 		log.Printf("kick refill: no new passes (%d tested), pool stays %d IPs", len(pending), len(current.IPs))
+		return
+	}
+	if ctx.Err() != nil {
+		log.Printf("kick refill canceled before commit: %v", ctx.Err())
 		return
 	}
 	now := time.Now()

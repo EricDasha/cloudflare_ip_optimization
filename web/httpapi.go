@@ -481,12 +481,12 @@ func (a *app) handleProxyPromote(w http.ResponseWriter, r *http.Request) {
 	// 先占扫描锁再拿换池锁，与踢人同模式：后台漏斗持 proxyScanMu 跑
 	// 几分钟、最后才拿 cfnatCtlMu 落池，池是开考前的快照；这里若只拿
 	// 换池锁，刚做的顶替会在漏斗落池时被旧快照整批覆盖。锁序全局规范
-	// refresh → proxyScan → cfnatCtl。
-	if !a.proxyScanMu.TryLock() {
-		http.Error(w, "优选或补位正在运行，等它结束再顶替", http.StatusConflict)
+	// refresh → proxyScan → cfnatCtl。用户操作优先：先取消后台扫描再排队。
+	releaseScan, ok := a.lockScanForManual(w)
+	if !ok {
 		return
 	}
-	defer a.proxyScanMu.Unlock()
+	defer releaseScan()
 	// 只拿换池锁；与 kick 同链，等待而非立即拒绝。
 	if !lockTimeout(&a.cfnatCtlMu, 15*time.Second) {
 		http.Error(w, "换池操作正在运行，请稍后再试", http.StatusTooManyRequests)
@@ -598,13 +598,18 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 	// 与全量重挑/补位互斥：它们只持 proxyScanMu 跑几分钟考试，最后才拿
 	// cfnatCtlMu 落池。这期间若放行踢人，漏斗用的是开考前复制的候选快照，
 	// 被踢的 IP 会照样通过考试、在落池时被写回来——用户的操作被静默撤销。
-	// 用 TryLock 立即拒绝而非排队：踢人点下去要立刻有结果，排在几分钟的
-	// 考试后面比报错更难理解。锁序仍是 proxyScanMu → cfnatCtlMu。
-	if !a.proxyScanMu.TryLock() {
-		http.Error(w, scanBusyMessageOrDefault(a.scanActivitySnapshot(), "优选或补位正在运行，等它结束再操作"), http.StatusConflict)
+	// 用户操作优先：先取消后台扫描，再排队等它退出，而不是立刻 409。
+	// 锁序仍是 proxyScanMu → cfnatCtlMu。
+	releaseScan, ok := a.lockScanForManual(w)
+	if !ok {
 		return
 	}
-	defer a.proxyScanMu.Unlock()
+	released := false
+	defer func() {
+		if !released {
+			releaseScan()
+		}
+	}()
 	// 只拿换池锁（cfnatCtlMu），锁序全局规范 refresh → proxyScan → cfnatCtl，
 	// 绝不交叉持锁。等待而非立即拒绝——用户操作不排队吃闭门羹。
 	if !lockTimeout(&a.cfnatCtlMu, 15*time.Second) {
@@ -679,6 +684,10 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "kicked": member, "remaining": len(newIPs), "ips": newIPs})
 	// 自动补位：只补 IP、且确有缺口时才开考；踢域名不该触发只考 IP 的补位。
 	if isIP && refillGap(pool, defaultProxyAutoConfig().PoolSize) > 0 {
+		// 补位是踢人的后续动作，不该被刚刚这次手动操作自己的优先级标记挡住。
+		// 先释放手动标记与扫描锁，再让补位按后台任务排队。
+		released = true
+		releaseScan()
 		go a.refillPoolAfterKick()
 	}
 }
@@ -699,12 +708,12 @@ func (a *app) handleSegmentToggle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 与踢人同一把锁、同一套理由：全量重挑/补位拿的是开考前复制的候选快照，
-	// 放行会让落池那一步把刚关掉的段又写回来。
-	if !a.proxyScanMu.TryLock() {
-		http.Error(w, scanBusyMessageOrDefault(a.scanActivitySnapshot(), "优选或补位正在运行，等它结束再操作"), http.StatusConflict)
+	// 放行会让落池那一步把刚关掉的段又写回来。用户操作优先，先取消后台扫描。
+	releaseScan, ok := a.lockScanForManual(w)
+	if !ok {
 		return
 	}
-	defer a.proxyScanMu.Unlock()
+	defer releaseScan()
 	if !lockTimeout(&a.cfnatCtlMu, 15*time.Second) {
 		http.Error(w, "换池操作正在运行，请稍后再试", http.StatusTooManyRequests)
 		return

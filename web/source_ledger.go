@@ -439,6 +439,9 @@ func (a *app) recordSourceContent(key, channel, kind string, values []string, fe
 	now := time.Now()
 	fingerprint := fingerprintList(values)
 	a.ledgerMu.Lock()
+	if a.ledger.Sources == nil {
+		a.ledger.Sources = make(map[string]*sourceLedgerStat)
+	}
 	stat, ok := a.ledger.Sources[key]
 	if !ok {
 		stat = &sourceLedgerStat{Key: key, Channel: channel, Kind: kind}

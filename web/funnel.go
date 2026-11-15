@@ -485,7 +485,19 @@ func degradedFromWSResults(results []proxyScanResult, existing []string, want in
 // 调用方不能用 UpdatedAt 变化来判断：在位探针可能在漏斗跑的几分钟里剔人，
 // 那样会把探针的动作算成优选的战果，甚至把失败报成成功。
 func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied bool) {
+	// 后台漏斗与用户操作共用一把扫描锁；后台拿到的上下文可被用户操作取消。
 	// 手动「立即优选」会经此路径：排队等待正在跑的考试，而不是拒绝。
+	runCtx := parent
+	if !manual {
+		bgCtx, ok := a.backgroundScanContext()
+		if !ok {
+			log.Printf("proxy auto apply skipped: manual operation pending")
+			return false
+		}
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(bgCtx, autoApplyBudget)
+		defer cancel()
+	}
 	if !lockTimeout(&a.proxyScanMu, 60*time.Second) {
 		log.Printf("proxy auto apply skipped: another proxy scan still running after 60s")
 		a.setProxyPoolError("已有优选在运行（等待 60 秒未结束），请稍后再试", nil)
@@ -557,7 +569,7 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 			TLS:         true,
 		}
 		// scanProxyIPs 返回按 (通过, 延迟升序) 排列；直接取延迟达标的前 N。
-		prescreen := scanProxyIPs(parent, candidates, prescreenCfg)
+		prescreen := scanProxyIPs(runCtx, candidates, prescreenCfg)
 		shortlist = make([]string, 0, shortlistSize)
 		for _, result := range prescreen {
 			if result.Error != "" {
@@ -570,16 +582,20 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 		}
 		log.Printf("tier3 prescreen: %d candidates -> %d shortlist (rtt<=%dms)", len(candidates), len(shortlist), cfg.MaxLatency)
 	}
+	if !manual && runCtx.Err() != nil {
+		log.Printf("proxy auto apply canceled before WS stage: %v", runCtx.Err())
+		return false
+	}
 	a.setScanActivityPhase(kind, "WS 精筛", 0, len(shortlist))
-	results := scanProxyWebSockets(parent, shortlist, cfg)
+	results := scanProxyWebSockets(runCtx, shortlist, cfg)
 	applyCandidateSourcePriority(results, snapshot.SourceByIP)
 	passed := make([]string, 0, cfg.PoolSize)
 	finalStage := "WS"
 	if cfg.VLESS.Enabled {
 		finalStage = "VLESS"
 		a.setScanActivityPhase(kind, "VLESS 终审", 0, len(results))
-		passed = probeVLESSPool(parent, results, cfg.Port, min(cfg.VLESS.MaxCandidates, len(results)), cfg.VLESS, vlessTemplate)
-		passed = rankVLESSPassesBySpeed(parent, passed, results, cfg.Port, cfg.VLESS, vlessTemplate)
+		passed = probeVLESSPool(runCtx, results, cfg.Port, min(cfg.VLESS.MaxCandidates, len(results)), cfg.VLESS, vlessTemplate)
+		passed = rankVLESSPassesBySpeed(runCtx, passed, results, cfg.Port, cfg.VLESS, vlessTemplate)
 		// 机房软偏好：Mbps 序排定后分区重排，截断时充裕取偏好、匮乏放行。
 		passed = orderPassedByColoPreference(passed, results, poolColoPreferenceSet())
 		// 片区降权：整片高失败率的段排到末尾（不淘汰，候选不够照样用）。
@@ -669,6 +685,11 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 			log.Printf("proxy pool CRITICAL: 建池失败且旧池全灭（0/%d 可达），需要人工介入", total)
 			return
 		}
+	}
+	if !manual && runCtx.Err() != nil {
+		// 用户操作已抢占：绝不能用开考前的快照把用户刚做的改动覆盖回去。
+		log.Printf("proxy auto apply canceled before commit: %v", runCtx.Err())
+		return false
 	}
 	current := a.proxyActivePoolSnapshot()
 	// 锁位模式是用户亲手点名「只转发这些」，自动重挑无权改动。

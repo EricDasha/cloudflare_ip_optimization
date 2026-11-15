@@ -144,6 +144,9 @@ type app struct {
 	// 撞锁时只说「优选或补位正在运行」等于什么都没说，见 scan_activity.go。
 	scanActMu sync.Mutex
 	scanAct   scanActivity
+	// scanPriority 让用户操作优先于后台探测：用户一开始操作就取消后台扫描，
+	// 后台在落池前必须检查上下文，避免把旧快照写回去。见 scan_priority.go。
+	scanPriority manualScanPriority
 }
 
 func main() {
@@ -432,7 +435,7 @@ func (a *app) cfdataIPListStale() bool {
 // runQualitySchedulerProbe 后台优选主循环：
 // 从 Candidate Pool 取一批 IP → WS/VLESS 测试 → 观察结果 → 决定是否换池。
 // 此函数是三池模型的核心执行器。
-func (a *app) runQualitySchedulerProbe(parent context.Context) {
+func (a *app) runQualitySchedulerProbe(_ context.Context) {
 	if a.quality == nil {
 		return
 	}
@@ -446,6 +449,14 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 		return
 	}
 	defer a.proxyScanMu.Unlock()
+	if a.manualScanPending() {
+		// 用户操作优先：本轮后台体检直接让位，下一轮再来。
+		return
+	}
+	bgCtx, ok := a.backgroundScanContext()
+	if !ok {
+		return
+	}
 	defer a.noteScanActivity("background", "在位体检与替补")()
 	cfg := defaultProxyAutoConfig()
 	cfg.Concurrency = 4
@@ -456,9 +467,13 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	// the health gate.
 	healthNow := time.Now()
 	if len(current.IPs) > 0 {
-		healthCtx, healthCancel := context.WithTimeout(parent, 5*time.Second)
+		healthCtx, healthCancel := context.WithTimeout(bgCtx, 5*time.Second)
 		activeResults := scanProxyWebSockets(healthCtx, current.IPs, cfg)
 		healthCancel()
+		if bgCtx.Err() != nil {
+			// 用户操作抢占导致的取消不能记成在位成员失败。
+			return
+		}
 		for _, result := range activeResults {
 			ok := result.Error == ""
 			a.recordActiveHealth(result.IP, ok, healthNow)
@@ -498,9 +513,12 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	// An empty batch is still a valid health-only scheduler round.
 
 	// 第一阶段：WS/TLS 初筛（低成本）
-	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
+	ctx, cancel := context.WithTimeout(bgCtx, 45*time.Second)
 	defer cancel()
 	results := scanProxyWebSockets(ctx, batch, cfg)
+	if bgCtx.Err() != nil {
+		return
+	}
 	applyCandidateSourcePriority(results, snapshot.SourceByIP)
 	now := time.Now()
 
@@ -517,10 +535,13 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 		// 后面的尝试瞬间报 context 错误——不是 IP 死了，是预算没了，
 		// 降级逻辑（改动 B）还会把这些假超时当真失败采纳。与漏斗同款：
 		// 终审单独开一份 10 分钟预算，探测量不变，只是让它跑完。
-		vlessCtx, vlessCancel := newAutoApplyContext()
+		vlessCtx, vlessCancel := context.WithTimeout(bgCtx, autoApplyBudget)
 		defer vlessCancel()
 		passed = probeVLESSPool(vlessCtx, results, cfg.Port, len(results), cfg.VLESS, template)
 		passed = rankVLESSPassesBySpeed(vlessCtx, passed, results, cfg.Port, cfg.VLESS, template)
+		if bgCtx.Err() != nil {
+			return
+		}
 	} else {
 		for _, result := range results {
 			if result.Error == "" {
@@ -598,6 +619,14 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 }
 
 func (a *app) refreshAndApplyProxyPool(ctx context.Context) {
+	if a.manualScanPending() {
+		return
+	}
+	bgCtx, ok := a.backgroundScanContext()
+	if !ok {
+		return
+	}
+	ctx = bgCtx
 	// CFdata 由独立后台扫描器（runCFdataBackgroundScan）驱动——本循环只读取
 	// 它产出的 result.csv，不启动扫描。两条链路解耦，互不阻塞。
 	ok, err := a.refreshProxyCandidates(ctx)

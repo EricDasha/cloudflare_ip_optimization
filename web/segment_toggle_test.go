@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 只有整段都被关掉才算「已关闭」。段里还剩一个成员在转发就必须算开着，
@@ -59,19 +60,29 @@ func TestScanActivityPhaseIgnoredWithoutHolder(t *testing.T) {
 	}
 }
 
-// 扫描在跑时关段必须被拒绝：全量重挑拿的是开考前的候选快照，放行会让
-// 落池那一步把刚关掉的段又写回来。
-func TestSegmentToggleRefusedWhilePoolScanRunning(t *testing.T) {
+// 扫描在跑时关段不再被 409 挡回：用户操作先取消后台扫描，再排队等锁，
+// 锁一释放就继续。这里用空池验证它确实等到了锁，而不是立刻拒绝。
+func TestSegmentToggleWaitsForPoolScan(t *testing.T) {
 	a := &app{}
 	a.proxyScanMu.Lock()
-	defer a.proxyScanMu.Unlock()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		a.proxyScanMu.Unlock()
+	}()
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/cfnat/active/segment",
 		strings.NewReader(`{"segment":"35.78.0.0/16"}`))
+	started := time.Now()
 	a.handleSegmentToggle(rec, req)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("扫描在跑时关段 = %d, want 409", rec.Code)
+	if rec.Code == http.StatusConflict || rec.Code == http.StatusTooManyRequests {
+		t.Fatalf("扫描在跑时关段被拒绝 = %d, want 排队后执行", rec.Code)
+	}
+	if elapsed := time.Since(started); elapsed < 50*time.Millisecond {
+		t.Fatalf("关段没有等待后台扫描退出，耗时 %v", elapsed)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("空池关段 = %d, want 404", rec.Code)
 	}
 }
 
