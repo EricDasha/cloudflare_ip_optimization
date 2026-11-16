@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -263,6 +264,40 @@ func TestApplyDisabledBenchKeepsDisabledDomains(t *testing.T) {
 	}
 	if !containsString(pool.Disabled, "edge.example.com") {
 		t.Fatalf("关闭的域名被错误解冻：%v", pool.Disabled)
+	}
+}
+
+// 被换下的死 IP 必须从候选缓存除名并在磁盘上同样消失，
+// 否则下一轮 refresh 会把它重新扫一遍，白烧扫描预算。
+func TestApplyDisabledBenchRemovesDeadFromCandidateCache(t *testing.T) {
+	a := &app{
+		dataDir:       t.TempDir(),
+		cfnat:         newManagedProcess("cfnat", filepath.Join(t.TempDir(), "missing-cfnat")),
+		disabledBench: map[string]*disabledBenchStat{"9.9.9.9": {LastLatencyMs: 1000}},
+	}
+	a.candidates = proxyCandidateSnapshot{
+		IPs:        []string{"1.1.1.1", "9.9.9.9"},
+		SourceByIP: map[string]string{"1.1.1.1": "user", "9.9.9.9": "cfdata"},
+	}
+	a.activePool = proxyActivePool{
+		IPs:      []string{"1.1.1.1", "9.9.9.9"},
+		Disabled: []string{"9.9.9.9"},
+	}
+	a.applyDisabledBenchChanges([]string{"9.9.9.9"}, nil, nil, time.Now())
+
+	if containsString(a.proxyCandidateSnapshot().IPs, "9.9.9.9") {
+		t.Fatal("dead IP still in candidate cache")
+	}
+	data, err := os.ReadFile(filepath.Join(a.dataDir, proxyCandidateCacheFile))
+	if err != nil {
+		t.Fatalf("read candidate cache: %v", err)
+	}
+	var cached proxyCandidateSnapshot
+	if err := json.Unmarshal(data, &cached); err != nil {
+		t.Fatalf("candidate cache is not valid JSON: %v", err)
+	}
+	if containsString(cached.IPs, "9.9.9.9") {
+		t.Fatal("dead IP still persisted in candidate cache")
 	}
 }
 

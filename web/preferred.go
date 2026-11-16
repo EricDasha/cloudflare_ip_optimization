@@ -322,7 +322,7 @@ func (a *app) mergeCfdataIPsIntoCandidates(ips []string) {
 	}
 	a.candidateMu.Unlock()
 	if len(snapshot.IPs) > 0 {
-		_ = a.saveProxyCandidateCache(snapshot)
+		_ = a.persistCandidates()
 	}
 }
 

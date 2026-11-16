@@ -620,7 +620,7 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 	a.candidateMu.Lock()
 	a.candidates = snapshot
 	a.candidateMu.Unlock()
-	if err := a.saveProxyCandidateCache(snapshot); err != nil {
+	if err := a.persistCandidates(); err != nil {
 		log.Printf("save proxy candidate cache: %v", err)
 	}
 	// 记一轮台账：这些地址各自被哪个渠道供出。下一轮的淘汰判定靠它。
@@ -730,11 +730,19 @@ func (a *app) saveProxyCandidateCache(snapshot proxyCandidateSnapshot) error {
 		return err
 	}
 	path := filepath.Join(a.dataDir, proxyCandidateCacheFile)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeFileAtomic(path, data, 0644)
+}
+
+// persistCandidates 把当前内存态写成候选缓存。
+//
+// 调用方通常在「取快照 → 改副本 → 解锁」之后落盘，直接传旧 snapshot 会
+// 把较旧的状态写回磁盘。这里重新取一次最新快照；candidateSaveMu 串行化
+// 写入，配合 writeFileAtomic 的唯一临时文件，并发保存不再互相截断。
+func (a *app) persistCandidates() error {
+	snapshot := a.proxyCandidateSnapshot()
+	a.candidateSaveMu.Lock()
+	defer a.candidateSaveMu.Unlock()
+	return a.saveProxyCandidateCache(snapshot)
 }
 
 func isPublicIPv4(ip net.IP) bool {

@@ -672,6 +672,17 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 	pool.Priority = kicked.Priority
 	pool.Disabled = kicked.Disabled
 	pool.Results = keptResults
+	// 成员通道映射也要同步修剪：等到下一次 applyProxyPool 的
+	// reconcileMemberChannels 才自愈会留下一个指向已踢成员的落盘残留。
+	if len(pool.MemberChannels) > 0 {
+		channels := make(map[string]string, len(pool.MemberChannels))
+		for name, channel := range pool.MemberChannels {
+			if name != member {
+				channels[name] = channel
+			}
+		}
+		pool.MemberChannels = channels
+	}
 	if err := a.applyPoolLocked(pool, current); err != nil {
 		http.Error(w, "踢除换池失败: "+err.Error(), http.StatusInternalServerError)
 		return

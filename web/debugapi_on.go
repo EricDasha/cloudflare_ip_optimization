@@ -265,7 +265,7 @@ func (h *debugAPI) candidates(w http.ResponseWriter, r *http.Request) {
 	h.a.candidates = snapshot
 	h.a.candidateMu.Unlock()
 	if req.Save == nil || *req.Save {
-		if err := h.a.saveProxyCandidateCache(snapshot); err != nil {
+		if err := h.a.persistCandidates(); err != nil {
 			http.Error(w, "save candidates: "+err.Error(), http.StatusInternalServerError)
 			return
 		}

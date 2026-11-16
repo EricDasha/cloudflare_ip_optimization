@@ -92,8 +92,8 @@ func (t cfTrace) summary() string {
 // 请求必须走 https。缺 colo 说明应答不是 CF 边缘生成的，同样不合格。
 //
 // 注意：trace 里的 `ip=` 是客户端出口 IP，不是边缘 IP。我们直连拨号时它
-// 必然等于本机出口，拿它判回环会把所有候选误杀；回环检测因此放在
-// isLocalInterfaceIP 里，只拒绝「候选地址就是本机网卡」这一种确定情况。
+// 必然等于本机出口，拿它判回环会把所有候选误杀，因此这里不比较 trace.IP
+// 与本机公网 IP。
 func traceL7RejectReason(trace cfTrace) string {
 	if trace.VisitScheme != "" && trace.VisitScheme != "https" {
 		return "trace visit_scheme=" + trace.VisitScheme
@@ -127,24 +127,6 @@ func traceL7RejectReason(trace cfTrace) string {
 		return "trace server 不是 cloudflare"
 	}
 	return ""
-}
-
-func isLocalInterfaceIP(ip string) bool {
-	parsed := net.ParseIP(strings.TrimSpace(ip))
-	if parsed == nil {
-		return false
-	}
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return false
-	}
-	for _, addr := range addrs {
-		ipNet, ok := addr.(*net.IPNet)
-		if ok && ipNet.IP.Equal(parsed) {
-			return true
-		}
-	}
-	return false
 }
 
 // probeCFTrace 用真实域名做 SNI、把 TCP 拨号钉到候选 IP，请求

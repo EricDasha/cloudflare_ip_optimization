@@ -846,6 +846,12 @@ func (a *app) applyDisabledBenchChanges(removals []string, swaps map[string]stri
 		a.markPoolSwitched(next.UpdatedAt)
 	}
 
+	// 换下的死 IP 不再留在候选缓存：否则下一轮 refresh 又会把它扫一遍，
+	// 考不过不会回池，只是白烧扫描预算。victims 只来自 pool.IPs，不含域名。
+	for _, victim := range removed {
+		a.removeCandidateIP(victim)
+	}
+
 	// 成功之后才记账：失败时保留原判，下一轮可以重试。
 	a.disabledBenchMu.Lock()
 	events := make([]disabledBenchEvent, 0, len(removed))

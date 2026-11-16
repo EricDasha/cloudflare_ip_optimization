@@ -70,14 +70,19 @@ func (r qualityRecord) line() lineQuality {
 }
 
 type qualityStoreData struct {
-	Version      int                       `json:"version"`
-	UpdatedAt    time.Time                 `json:"updatedAt"`
-	LastProbeAt  time.Time                 `json:"lastProbeAt,omitempty"`
-	LastSwitchAt time.Time                 `json:"lastSwitchAt,omitempty"`
-	LastDecision schedulerDecision         `json:"lastDecision"`
-	LastError    string                    `json:"lastError,omitempty"`
-	ActiveIP     string                    `json:"activeIp,omitempty"`
-	Records      map[string]*qualityRecord `json:"records"`
+	Version      int       `json:"version"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+	LastProbeAt  time.Time `json:"lastProbeAt,omitempty"`
+	LastSwitchAt time.Time `json:"lastSwitchAt,omitempty"`
+	// LastActiveChangeAt 记录「外部换池导致 Active 变更」的时间。
+	// 它与 LastSwitchAt 分开：后者是调度器自己的换池审计记录，手动优选
+	// 不该把它改写成调度器的功绩；两者取较晚者作为 30 分钟防抖锚点。
+	LastActiveChangeAt time.Time                 `json:"lastActiveChangeAt,omitempty"`
+	LastDecision       schedulerDecision         `json:"lastDecision"`
+	LastError          string                    `json:"lastError,omitempty"`
+	LastErrorAt        time.Time                 `json:"lastErrorAt,omitempty"`
+	ActiveIP           string                    `json:"activeIp,omitempty"`
+	Records            map[string]*qualityRecord `json:"records"`
 }
 
 type qualitySchedulerRuntime struct {
@@ -212,6 +217,39 @@ func (r *qualitySchedulerRuntime) seedActive(ip string, now time.Time) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.seedActiveLocked(ip, now)
+	_ = r.saveLocked()
+}
+
+// seedActiveFromPool 在生效池被外部替换（手动优选、补池、验活合池）后调用。
+//
+// 与 seedActive 的区别只在「换池之后」的语义：外部换池同样是一次真实的
+// Active 变更，必须让 30 分钟防抖看到它，否则调度器会在刚选好的池上立刻
+// 再换一次。这里只推进 LastActiveChangeAt，不改写 LastSwitchAt——后者是
+// 调度器自己的换池审计记录，手动优选不该冒充成它的功绩。
+//
+// 只有 Active 真的换人时才清错：同池重复 apply 不该把一条仍然有效的
+// 拦截原因抹掉。旧错误带 LastErrorAt，前端可以显示它已经存在多久。
+func (r *qualitySchedulerRuntime) seedActiveFromPool(ip string, now time.Time) {
+	if ip == "" {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	previous := r.data.ActiveIP
+	r.seedActiveLocked(ip, now)
+	if previous != "" && previous != ip {
+		r.data.LastActiveChangeAt = now
+		r.data.LastError = ""
+		r.data.LastErrorAt = time.Time{}
+	}
+	_ = r.saveLocked()
+}
+
+func (r *qualitySchedulerRuntime) seedActiveLocked(ip string, now time.Time) {
 	if previous := r.data.Records[r.data.ActiveIP]; previous != nil && previous.IP != ip && previous.State == lineActive {
 		previous.State, previous.StateReason, previous.StateChangedAt = lineStandby, "active_pool_replaced", now
 	}
@@ -219,7 +257,6 @@ func (r *qualitySchedulerRuntime) seedActive(ip string, now time.Time) {
 	rec := r.ensureRecordLocked(ip, "active_pool", now)
 	rec.State, rec.StateReason, rec.StateChangedAt = lineActive, reasonPromotedNoActive, now
 	r.demoteOrphanActivesLocked(ip, reasonOrphanActiveDemoted, now)
-	_ = r.saveLocked()
 }
 
 func (r *qualitySchedulerRuntime) ensureRecordLocked(ip, source string, now time.Time) *qualityRecord {
@@ -394,9 +431,16 @@ func (r *qualitySchedulerRuntime) decide(now time.Time) schedulerDecision {
 			standby = append(standby, rec.line())
 		}
 	}
-	decision, err := decideLineSwitch(schedulerInput{Now: now, LastSwitch: r.data.LastSwitchAt, Active: active, Standby: standby}, r.policy)
+	// 防抖锚点取「调度器自己换池」与「外部换池」中较晚的一次：
+	// 手动优选后若还拿旧的 LastSwitchAt 判断，调度器会在新池上立刻再换。
+	lastSwitch := r.data.LastSwitchAt
+	if r.data.LastActiveChangeAt.After(lastSwitch) {
+		lastSwitch = r.data.LastActiveChangeAt
+	}
+	decision, err := decideLineSwitch(schedulerInput{Now: now, LastSwitch: lastSwitch, Active: active, Standby: standby}, r.policy)
 	if err != nil {
 		r.data.LastError = err.Error()
+		r.data.LastErrorAt = now
 		_ = r.saveLocked()
 		return schedulerDecision{Event: switchNone, Reason: err.Error()}
 	}
@@ -470,6 +514,7 @@ func (r *qualitySchedulerRuntime) commitSwitch(decision schedulerDecision, now t
 	// 历史遗留的第二条 ACTIVE——否则它永远不会被降级，也永远不会被墓碑清理。
 	r.demoteOrphanActivesLocked(decision.ToIP, reasonOrphanActiveDemoted, now)
 	r.data.ActiveIP, r.data.LastSwitchAt, r.data.LastDecision, r.data.LastError = decision.ToIP, now, decision, ""
+	r.data.LastErrorAt = time.Time{}
 	_ = r.saveLocked()
 }
 
@@ -477,6 +522,7 @@ func (r *qualitySchedulerRuntime) setError(message string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.data.LastError = message
+	r.data.LastErrorAt = time.Now()
 	_ = r.saveLocked()
 }
 
@@ -506,8 +552,9 @@ func (r *qualitySchedulerRuntime) snapshot() map[string]any {
 	return map[string]any{
 		"enabled": true, "apply": r.apply, "probeIntervalSeconds": int(r.interval.Seconds()),
 		"batchSize": r.batch, "activeIp": r.data.ActiveIP, "lastProbeAt": r.data.LastProbeAt,
-		"lastSwitchAt": r.data.LastSwitchAt, "lastDecision": r.data.LastDecision,
-		"lastError": r.data.LastError, "records": records,
+		"lastSwitchAt": r.data.LastSwitchAt, "lastActiveChangeAt": r.data.LastActiveChangeAt,
+		"lastDecision": r.data.LastDecision,
+		"lastError":    r.data.LastError, "lastErrorAt": r.data.LastErrorAt, "records": records,
 	}
 }
 

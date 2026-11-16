@@ -64,6 +64,8 @@ services:
       PROXY_AUTO_MIN_POOL: "3"
       # 优选域名直连：显式指定后并入 CFnat 固定转发池；IP 池结果仍来自 VLESS 终审。
       PROXY_DOMAIN_FORWARD: "${PROXY_DOMAIN_FORWARD:-}"
+      # 自动并入的优选域名在 -fixed 段内按质量排序；stable 保持原序。
+      PROXY_DOMAIN_ORDER: "${PROXY_DOMAIN_ORDER:-quality}"
       # 优选域名兜底转发：置 true 时把已启用的优选域名并入 cfnat -fallback
       # （上限 12 个），仅在固定 IP 池全部拨号失败时才直连域名，不解析不探测。
       PROXY_AUTO_DOMAINS: "true"
@@ -81,6 +83,10 @@ services:
       PROXY_SCHEDULER_PROBE_INTERVAL_SECONDS: "300"
       PROXY_SCHEDULER_BATCH_SIZE: "12"
       PROXY_SCHEDULER_APPLY: "true"
+      # 片区多样性门禁：减段换池需候选吞吐高出该比例；0 恢复严格拦截。
+      PROXY_SCHEDULER_SEGMENT_GAIN: "${PROXY_SCHEDULER_SEGMENT_GAIN:-0.15}"
+      # 跨轮 EWMA 只影响排序；0 关闭。
+      PROXY_EWMA_ALPHA: "${PROXY_EWMA_ALPHA:-0.3}"
       # CFdata 供给层：启动即后台自扫一次，此后每 6 小时一轮（CFDATA_AUTO_SCAN
       # 默认开启，置 false 退回纯手动 /api/cfdata/run）。结果写 result.csv，
       # 只要求公网 IPv4，直接汇入候选池（第二大供给层；2026-11-05 起不再过

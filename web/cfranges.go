@@ -146,9 +146,16 @@ func orderPassedBySegmentHealth(passed []string, results []proxyScanResult) []st
 // 官方段外的公网成员按 /16 计入（见 segmentOf），非公网地址不计入，
 // 避免测试地址干扰判断。
 func degradedSegmentDiversity(before, after []string) bool {
-	beforeSegs := poolSegmentStats(before)
-	afterSegs := poolSegmentStats(after)
-	return len(afterSegs) < len(beforeSegs)
+	degraded, _, _ := segmentDiversityDelta(before, after)
+	return degraded
+}
+
+// segmentDiversityDelta 在报告是否减段的同时给回前后段数。
+// 调用方要按「牺牲多少多样性、换来多少质量」做裁决，只有布尔值不够用。
+func segmentDiversityDelta(before, after []string) (bool, int, int) {
+	beforeSegs := len(poolSegmentStats(before))
+	afterSegs := len(poolSegmentStats(after))
+	return afterSegs < beforeSegs, beforeSegs, afterSegs
 }
 
 // cloudflareIPv4CIDRs 是 Cloudflare 官方公布的 IPv4 边缘段（15 段）。

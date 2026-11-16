@@ -50,6 +50,7 @@ type app struct {
 	proxyScanMu      sync.Mutex
 	cfnatCtlMu       sync.Mutex
 	candidateMu      sync.RWMutex
+	candidateSaveMu  sync.Mutex
 	refreshMu        sync.Mutex
 	candidates       proxyCandidateSnapshot
 	activeMu         sync.RWMutex
@@ -433,6 +434,33 @@ func (a *app) cfdataIPListStale() bool {
 //
 // ============================================================================
 
+// schedulerThroughputGain 估算换入候选相对在位成员的吞吐增益。
+//
+// 这里刻意不用 lineQualityScore：它的 stability 项按 CapacityMbps 缩放，
+// 任何成功率为 1 的成员都能拿到上百点的底分，速度差异会被完全淹没。
+// 换池闸要回答的是「牺牲一个片区，值不值」，必须看真实吞吐。
+// 任一方没有本轮/在位成绩时返回 0，让调用方维持严格拦截。
+func schedulerThroughputGain(current proxyActivePool, results []proxyScanResult, fromIP, toIP string) float64 {
+	base := proxyResultDownloadMbps(current.Results, fromIP)
+	candidate := proxyResultDownloadMbps(results, toIP)
+	if base <= 0 || candidate <= 0 {
+		return 0
+	}
+	return (candidate - base) / base
+}
+
+// allowSegmentDiversityTrade 决定「少一个片区」能不能用吞吐增益换。
+// 底线是至少保留两个片区；阈值 <=0 表示运营者要求严格拦截（旧行为）。
+func allowSegmentDiversityTrade(beforeSegs, afterSegs int, gain, threshold float64) bool {
+	if afterSegs < 2 {
+		return false
+	}
+	if threshold <= 0 {
+		return false
+	}
+	return gain >= threshold
+}
+
 // runQualitySchedulerProbe 后台优选主循环：
 // 从 Candidate Pool 取一批 IP → WS/VLESS 测试 → 观察结果 → 决定是否换池。
 // 此函数是三池模型的核心执行器。
@@ -539,7 +567,7 @@ func (a *app) runQualitySchedulerProbe(_ context.Context) {
 		vlessCtx, vlessCancel := context.WithTimeout(bgCtx, autoApplyBudget)
 		defer vlessCancel()
 		passed = probeVLESSPool(vlessCtx, results, cfg.Port, len(results), cfg.VLESS, template)
-		passed = rankVLESSPassesBySpeed(vlessCtx, passed, results, cfg.Port, cfg.VLESS, template)
+		passed = rankVLESSPassesBySpeedWithHistory(vlessCtx, passed, results, cfg.Port, cfg.VLESS, template, a.proxyActivePoolSnapshot().Results)
 		if bgCtx.Err() != nil {
 			return
 		}
@@ -602,10 +630,22 @@ func (a *app) runQualitySchedulerProbe(_ context.Context) {
 	// spreadBySegment 只在全量重挑/踢人补位里跑过，这条路径此前完全绕过片区
 	// 检查——池结构可以一轮一轮被换成同一段，而所有指标都显示正常。
 	nextIPs := replacePoolMember(current.IPs, decision.FromIP, decision.ToIP)
-	if degradedSegmentDiversity(current.IPs, nextIPs) {
-		log.Printf("scheduler pool switch skipped: segment diversity would drop %v -> %v", poolSegmentStats(current.IPs), poolSegmentStats(nextIPs))
-		a.quality.setError("调度器换池被片区多样性检查拦截：换入后段数减少")
-		return
+	if degraded, beforeSegs, afterSegs := segmentDiversityDelta(current.IPs, nextIPs); degraded {
+		// 段数变少本身不是否决理由：池子只有 7 个成员时，硬拦会把「换入
+		// 同段的高质量候选」永久挡在门外——decideLineSwitch 每轮都给同一个人。
+		// 这里把决定权交回给代价：留住至少两个片区，且候选吞吐确实有明显
+		// 提升，才允许用一段多样性去换质量。阈值设 0 即恢复旧的严格拦截。
+		gain := schedulerThroughputGain(current, results, decision.FromIP, decision.ToIP)
+		threshold := envFloat("PROXY_SCHEDULER_SEGMENT_GAIN", 0.15)
+		if !allowSegmentDiversityTrade(beforeSegs, afterSegs, gain, threshold) {
+			log.Printf("scheduler pool switch skipped: segment diversity %d -> %d, throughput gain %.1f%% (threshold %.0f%%)",
+				beforeSegs, afterSegs, gain*100, threshold*100)
+			a.quality.setError(fmt.Sprintf("调度器换池被片区多样性检查拦截：段数 %d→%d，候选吞吐增益 %.1f%% 未达阈值 %.0f%%",
+				beforeSegs, afterSegs, gain*100, threshold*100))
+			return
+		}
+		log.Printf("scheduler pool switch allowed: segment diversity %d -> %d for %.1f%% throughput gain",
+			beforeSegs, afterSegs, gain*100)
 	}
 	pool := current
 	pool.UpdatedAt, pool.Host, pool.Path = now, cfg.Host, cfg.Path
@@ -721,8 +761,19 @@ func (a *app) poolDomainMembers() []string {
 		seen[domain] = struct{}{}
 		domains = append(domains, domain)
 	}
-	// 显式配置视为运营者本人担保，不参与质量闸。
+	// 显式配置视为运营者本人担保，不参与质量闸，也不参与质量排序：
+	// 它们永远置顶，顺序按配置书写。
+	explicit := make([]string, 0, 4)
+	explicitSeen := map[string]struct{}{}
 	for _, domain := range envForwardDomains("PROXY_DOMAIN_FORWARD") {
+		if !validCandidateHostname(domain) {
+			continue
+		}
+		if _, ok := explicitSeen[domain]; ok {
+			continue
+		}
+		explicitSeen[domain] = struct{}{}
+		explicit = append(explicit, domain)
 		add(domain)
 	}
 	snapshot := a.proxyCandidateSnapshot()
@@ -790,8 +841,73 @@ func (a *app) poolDomainMembers() []string {
 				before, minFallbackForwardDomains, fallback)
 		}
 	}
+	// 自动来源按质量排序：慢域名仍留在池里，只往后站，降低被 sticky
+	// 设备首选的概率；真正的判死仍归在位验活路径。显式域名按配置顺序
+	// 置顶，不参与排序——即使同一域名也出现在自动来源里，也不会被降位。
+	automatic := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		if _, ok := explicitSeen[domain]; !ok {
+			automatic = append(automatic, domain)
+		}
+	}
+	domains = append(explicit[:len(explicit):len(explicit)], a.orderDomainsByQuality(automatic)...)
 	setDomainFallback(fallback)
 	return domains
+}
+
+func domainStateRank(state string) int {
+	switch state {
+	case domainStateHealthy:
+		return 0
+	case domainStateUnstable:
+		return 2
+	case domainStateDead:
+		return 3
+	default: // testing / 空记录
+		return 1
+	}
+}
+
+// orderDomainsByQuality 对自动来源的域名做稳定排序：
+// 健康 > 观察中 > 不稳 > 判死，同级按成功率、平均吞吐降序，最后按原名次兜底。
+// 只置换顺序，不增删成员；全部同分时保持原顺序。
+// PROXY_DOMAIN_ORDER=stable 可完全退回旧行为。
+func (a *app) orderDomainsByQuality(domains []string) []string {
+	if len(domains) < 2 || strings.EqualFold(strings.TrimSpace(env("PROXY_DOMAIN_ORDER", "quality")), "stable") {
+		return domains
+	}
+	type scored struct {
+		domain string
+		state  int
+		rate   float64
+		mbps   float64
+	}
+	list := make([]scored, 0, len(domains))
+	a.domainQualityMu.Lock()
+	for _, domain := range domains {
+		item := scored{domain: domain, state: 1}
+		if rec := a.domainQuality[domain]; rec != nil {
+			item.state = domainStateRank(rec.State)
+			item.rate = rec.SuccessRate
+			item.mbps = rec.AverageMbps
+		}
+		list = append(list, item)
+	}
+	a.domainQualityMu.Unlock()
+	sort.SliceStable(list, func(i, j int) bool {
+		if list[i].state != list[j].state {
+			return list[i].state < list[j].state
+		}
+		if list[i].rate != list[j].rate {
+			return list[i].rate > list[j].rate
+		}
+		return list[i].mbps > list[j].mbps
+	})
+	out := make([]string, len(list))
+	for i := range list {
+		out[i] = list[i].domain
+	}
+	return out
 }
 
 // topDomainsByQuality 从候选里按体检成功率降序取前 n 个，无记录者按 0 计。

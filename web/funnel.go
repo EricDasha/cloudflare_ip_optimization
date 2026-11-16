@@ -66,6 +66,13 @@ func rankVLESSPassesBySpeed(parent context.Context, passed []string, results []p
 	return rankVLESSPassesBySpeedWithProbe(parent, passed, results, port, base, template, probeVLESSCandidateMetrics)
 }
 
+// rankVLESSPassesBySpeedWithHistory 与 rankVLESSPassesBySpeed 相同，但把
+// 上一轮的在位成绩带进排序做 EWMA 平滑。历史只影响先后，不影响准入门槛：
+// results[].DownloadMbps 与 dropBelowReferenceIPs 仍读本轮新鲜值。
+func rankVLESSPassesBySpeedWithHistory(parent context.Context, passed []string, results []proxyScanResult, port int, base vlessProbeConfig, template map[string]any, history []proxyScanResult) []string {
+	return rankVLESSPassesBySpeedWithProbeAndHistory(parent, passed, results, port, base, template, probeVLESSCandidateMetrics, history)
+}
+
 func rankVLESSPassesBySpeedWithProbe(
 	parent context.Context,
 	passed []string,
@@ -74,6 +81,19 @@ func rankVLESSPassesBySpeedWithProbe(
 	base vlessProbeConfig,
 	template map[string]any,
 	probe func(context.Context, string, int, vlessProbeConfig, map[string]any) (vlessProbeMetrics, error),
+) []string {
+	return rankVLESSPassesBySpeedWithProbeAndHistory(parent, passed, results, port, base, template, probe, nil)
+}
+
+func rankVLESSPassesBySpeedWithProbeAndHistory(
+	parent context.Context,
+	passed []string,
+	results []proxyScanResult,
+	port int,
+	base vlessProbeConfig,
+	template map[string]any,
+	probe func(context.Context, string, int, vlessProbeConfig, map[string]any) (vlessProbeMetrics, error),
+	history []proxyScanResult,
 ) []string {
 	if len(passed) == 0 {
 		return passed
@@ -142,6 +162,7 @@ func rankVLESSPassesBySpeedWithProbe(
 		verified = append(verified, ip)
 	}
 	passed = verified
+	blendSpeedsWithHistory(speeds, history, ewmaRankingAlpha())
 	logSpeedProbeSummary(speeds, maxSpeedProbes, minMbps)
 	latencyCeiling := vlessLatencyCeilingMs()
 	sort.SliceStable(passed, func(i, j int) bool {
@@ -257,6 +278,46 @@ func vlessMinDownloadMbps() float64 {
 		mbps = 3
 	}
 	return mbps
+}
+
+// ewmaRankingAlpha 是跨轮吞吐平滑系数。0 完全关闭；上限 0.9 防止历史权重过大。
+func ewmaRankingAlpha() float64 {
+	alpha := envFloat("PROXY_EWMA_ALPHA", 0.3)
+	if alpha < 0 || alpha > 0.9 {
+		return 0.3
+	}
+	return alpha
+}
+
+// blendSpeedsWithHistory 把上一轮的在位吞吐混进本轮排序权重。
+//
+// 只改 speeds（排序用），不改 results[].DownloadMbps（准入与展示用）。
+// 结果被夹在本轮值的 [0.67, 1.5] 倍之间：历史最多解释 50% 的差距，
+// 一个真实崩掉的 IP 不会被旧成绩长期托住。
+func blendSpeedsWithHistory(speeds map[string]float64, history []proxyScanResult, alpha float64) {
+	if len(speeds) == 0 || len(history) == 0 || alpha <= 0 {
+		return
+	}
+	previous := make(map[string]float64, len(history))
+	for _, result := range history {
+		if result.DownloadMbps > 0 {
+			previous[result.IP] = result.DownloadMbps
+		}
+	}
+	for ip, fresh := range speeds {
+		prior := previous[ip]
+		if fresh <= 0 || prior <= 0 {
+			continue
+		}
+		blended := alpha*fresh + (1-alpha)*prior
+		if blended < fresh*0.67 {
+			blended = fresh * 0.67
+		}
+		if blended > fresh*1.5 {
+			blended = fresh * 1.5
+		}
+		speeds[ip] = blended
+	}
 }
 
 // speedBucket 把测速结果分成三档，供排序使用：
@@ -467,6 +528,15 @@ func proxyResultSourceRank(results []proxyScanResult, ip string) int {
 		}
 	}
 	return 4
+}
+
+func proxyResultDownloadMbps(results []proxyScanResult, ip string) float64 {
+	for _, result := range results {
+		if result.IP == ip {
+			return result.DownloadMbps
+		}
+	}
+	return 0
 }
 
 // orderPassedByColoPreference 把过考名单按机房偏好稳定分区重排：偏好机房在前，
@@ -823,7 +893,7 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 		finalStage = "VLESS"
 		a.setScanActivityPhase(kind, "VLESS 终审", 0, len(results))
 		passed = probeVLESSPool(runCtx, results, cfg.Port, min(cfg.VLESS.MaxCandidates, len(results)), cfg.VLESS, vlessTemplate)
-		passed = rankVLESSPassesBySpeed(runCtx, passed, results, cfg.Port, cfg.VLESS, vlessTemplate)
+		passed = rankVLESSPassesBySpeedWithHistory(runCtx, passed, results, cfg.Port, cfg.VLESS, vlessTemplate, a.proxyActivePoolSnapshot().Results)
 		// 机房软偏好：Mbps 序排定后分区重排，截断时充裕取偏好、匮乏放行。
 		passed = orderPassedByColoPreference(passed, results, poolColoPreferenceSet())
 		// 片区降权：整片高失败率的段排到末尾（不淘汰，候选不够照样用）。

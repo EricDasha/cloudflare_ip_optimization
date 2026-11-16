@@ -500,7 +500,7 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 		// Active 必须指向真正转发的那一个：pool.IPs[0] 可能已被用户关闭，
 		// 把它播种成 Active 会让调度器盯着一根不承载流量的线做比较。
 		if forwarding := forwardingIPs(pool); len(forwarding) > 0 {
-			a.quality.seedActive(forwarding[0], pool.UpdatedAt)
+			a.quality.seedActiveFromPool(forwarding[0], pool.UpdatedAt)
 		}
 	}
 	// 换池成功才裁健康账：离池 IP 的旧记录本来就不会再被读到
@@ -1100,7 +1100,7 @@ func (a *app) refillPoolAfterKick() {
 		// 补位与全量漏斗同口径：先按实测吞吐排序，再按段健康降权/打散，
 		// 最后剔除吞吐低于参考值的成员。旧实现只判 VLESS 通不通，会把
 		// 龟速 IP 和同一 /16 扎堆的候选直接塞回在位池。
-		passed = rankVLESSPassesBySpeed(ctx, passed, results, cfg.Port, cfg.VLESS, template)
+		passed = rankVLESSPassesBySpeedWithHistory(ctx, passed, results, cfg.Port, cfg.VLESS, template, a.proxyActivePoolSnapshot().Results)
 	} else {
 		for _, result := range results {
 			if result.Error == "" {
@@ -1213,5 +1213,5 @@ func (a *app) removeCandidateIP(ip string) {
 	}
 	a.candidates = snapshot
 	a.candidateMu.Unlock()
-	_ = a.saveProxyCandidateCache(snapshot)
+	_ = a.persistCandidates()
 }

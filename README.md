@@ -273,6 +273,7 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 | `PROXY_AUTO_PRESCREEN_CONCURRENCY` | 三层漏斗初筛（TCP/TLS RTT）并发；过高会触发扫描限流（见诊断指引） | `100` |
 | `PROXY_AUTO_SHORTLIST` | 初筛短名单容量，按延迟升序取前 N 进精筛 | `60` |
 | `PROXY_DOMAIN_FORWARD` | 并入 CFnat 固定转发池的优选域名，逗号分隔 | 空 |
+| `PROXY_DOMAIN_ORDER` | 自动并入域名在 `-fixed` 段内排序：`quality` 按成功率/均速（不摘除），`stable` 保持原序 | `quality` |
 | `PROXY_AUTO_DOMAINS` | 启用的优选域名并入 cfnat 固定转发（`-fixed`），不是 `-fallback` | `false`（Compose 为 `true`） |
 | `PROXY_PREFERRED_RESOLVE` / `PROXY_PREFERRED_IPS_PER_DOMAIN` / `PROXY_PREFERRED_RESOLVED_CANDIDATES` | 已废弃不再读取（优选域名直接做 `-fixed` 成员活解析） | -- |
 | `PROXY_CFDATA_CANDIDATES` | 已废弃不再读取（cfdata 走 `result.csv` 供给层） | -- |
@@ -282,6 +283,8 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 | `PROXY_SCHEDULER_APPLY` | 调度器是否允许自动换池（仍需 `PROXY_AUTO_APPLY=true`） | `true` |
 | `PROXY_SCHEDULER_PROBE_INTERVAL_SECONDS` | 后台调度探测间隔，秒 | `300` |
 | `PROXY_SCHEDULER_BATCH_SIZE` | 每轮调度候选数 | `12` |
+| `PROXY_SCHEDULER_SEGMENT_GAIN` | 片区多样性门禁的换池代价阈值：减段换池需候选吞吐高出该比例；`0` 恢复严格拦截 | `0.15` |
+| `PROXY_EWMA_ALPHA` | 跨轮吞吐平滑系数，只影响排序，不改准入与落盘实测值；`0` 关闭 | `0.3` |
 | `PROXY_ACTIVE_PROBE_ENABLED` | 在位验活总闸：定时复检生效池每个 IP，坏者请下台（独立于后台优化器） | `true` |
 | `PROXY_ACTIVE_PROBE_INTERVAL_SECONDS` | 在位验活间隔，秒（钳制 `[300,1800]`＝5~30 分，越界回落 `600`） | `600` |
 | `PROXY_ACTIVE_PROBE_FAIL_THRESHOLD` | 连续失败几次才请下台（钳制 `[1,10]`，越界回落 `3`；单次抖动不换人） | `3` |

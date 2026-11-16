@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"reflect"
@@ -133,6 +134,52 @@ func TestDegradedSegmentDiversity(t *testing.T) {
 	// 一段 → 两段：变强，放行。
 	if degradedSegmentDiversity([]string{"104.16.0.1"}, []string{"104.16.0.1", "172.64.0.1"}) {
 		t.Fatal("increasing segment count must not be flagged")
+	}
+}
+
+func TestSegmentDiversityDeltaReportsCounts(t *testing.T) {
+	before := []string{"104.16.0.1", "172.64.0.1", "131.0.72.1"}
+	after := []string{"104.16.0.1", "172.64.0.1", "104.16.0.9"}
+	degraded, beforeSegs, afterSegs := segmentDiversityDelta(before, after)
+	if !degraded || beforeSegs != 3 || afterSegs != 2 {
+		t.Fatalf("delta = (%v,%d,%d), want (true,3,2)", degraded, beforeSegs, afterSegs)
+	}
+}
+
+func TestAllowSegmentDiversityTrade(t *testing.T) {
+	cases := []struct {
+		name            string
+		before, after   int
+		gain, threshold float64
+		want            bool
+	}{
+		{"high gain allowed", 3, 2, 0.20, 0.15, true},
+		{"low gain blocked", 3, 2, 0.05, 0.15, false},
+		{"never below two segments", 2, 1, 0.90, 0.15, false},
+		{"threshold zero is strict", 3, 2, 0.90, 0, false},
+		{"threshold zero blocks even at three segments", 4, 3, 0.90, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := allowSegmentDiversityTrade(tc.before, tc.after, tc.gain, tc.threshold); got != tc.want {
+				t.Fatalf("allowSegmentDiversityTrade(%d,%d,%.2f,%.2f) = %v, want %v",
+					tc.before, tc.after, tc.gain, tc.threshold, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSchedulerThroughputGain(t *testing.T) {
+	current := proxyActivePool{Results: []proxyScanResult{{IP: "1.1.1.1", DownloadMbps: 10}}}
+	results := []proxyScanResult{{IP: "8.8.8.8", DownloadMbps: 12}}
+	if got := schedulerThroughputGain(current, results, "1.1.1.1", "8.8.8.8"); math.Abs(got-0.2) > 1e-9 {
+		t.Fatalf("gain = %v, want 0.2", got)
+	}
+	if got := schedulerThroughputGain(current, results, "1.1.1.1", "9.9.9.9"); got != 0 {
+		t.Fatalf("missing candidate should yield 0, got %v", got)
+	}
+	if got := schedulerThroughputGain(proxyActivePool{}, results, "1.1.1.1", "8.8.8.8"); got != 0 {
+		t.Fatalf("missing active measurement should yield 0, got %v", got)
 	}
 }
 
