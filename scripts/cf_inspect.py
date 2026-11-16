@@ -23,6 +23,11 @@
   6. sources 全部处于退避期                    -> WARN 无可用供给源
   7. domainFallback 非空                       -> INFO 正在靠兜底撑（不算故障）
   8. proxyAuto.error 非空                       -> 只作 INFO 附注，不单独告警
+  9. 7 天滚动基线（scripts/cf_risk.py）
+     - 终审通过率跌破历史中位数的 50%，或稳健 z < -3.5 -> WARN 通过率断崖
+     - 连续 2 次官方段全测全灭                        -> CRITICAL 官方段全灭
+     - 源成功率跌破 40% 而历史 >= 80%                 -> WARN 供给塌方
+     - 池内 IP 数跌破历史中位数一半                   -> WARN 池缩水
 
   第 8 条是刻意的：proxyAuto.error 是**粘滞字段**，换池成功后不一定被清
   （线上实测：池子在 09:28 重建成功、转发正常，而 error 仍留着 08:52 的
@@ -371,7 +376,7 @@ def check_cfnat(verdicts, status):
                                 "pid=%s startedAt=%s" % (cn.get("pid"), cn.get("startedAt"))))
 
 
-def inspect():
+def inspect(record_samples=True):
     verdicts = []
     health = check_health(verdicts)
     if health is None:
@@ -390,6 +395,16 @@ def inspect():
     check_sources(verdicts, status)
     check_cfnat(verdicts, status)
     check_cf_segment(verdicts, ips or [])
+
+    # 9. 7 天滚动风控（scripts/cf_risk.py）。它自己落盘、自己算基线；
+    #    这里只负责把结论并进报告。单独 try：模型挂了不能拖垮巡检本身。
+    try:
+        import cf_risk
+        for level, title, detail in cf_risk.check(status, record_sample=record_samples):
+            verdicts.append(Verdict(level, title, detail))
+    except Exception as e:
+        verdicts.append(Verdict("INFO", "风控模型不可用",
+                                "%s %s" % (type(e).__name__, e)))
     return verdicts, status
 
 
@@ -537,7 +552,7 @@ def main():
     args = ap.parse_args()
 
     try:
-        verdicts, _ = inspect()
+        verdicts, _ = inspect(record_samples=not args.dry_run)
     except Exception as e:
         print("巡检脚本自身故障：%s %s" % (type(e).__name__, e), file=sys.stderr)
         return 2

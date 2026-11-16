@@ -464,9 +464,37 @@ python3 scripts/cf_inspect.py --always
 - **每条投递路径各重试一次。** 2026-11-03 那三次丢失都是「一次超时就放弃」，而代理端口
   刚重启时有十几秒不可用，多半再打一次就过去了。
 
+### 7 天风控模型（`scripts/cf_risk.py`）
+
+绝对阈值在这套环境里必然误报：反代池的可用水平随线路每天变，判「低」只会天天喊狼来了。
+所以风控改成**和自己比**——每轮巡检记一条样本，只留最近 7 个自然日，用前几天的中位数当基线。
+
+| 判据 | 触发 | 级别 |
+|---|---|---|
+| 终审通过率断崖 | 今天 < 前 3~6 天中位数 × 50%，或 MAD 稳健 z < -3.5 | WARN |
+| 官方段全灭 | 连续 2 条样本官方段测了 ≥5 个、0 通过，且 7 天内活过 | CRITICAL |
+| 官方段消失 | 今天官方段 0 个进短名单，历史中位数 ≥5 | WARN |
+| 供给塌方 | 今天源成功率 < 40%，历史中位数 ≥ 80% | WARN |
+| 池缩水 | 今天池内 IP 中位数 ≤ 历史中位数一半（历史 ≥4） | WARN |
+
+数学选择及其理由：
+
+- **比例用求和后再除**，不是各样本比例求平均——否则只有 2 个终审样本的小时和 60 个样本的小时权重相同。
+- **基线用中位数、离散度用 MAD（中位绝对偏差）**，不用均值/标准差：一个离群日不会把基线或分母带偏。
+- **分母只认 `VLESS_PASS`**。`WS_PASS` 是「WS 101 通了但数据面失败」，2026-11-17 实测一堆这种 IP 下载只有 27 KB/s 或直接 000，算进去会虚高。
+- **数据不足就闭嘴**：当天终审 < 15 个、或有效历史 < 3 天，只记录不判定。冷启动约 1 天后生效。
+
+存储 `/vol1/1000/Docker/CFNat/cf-risk-daily.json`（与补发队列同目录，不写 `data/`），tmp + `os.replace` 原子写。
+可用 `CF_RISK_FILE` / `CF_RISK_DROP_FACTOR` / `CF_RISK_MAD_Z` 覆盖。单独调试：
+
+```bash
+python3 scripts/cf_risk.py --dry-run                  # 只判定不落盘
+python3 scripts/cf_risk.py --status-file /tmp/s.json  # 离线复盘
+```
+
 **部署要点（NAS）**：
 
-- 脚本位置 `/vol1/1000/Docker/CFNat/scripts/cf_inspect.py`
+- 脚本位置 `/vol1/1000/Docker/CFNat/scripts/cf_inspect.py` 与 `cf_risk.py`（同目录，`import cf_risk`）
 - 调度用**用户级 crontab**（`administer`），每 2 小时整点：`0 */2 * * *`
 - 日志 `/vol1/1000/Docker/CFNat/data/cf-inspect.log`
 
