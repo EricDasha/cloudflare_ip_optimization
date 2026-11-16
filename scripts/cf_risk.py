@@ -24,8 +24,9 @@
       * 相对塌方：今天 < 参照中位数 × 0.5（参照本身要有意义，> 5%）
       * 稳健 z < -3.5（仅在 MAD > 0 时可用；MAD = 0 说明历史完全一致，
         只有相对塌方这条能判）
-  - 官方段单独用 canary 判：直接 TCP 连 5 个众所周知的 CF anycast 边缘地址，
-    5 个全不通 = 整段封锁（2026-11-17 实测的故障形态），只做状态迁移告警，
+  - 官方段单独用 canary 判：对 5 个众所周知的 CF anycast 边缘地址做完整 TLS
+    握手（SNI=cloudflare.com，证书要验得过），5 个全失败 = 整段封锁
+    （2026-11-17 实测的故障形态：TCP 能连上、ClientHello 被丢），只做状态迁移告警，
     持续封锁期间不再每轮刷屏；恢复时报一次。不走 official_tested，因为官方
     IP 不可达时初筛就把它们筛掉了，终审名单里永远凑不满样本。
 
@@ -47,10 +48,13 @@ import argparse
 import json
 import os
 import socket
+import ssl
 import statistics
 import sys
 import threading
 import time
+
+from datetime import datetime
 
 from cf_inspect import API_BASE, in_cf_segment, http_json
 
@@ -69,7 +73,7 @@ MAD_Z_LIMIT = float(os.environ.get("CF_RISK_MAD_Z", "3.5"))
 OFFICIAL_MIN_TESTED = 5            # 单条样本里官方段至少测了这么多个才算证据
 OFFICIAL_DEAD_STREAK = 2           # 连续这么多个样本官方段全灭才算坐实
 
-# 官方段探针（canary）：直接 TCP 连这几个众所周知的 CF anycast 边缘地址。
+# 官方段探针（canary）：直接对这几个众所周知的 CF anycast 边缘地址做 TLS 握手。
 # 选它们是因为与订阅、池子、优选结果全都无关——测的是「本机到 CF 官方段的
 # 网络本身」，也就是 2026-11-17 定位到的那个故障面（运营商 IP 级封锁）。
 # 走 /api/status 的 official_tested 不可靠：官方 IP 不可达时初筛就把它们
@@ -90,26 +94,30 @@ POOL_SHRINK_FACTOR = 0.5           # 池内 IP 数低于基线的一半
 # ---- 采样 ---------------------------------------------------------------
 
 
-def _tcp_connect(ip, port, timeout):
-    s = socket.socket()
-    s.settimeout(timeout)
-    try:
-        s.connect((ip, port))
-        return True
-    except Exception:
-        return False
-    finally:
-        s.close()
+CANARY_SNI = os.environ.get("CF_RISK_CANARY_SNI", "cloudflare.com")
+
+
+def _tls_probe(ip, port, timeout):
+    """对指定 IP 做完整 TLS 握手（SNI 用真实域名，证书要能验证通过）。
+
+    为什么不能用纯 TCP：2026-11-17 实测，官方段被封锁时 TCP 三次握手**有时
+    能成功**（中间盒替对端回了 SYN-ACK），但 ClientHello 一发出去就被丢弃，
+    TLS 永远握不上（3 轮 × 5 个地址全 TimeoutError）。用 TCP 判活会得到
+    「3/5 可达」这种假阳性，然后在封锁与恢复之间来回翻转、反复告警。
+    """
+    ctx = ssl.create_default_context()
+    with socket.create_connection((ip, port), timeout=timeout) as raw:
+        with ctx.wrap_socket(raw, server_hostname=CANARY_SNI):
+            return True
 
 
 def probe_official_canary(connect=None, ips=None, timeout=None):
-    """并发 TCP 探测官方段 canary，返回 (可达数, 总数)。
+    """并发探测官方段 canary，返回 (可达数, 总数)。
 
-    只做 TCP 三次握手，不发 TLS。2026-11-17 实测：官方段被运营商封锁时
-    表现为静默丢包（connect 超时），不是 RST；所以超时即判不可达。
-    5 个地址并发，墙钟时间 ≈ 1 个 timeout，不会拖慢两小时一轮的巡检。
+    5 个地址并发，墙钟时间 ≈ 1 个 timeout（默认 3 秒），不会拖慢两小时一轮
+    的巡检。任何一个握手失败都按不可达算——包括证书验证失败（可能是中间人）。
     """
-    connect = connect or _tcp_connect
+    connect = connect or _tls_probe
     ips = ips or OFFICIAL_CANARY
     timeout = CANARY_TIMEOUT if timeout is None else timeout
     results = {}
@@ -283,6 +291,24 @@ def _recent_samples(store, limit):
     return out[-limit:]
 
 
+def _epoch(value, fallback):
+    """把账本里的时间字段统一成 epoch 秒。
+
+    账本是人也会改的文件：早期版本或手工修数据可能写成 ISO 字符串，
+    直接参与减法会抛 TypeError，而巡检层会把它降级成「风控模型不可用」——
+    等于监控静默失效。这里统一容错，解析不了就退回 fallback。
+    """
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str) and value.strip():
+        raw = value.strip().replace("Z", "+00:00")
+        try:
+            return int(datetime.fromisoformat(raw).timestamp())
+        except ValueError:
+            return int(fallback)
+    return int(fallback)
+
+
 def _robust_z(value, base_values):
     """MAD 稳健 z。base_values 为空或 MAD=0 时返回 None（不可用）。"""
     if not base_values:
@@ -327,15 +353,17 @@ def evaluate(store, now=None):
             state["officialBlocked"] = True
             state["officialBlockedSince"] = int(now)
             out.append(("CRITICAL", "官方 IP 段整体不可达",
-                        "canary %d/%d 全部超时（%s）——官方 anycast 被运营商"
+                        "canary %d/%d 全部握不上（%s）——官方 anycast 被运营商"
                         "整段封锁，池子只能靠第三方反代" %
                         (ca, ct, ", ".join(OFFICIAL_CANARY[:3]) + " 等")))
         elif all_dead and blocked:
-            since = state.get("officialBlockedSince") or int(now)
-            hours = max(0, int((now - since) // 3600))
+            since = _epoch(state.get("officialBlockedSince"), now)
+            minutes = max(0, int((now - since) // 60))
+            lasted = ("%d 小时" % (minutes // 60) if minutes >= 60
+                      else "%d 分钟" % minutes)
             out.append(("INFO", "官方段仍被封锁",
-                        "canary %d/%d 不可达，已持续 %d 小时；反代池不受影响" %
-                        (ca, ct, hours)))
+                        "canary %d/%d 握不上手，已持续 %s；反代池不受影响" %
+                        (ca, ct, lasted)))
         elif healthy and blocked:
             state["officialBlocked"] = False
             state.pop("officialBlockedSince", None)
@@ -347,15 +375,16 @@ def evaluate(store, now=None):
                         "canary %d/%d 可达，但终审名单里 0 个官方段地址——"
                         "查候选源与初筛" % (ca, ct)))
 
-    # 1b) 官方段 TCP 可达但终审全灭：可能是 L7 / SNI 层干扰，与整段封锁不同。
+    # 1b) 官方段握得上手但终审全灭：可能是 L7 / SNI 层干扰，与整段封锁不同。
     recent = _recent_samples(store, OFFICIAL_DEAD_STREAK)
     if (ca is not None and ca >= CANARY_ALIVE_MIN and
             len(recent) >= OFFICIAL_DEAD_STREAK and
             all(s.get("official_tested", 0) >= OFFICIAL_MIN_TESTED and
                 s.get("official_pass", 0) == 0 for s in recent)):
-        out.append(("WARN", "官方段 TCP 通但终审全灭",
-                    "连续 %d 次终审官方段 0 通过（每次至少测 %d 个）——"
-                    "疑似 L7 干扰" % (len(recent), OFFICIAL_MIN_TESTED)))
+        out.append(("WARN", "官方段可握手但终审全灭",
+                    "canary %d/%d 能完成 TLS 握手，但连续 %d 次终审官方段 0 通过"
+                    "（每次至少测 %d 个）——疑似 L7 干扰" %
+                    (ca, len(OFFICIAL_CANARY), len(recent), OFFICIAL_MIN_TESTED)))
 
     # 3) 验收通过率断崖。
     if today_agg["finalists"] < MIN_FINALISTS:
