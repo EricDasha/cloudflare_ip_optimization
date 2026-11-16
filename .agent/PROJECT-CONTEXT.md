@@ -220,6 +220,43 @@ runCFdataBackgroundScan        cfdata 扫描
 
 **实施顺序建议**：D1 先上 → 观察 24 小时 → D2 + 紧急切换同期上。
 
+### P1：调度器状态同步、片区门禁代价化、池质量（`3f423a6`，2026-11-16 20:47 CST）
+
+上线内容（一次部署，A/B/C 三批合并）：
+
+- **调度器时钟**：`quality_store` 新增 `LastActiveChangeAt` / `LastErrorAt`。外部换池
+  （手动优选、补池、验活合池）走 `seedActiveFromPool`：Active 真换人时推进
+  `LastActiveChangeAt` 并清错误，`LastSwitchAt` 保持为调度器自身审计；`decide` 取两者
+  较晚者做 30 分钟防抖锚点。启动种子仍走 `seedActive`，不动错误。
+- **片区多样性**：`segmentDiversityDelta` 返回前后段数；减段换池改为报价裁决——换入后
+  至少留 2 段，且候选吞吐相对当前 Active 增益 ≥ `PROXY_SCHEDULER_SEGMENT_GAIN`
+  （默认 0.15，设 0 恢复严格拦截）。日志与 `lastError` 都带段数和增益数字。
+- **候选落盘**：`saveProxyCandidateCache` 改用 `writeFileAtomic`；新增
+  `candidateSaveMu` + `persistCandidates()`（重新取最新快照再写，串行化），四个调用点统一。
+- **域名排序**：自动并入的优选域名在 `-fixed` 段内按 状态(healthy>testing>unstable>dead)
+  → 成功率 → 均速 稳定排序；显式 `PROXY_DOMAIN_FORWARD` 按配置顺序置顶，即使同名也不降位。
+  只换顺序不摘人；`PROXY_DOMAIN_ORDER=stable` 回退。
+- **跨轮 EWMA**：`blendSpeedsWithHistory` 只改排序用的 `speeds`，夹在 `[fresh*0.67, fresh*1.5]`；
+  准入与 `results[].DownloadMbps` 仍读本轮实测。`PROXY_EWMA_ALPHA` 默认 0.3，0 关闭。
+- **清理**：关闭成员换下的死 IP 同步 `removeCandidateIP`；踢人同步修剪 `MemberChannels`；
+  删除未使用的 `isLocalInterfaceIP`。
+- **C3 已执行**：NAS `.env` 删除 `CFNAT_ALT_ADDR` / `CFNAT_ALT_PORT`，
+  `docker-compose.yml` 删除 `1235:1235` 映射。代码保留（默认空即关闭）。
+
+**回滚点**：`local/cloudflare-tools:rollback-20261116-204608`；
+备份 `_backup/pre-quality-20261116-204608/`（`proxy-active.json`、`docker-compose.yml`、`.env`）。
+
+**部署验证（20:47）**：
+
+- `/api/health` gitCommit=`3f423a6`，buildTime `2026-11-16T12:44:59Z`；
+- `docker top` 的 cfnat 实参已无 `-addr2/-port2`，`ss -lnt` 只有 1234；
+- 经 1234 实测 3/3 HTTP 200（0.33s）；
+- `/api/status` 的 `qualityScheduler` 已出现 `lastActiveChangeAt` / `lastErrorAt` 字段。
+
+**已知观察点**：升级前落盘的旧 `lastError` 没有时间戳（`lastErrorAt` 为零值），
+要等下一次真实换池或手动优选才会被清掉。首次手动优选后应能看到 `lastActiveChangeAt`
+前进，且调度器不再在 30 分钟内二次换池。
+
 ---
 
 ## 5. 部署与回滚
