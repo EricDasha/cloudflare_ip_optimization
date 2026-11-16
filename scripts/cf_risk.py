@@ -24,9 +24,10 @@
       * 相对塌方：今天 < 参照中位数 × 0.5（参照本身要有意义，> 5%）
       * 稳健 z < -3.5（仅在 MAD > 0 时可用；MAD = 0 说明历史完全一致，
         只有相对塌方这条能判）
-  - 官方段全灭单独成条：连续 2 个样本 official_tested >= 5 且 official_pass
-    = 0，且 7 天内出现过 official_pass > 0。要求连续两次是为了排除单次抖动
-    （VLESS 终审本身就有偶发超时）。
+  - 官方段单独用 canary 判：直接 TCP 连 5 个众所周知的 CF anycast 边缘地址，
+    5 个全不通 = 整段封锁（2026-11-17 实测的故障形态），只做状态迁移告警，
+    持续封锁期间不再每轮刷屏；恢复时报一次。不走 official_tested，因为官方
+    IP 不可达时初筛就把它们筛掉了，终审名单里永远凑不满样本。
 
 数据量要求（宁可不说，不可乱说）：
   - 当天终审样本 < 15 个：比例不可信，只记录不判定。
@@ -45,8 +46,10 @@
 import argparse
 import json
 import os
+import socket
 import statistics
 import sys
+import threading
 import time
 
 from cf_inspect import API_BASE, in_cf_segment, http_json
@@ -66,6 +69,19 @@ MAD_Z_LIMIT = float(os.environ.get("CF_RISK_MAD_Z", "3.5"))
 OFFICIAL_MIN_TESTED = 5            # 单条样本里官方段至少测了这么多个才算证据
 OFFICIAL_DEAD_STREAK = 2           # 连续这么多个样本官方段全灭才算坐实
 
+# 官方段探针（canary）：直接 TCP 连这几个众所周知的 CF anycast 边缘地址。
+# 选它们是因为与订阅、池子、优选结果全都无关——测的是「本机到 CF 官方段的
+# 网络本身」，也就是 2026-11-17 定位到的那个故障面（运营商 IP 级封锁）。
+# 走 /api/status 的 official_tested 不可靠：官方 IP 不可达时初筛就把它们
+# 筛掉了，终审名单里往往只剩 1~2 个，永远凑不满判据。
+OFFICIAL_CANARY = [
+    "104.16.0.1", "104.17.0.1", "172.64.0.1",
+    "162.159.36.1", "188.114.96.1",
+]
+CANARY_TIMEOUT = float(os.environ.get("CF_RISK_CANARY_TIMEOUT", "3"))
+CANARY_DEAD_MIN = 5                # 5 个全不通才判「整段封锁」
+CANARY_ALIVE_MIN = 3               # 至少 3 个通才算「官方段可达」
+
 SOURCE_RATIO_WARN = 0.4            # 今天源成功率低于此值
 SOURCE_RATIO_BASE = 0.8            # 且历史基线高于此值 —— 才算「塌方」
 POOL_SHRINK_FACTOR = 0.5           # 池内 IP 数低于基线的一半
@@ -74,7 +90,49 @@ POOL_SHRINK_FACTOR = 0.5           # 池内 IP 数低于基线的一半
 # ---- 采样 ---------------------------------------------------------------
 
 
-def extract(status, now=None):
+def _tcp_connect(ip, port, timeout):
+    s = socket.socket()
+    s.settimeout(timeout)
+    try:
+        s.connect((ip, port))
+        return True
+    except Exception:
+        return False
+    finally:
+        s.close()
+
+
+def probe_official_canary(connect=None, ips=None, timeout=None):
+    """并发 TCP 探测官方段 canary，返回 (可达数, 总数)。
+
+    只做 TCP 三次握手，不发 TLS。2026-11-17 实测：官方段被运营商封锁时
+    表现为静默丢包（connect 超时），不是 RST；所以超时即判不可达。
+    5 个地址并发，墙钟时间 ≈ 1 个 timeout，不会拖慢两小时一轮的巡检。
+    """
+    connect = connect or _tcp_connect
+    ips = ips or OFFICIAL_CANARY
+    timeout = CANARY_TIMEOUT if timeout is None else timeout
+    results = {}
+    lock = threading.Lock()
+
+    def worker(ip):
+        ok = False
+        try:
+            ok = bool(connect(ip, 443, timeout))
+        except Exception:
+            ok = False
+        with lock:
+            results[ip] = ok
+
+    threads = [threading.Thread(target=worker, args=(ip,), daemon=True) for ip in ips]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout + 2)
+    return sum(1 for v in results.values() if v), len(ips)
+
+
+def extract(status, now=None, canary=None):
     """从 /api/status 抽一条样本。
 
     stage 语义（web/funnel.go）：
@@ -99,6 +157,10 @@ def extract(status, now=None):
     official_pass = sum(1 for r in official
                         if (r.get("stage") or "") == "VLESS_PASS")
 
+    if canary is None:
+        canary = probe_official_canary()
+    canary_alive, canary_total = canary
+
     srcs = status.get("sources") or {}
     src_fetches = 0
     src_successes = 0
@@ -121,6 +183,8 @@ def extract(status, now=None):
                         if (r.get("errorClass") or "") == "timeout"),
         "official_tested": len(official),
         "official_pass": official_pass,
+        "canary_alive": canary_alive,
+        "canary_total": canary_total,
         "pool_ips": len(pa.get("ips") or []),
         "pool_domains": len(pa.get("domains") or []),
         "segments": len(status.get("poolSegments") or {}),
@@ -146,8 +210,11 @@ def aggregate(samples):
     ratios = [s["src_successes"] / float(s["src_fetches"])
               for s in samples if s.get("src_fetches")]
     pools = [s.get("pool_ips", 0) for s in samples]
+    last = samples[-1]
     return {
         "samples": len(samples),
+        "canary_alive": last.get("canary_alive"),
+        "canary_total": last.get("canary_total"),
         "finalists": finalists,
         "pass": passed,
         "ratio": (passed / float(finalists)) if finalists else None,
@@ -190,10 +257,10 @@ def prune(store, today):
     store["days"] = {k: store["days"][k] for k in keep}
 
 
-def record(status, path=None, now=None):
+def record(status, path=None, now=None, canary=None):
     """追加一条样本；返回 (store, sample)。"""
     now = now or time.time()
-    sample = extract(status, now)
+    sample = extract(status, now, canary=canary)
     store = load_store(path)
     today = day_key(now)
     bucket = store["days"].setdefault(today, [])
@@ -243,26 +310,52 @@ def evaluate(store, now=None):
         out.append(("INFO", "风控模型无当日样本", "本轮状态读取失败或池为空"))
         return out
 
-    # 1) 官方段全灭：连续 N 条样本官方段全测全灭。
+    # 1) 官方段 canary：状态迁移时告警，持续封锁不重复刷屏。
+    #
+    # 为什么不用 official_tested/official_pass 判「整段封锁」：官方 IP 不可达
+    # 时初筛就把它们筛掉了，终审名单里往往只剩 1~2 个，永远凑不满判据；
+    # 而 2026-11-17 的故障恰恰是「官方段全封、反代还能用」，必须能报出来。
+    state = store.setdefault("state", {})
+    blocked = bool(state.get("officialBlocked"))
+    ca = today_agg.get("canary_alive")
+    ct = today_agg.get("canary_total") or len(OFFICIAL_CANARY)
+
+    if ca is not None:
+        all_dead = ca <= max(0, ct - CANARY_DEAD_MIN)
+        healthy = ca >= CANARY_ALIVE_MIN
+        if all_dead and not blocked:
+            state["officialBlocked"] = True
+            state["officialBlockedSince"] = int(now)
+            out.append(("CRITICAL", "官方 IP 段整体不可达",
+                        "canary %d/%d 全部超时（%s）——官方 anycast 被运营商"
+                        "整段封锁，池子只能靠第三方反代" %
+                        (ca, ct, ", ".join(OFFICIAL_CANARY[:3]) + " 等")))
+        elif all_dead and blocked:
+            since = state.get("officialBlockedSince") or int(now)
+            hours = max(0, int((now - since) // 3600))
+            out.append(("INFO", "官方段仍被封锁",
+                        "canary %d/%d 不可达，已持续 %d 小时；反代池不受影响" %
+                        (ca, ct, hours)))
+        elif healthy and blocked:
+            state["officialBlocked"] = False
+            state.pop("officialBlockedSince", None)
+            out.append(("INFO", "官方段已恢复",
+                        "canary %d/%d 可达——可以让官方 IP 重新参与优选" % (ca, ct)))
+        elif healthy and today_agg["official_tested"] == 0 and \
+                today_agg["finalists"] >= MIN_FINALISTS:
+            out.append(("WARN", "官方段可达却没进终审",
+                        "canary %d/%d 可达，但终审名单里 0 个官方段地址——"
+                        "查候选源与初筛" % (ca, ct)))
+
+    # 1b) 官方段 TCP 可达但终审全灭：可能是 L7 / SNI 层干扰，与整段封锁不同。
     recent = _recent_samples(store, OFFICIAL_DEAD_STREAK)
-    ever_alive = any((a.get("official_pass") or 0) > 0
-                     for a in (aggregate(store["days"][k])
-                               for k in store["days"]))
-    if (len(recent) >= OFFICIAL_DEAD_STREAK and ever_alive and
+    if (ca is not None and ca >= CANARY_ALIVE_MIN and
+            len(recent) >= OFFICIAL_DEAD_STREAK and
             all(s.get("official_tested", 0) >= OFFICIAL_MIN_TESTED and
                 s.get("official_pass", 0) == 0 for s in recent)):
-        out.append(("CRITICAL", "官方 IP 段疑似全灭",
-                    "连续 %d 次终审里官方段 0 通过（每次至少测 %d 个）——"
-                    "疑似运营商掐断 CF anycast" %
-                    (len(recent), OFFICIAL_MIN_TESTED)))
-
-    # 2) 官方段进不了短名单：以前能进，今天一个都没有。
-    if ever_alive and today_agg["official_tested"] == 0:
-        prior_off = [a["official_tested"] for a in prior if a["official_tested"]]
-        if prior_off and statistics.median(prior_off) >= OFFICIAL_MIN_TESTED:
-            out.append(("WARN", "官方段未进终审名单",
-                        "今天官方段 0 个进短名单，历史基线中位数 %d 个——"
-                        "官方段可能整段不可达" % statistics.median(prior_off)))
+        out.append(("WARN", "官方段 TCP 通但终审全灭",
+                    "连续 %d 次终审官方段 0 通过（每次至少测 %d 个）——"
+                    "疑似 L7 干扰" % (len(recent), OFFICIAL_MIN_TESTED)))
 
     # 3) 验收通过率断崖。
     if today_agg["finalists"] < MIN_FINALISTS:
@@ -325,18 +418,23 @@ def evaluate(store, now=None):
     return out
 
 
-def check(status, path=None, now=None, record_sample=True):
+def check(status, path=None, now=None, record_sample=True, canary=None):
     """巡检入口：记录样本并返回 [(level, title, detail), ...]。"""
     now = now or time.time()
     if record_sample:
-        store, _ = record(status, path, now)
+        store, _ = record(status, path, now, canary=canary)
     else:
         store = load_store(path)
         today = day_key(now)
         bucket = store["days"].setdefault(today, [])
-        bucket.append(extract(status, now))
+        bucket.append(extract(status, now, canary=canary))
         prune(store, today)
-    return evaluate(store, now)
+    verdicts = evaluate(store, now)
+    if record_sample:
+        # evaluate 会推进 state（官方段封锁标记），必须落盘，否则每轮都当
+        # 首次发现、每轮都报一次 CRITICAL。
+        save_store(store, path)
+    return verdicts
 
 
 # ---- 单独运行 -----------------------------------------------------------
