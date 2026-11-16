@@ -957,6 +957,14 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 	}
 	if len(passed) < cfg.MinPool {
 		message := fmt.Sprintf("%s 终审仅 %d 个通过，低于最小池 %d", finalStage, len(passed), cfg.MinPool)
+		// 旧池还活着时，降级采用未验数据面的候选是净损失：把已经过数据面
+		// 验证的出口换成只过了 TCP/TLS/WS 的未知成员。2026-11-16 事故就是
+		// 这条路把 6 个可用出口换成了 3 个 dial timeout 目标，cfnat 每个目标
+		// 等 2 秒，客户端 6 秒后连接被关。降级只留给「旧池已死」这一种情况。
+		if alive, total := a.verifyActivePoolAlive(); alive > 0 {
+			a.setProxyPoolError(fmt.Sprintf("%s；旧池 %d/%d 存活，跳过降级并继续沿用", message, alive, total), results)
+			return
+		}
 		// L3 降级：VLESS 数据面没验过，但 WS 101 已经通过 —— 说明 TCP/TLS/WS
 		// 三层都通，失败点大概率在探测目标而非链路本身。池子空掉比用
 		// 「未完成终审」的候选严重得多，故降级采用并明确标记。
