@@ -6,10 +6,15 @@ cfnat-watchdog: keep the sing-box tunnel alive and Telegram-alerted.
 - Fallback mode: vless outbound -> one of the verified CF direct-entry domains
 
 Every run (cron, 1/min):
-  1. probe tunnel through sing-box (gstatic 204)
+  1. probe tunnel through sing-box (Cloudflare trace / 204, two endpoints)
   2. healthy + pool mode          -> done
      healthy + fallback mode      -> probe pool directly (cert check);
-                                     2 consecutive OK -> switch back + TG alert
+                                     5 consecutive OK spanning >=3 min, and
+                                     only after a dwell on fallback -> switch
+                                     back + TG alert. The dwell doubles every
+                                     time the pool dies again within an hour
+                                     (15 -> 30 -> 60 min cap), so a flapping
+                                     pool cannot restart sing-box every 2 min.
   3. dead   -> debounce (2 consecutive dead runs), then rotate fallback
      entries directly; trying a fallback IS the node liveness test
      (it only succeeds if the node is up) -> TG alert on switch
@@ -46,11 +51,17 @@ LOCK_F = f"{SB_DIR}/watchdog.lock"
 
 POOL_SERVER, POOL_PORT = "192.168.1.50", 1234
 PROXY = "http://127.0.0.1:39281"
-# MUST be a site that does NOT hit the geosite-cn/geoip-cn direct rules -
-# gstatic.com resolves to a CN-reachable edge and the probe silently goes
-# out via `direct`, so it can never detect a dead tunnel (learned the hard way).
-PROBE_URL = "https://www.google.com/generate_204"
-TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
+# 探针要同时满足两条：不会被 geosite-cn/geoip-cn 规则直连（gstatic 就是
+# 这样撒谎的），以及在节点出口真的可达。google 不满足第二条：2026-11-17
+# 夜里经隧道访问 google 全是 000，而 cloudflare trace 正常返回境外 IP——
+# 旧探针把好隧道判死，看门狗每分钟重启一次 sing-box、池子与兜底来回切。
+# 隧道本身就是 CF 边缘，用 CF 自家端点最稳；两个端点互为备份。
+PROBE_URLS = (
+    "https://www.cloudflare.com/cdn-cgi/trace",
+    "https://cp.cloudflare.com/generate_204",
+)
+PROBE_URL = PROBE_URLS[0]
+TRACE_URL = PROBE_URLS[0]
 
 # all verified 2026-10-24: every combo hands back the node cert with node SNI
 FALLBACKS = [
@@ -71,8 +82,17 @@ FALLBACKS = [
 # minute, so more than one attempt would make runs overlap and starve the
 # next tick. Rotation advances across runs instead (fb_idx persists).
 ATTEMPTS_PER_RUN = 1
-RECOVERY_CONSEC = 2
+# 切回池子的门槛必须比判死高得多，否则就是来回抽风：
+# 2026-11-17 夜里的实况是 22:46 判死切兜底、22:48 判「池已恢复」切回、
+# 22:49 又死——每 2 分钟重启一次 sing-box，告警刷屏且代理一直抖。
+# 现在：连续 5 次通过、且跨度 >= 3 分钟；另外进兜底后至少停留 15 分钟。
+RECOVERY_CONSEC = 5
+RECOVERY_WINDOW = 180
+MIN_FALLBACK_DWELL = 900
+FLAP_BACKOFF_MAX = 3600   # 抖动退避上限：兜底最多停留 60 分钟
+STABLE_RESET = 3600       # 池子活过 1 小时才算「稳定」，抖动计数清零
 ALERT_COOLDOWN = 1800  # seconds between identical alerts
+RECOVERY_ALERT_COOLDOWN = 1800  # 恢复通知同样限频，且只有发过 ⚠️ 才发 ✅
 RESTART_SETTLE = 10    # seconds after docker restart before probing
 # CF direct-entry handshakes routinely take 1.5-7s from CN; an 8s cap made
 # ~70% of probes read as "dead". 20s + 2 consecutive failures to debounce.
@@ -142,14 +162,22 @@ def current_target():
 
 
 def probe_tunnel(timeout=PROBE_TIMEOUT):
-    try:
-        r = run(["curl", "-s", "-o", "/dev/null", "-m", str(timeout), "-x", PROXY,
-                 "-w", "%{http_code}", PROBE_URL], timeout=timeout + 6)
-    except subprocess.TimeoutExpired:
-        # 超时即探针失败：旧代码让 TimeoutExpired 一路抛到 cron 主流程，
-        # 整轮崩掉，本轮 dead_consec 白计。
-        return False
-    return r.stdout.strip() == "204"
+    for url in PROBE_URLS:
+        try:
+            r = run(["curl", "-s", "-m", str(timeout), "-x", PROXY,
+                     "-w", "\n%{http_code}", url], timeout=timeout + 6)
+        except subprocess.TimeoutExpired:
+            # 超时即探针失败：旧代码让 TimeoutExpired 一路抛到 cron 主流程，
+            # 整轮崩掉，本轮 dead_consec 白计。
+            continue
+        body, _, code = r.stdout.rpartition("\n")
+        code = code.strip()
+        if url.endswith("cdn-cgi/trace"):
+            if code == "200" and "ip=" in body:
+                return True
+        elif code == "204":
+            return True
+    return False
 
 
 def egress_ip(timeout=PROBE_TIMEOUT):
@@ -426,6 +454,12 @@ def main():
     st = load_state()
     sni = sni_of(read_cfg())
     cur_server, cur_port = current_target()
+    # mode 以 sing-box 实际指向为准。旧版轮换失败时会把 mode 留在 "pool"，
+    # 而 target 已经改成了兜底域名——于是「切回池子」的分支永远不执行，
+    # 卡在兜底上直到人工发现。这里每轮按 target 校正一次。
+    st["mode"] = "pool" if (cur_server, cur_port) == (POOL_SERVER, POOL_PORT) else "fallback"
+    if st["mode"] == "fallback" and not st.get("dwell_until"):
+        st["dwell_until"] = time.time() + MIN_FALLBACK_DWELL
 
     # ---- 1) tunnel healthy? ----
     healthy, detail = tunnel_health()
@@ -433,20 +467,44 @@ def main():
         st["dead_consec"] = 0
         flush_pending(st)  # the tunnel works again - deliver what we owed
         if st.get("mode") == "fallback":
+            now = time.time()
+            if now < st.get("dwell_until", 0):
+                # 抖动退避期内不碰池子：切回只会再死一次，还白重启一次 sing-box
+                st["consec_ok"] = 0
+                st["recovery_since"] = 0
+                save_state(st)
+                return
             if cert_ok(POOL_SERVER, POOL_PORT, sni):
                 st["consec_ok"] = st.get("consec_ok", 0) + 1
-                if st["consec_ok"] >= RECOVERY_CONSEC:
+                if st["consec_ok"] == 1:
+                    st["recovery_since"] = now
+                if (st["consec_ok"] >= RECOVERY_CONSEC
+                        and now - st.get("recovery_since", now) >= RECOVERY_WINDOW):
                     log("pool recovered, switching back to cfnat entry")
                     if set_target(POOL_SERVER, POOL_PORT) and tunnel_health()[0]:
+                        sb = st.get("switchback_at", 0)
+                        st["flap_count"] = (
+                            st.get("flap_count", 0) + 1
+                            if sb and now - sb < STABLE_RESET else 0)
+                        st["switchback_at"] = now
                         st["mode"] = "pool"
                         st["consec_ok"] = 0
-                        notify(st, "✅ cfnat 池已恢复（连续探测通过），sing-box 已切回 "
-                                f"{POOL_SERVER}:{POOL_PORT}，兜底入口下线。")
+                        st["recovery_since"] = 0
+                        st["dwell_until"] = 0
+                        # 只有真的发过 ⚠️ 才配一条 ✅，否则就是「空发」
+                        alerted = st.pop("dead_alerted", False)
+                        if (alerted
+                                and now - st.get("last_recovery_alert", 0) > RECOVERY_ALERT_COOLDOWN):
+                            if notify(st, "✅ cfnat 池已恢复（连续探测通过），sing-box 已切回 "
+                                       f"{POOL_SERVER}:{POOL_PORT}，兜底入口下线。"):
+                                st["last_recovery_alert"] = now
                     else:
                         st["consec_ok"] = 0
+                        st["recovery_since"] = 0
                         log("switch-back failed; staying on fallback")
             else:
                 st["consec_ok"] = 0
+                st["recovery_since"] = 0
             save_state(st)
         else:
             st["consec_ok"] = 0
@@ -483,13 +541,26 @@ def main():
             st["mode"] = "fallback"
             st["fb_idx"] = (idx + 1) % len(FALLBACKS)
             st["consec_ok"] = 0
-            log(f"fallback {dom}:{port} carries the tunnel [{fb_detail}]")
+            st["recovery_since"] = 0
             now = time.time()
+            sb = st.get("switchback_at", 0)
+            st["flap_count"] = (
+                st.get("flap_count", 0) + 1
+                if sb and now - sb < STABLE_RESET else 0)
+            dwell = min(MIN_FALLBACK_DWELL * (2 ** min(st.get("flap_count", 0), 2)),
+                        FLAP_BACKOFF_MAX)
+            st["dwell_until"] = now + dwell
+            st["fallback_since"] = now
+            log(f"fallback {dom}:{port} carries the tunnel [{fb_detail}], "
+                f"dwell {dwell // 60}min, flapped {st['flap_count']}x")
             if now - st.get("last_alert", 0) > ALERT_COOLDOWN:
+                extra = (f"，池子近期已反复 {st['flap_count']} 次，先停留 {dwell // 60} 分钟再试"
+                         if st.get("flap_count") else "，池恢复后自动切回")
                 if notify(st, "⚠️ cfnat 隧道不通，sing-box 已切换兜底入口 " + dom + ":" + str(port) +
-                           f"（候选 {idx + 1}/{len(FALLBACKS)}），代理与 NewAPI 上游已恢复。"
-                           "池恢复后自动切回。（30 分钟冷却）"):
+                           f"（候选 {idx + 1}/{len(FALLBACKS)}），代理与 NewAPI 上游已恢复" +
+                           extra + "。"):
                     st["last_alert"] = now
+                    st["dead_alerted"] = True
             save_state(st)
             return
         st["fb_idx"] = (idx + 1) % len(FALLBACKS)

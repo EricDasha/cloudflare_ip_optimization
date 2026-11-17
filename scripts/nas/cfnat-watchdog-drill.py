@@ -134,7 +134,16 @@ try:
     print("    (nothing is restored here; the watchdog compares the pool cert and rewrites)")
     ok, info = tunnel_ok()
     print("tunnel still on fallback:", ("OK via " + info) if ok else ("DOWN: " + info))
-    deadline = time.time() + 300
+    # 看门狗进兜底后有防抖停留期（首轮 15 分钟，抖动过则翻倍），
+    # 演练不能干等一小时：直接把停留期清零，模拟「停留期已过」。
+    st = read_state()
+    if isinstance(st, dict) and "err" not in st:
+        st["dwell_until"] = 0
+        st["consec_ok"] = 0
+        st["recovery_since"] = 0
+        json.dump(st, open(STATE, "w"), indent=2)
+        print("  dwell cleared for the drill")
+    deadline = time.time() + 480
     while time.time() < deadline:
         time.sleep(25)
         st = read_state()
