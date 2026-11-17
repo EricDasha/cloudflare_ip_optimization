@@ -219,9 +219,12 @@ def tunnel_health():
     request leaked out via the `direct` outbound and proved nothing."""
     if not probe_tunnel():
         return False, "probe failed"
-    eip = egress_ip()
+    # 探针刚证明隧道能应答，取出口 IP 却偶尔会慢到超时（实测 trace 一次
+    # 10.8s 才回来）。抓不到就再试一次（短超时），否则两轮巧合能叠成一次
+    # 误判死，又去重启一个本来好好的 sing-box。
+    eip = egress_ip() or egress_ip(timeout=12)
     if not eip:
-        return False, "no egress ip"
+        return False, "no egress ip (2 tries)"
     dip = direct_ip()
     if dip and eip == dip:
         return False, f"leaked direct (ip={eip})"
