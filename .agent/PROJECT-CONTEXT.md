@@ -437,11 +437,11 @@ const fakeBinEnv = "GO_FAKE_BIN"
 
 ---
 
-## 9. 当前已知问题（2026-11-12 22:55 CST）
+## 9. 当前已知问题（2026-11-18 01:20 CST）
 
 | # | 问题 | 严重度 | 状态 |
 |---|---|---|---|
-| 1 | cfnat 每 10–30 分钟重启一次，每次断掉全部在途连接 | 高 | D1 已上线观察中 |
+| 1 | cfnat 每 10–30 分钟重启一次，每次断掉全部在途连接 | 高 | **2026-11-18 定位**：D1 之外还有一层——看门狗探针（google generate_204）在隧道正常时恒 000，把好隧道判死并每分钟重启 sing-box，详见 §16；已修，观察中 |
 | 2 | 换池抖动（三条后台路径无合并去重） | 高 | D2 只有设计 |
 | 3 | 部分死亡无法触发救援（10 个 IP 死 6 个时被冷却闸拦 30 分钟） | 中 | 只有设计 |
 | 4 | 非 CF 域名走反代 IP 必然 TLS 失败 | 低（结构性） | 不修 |
@@ -511,6 +511,9 @@ cfnat.go                      TCP 转发器（//go:build ignore）
 cfdata.go                     辅助数据面（//go:build ignore）
 scripts/build-dist.ps1        Windows 构建脚本
 scripts/nas/                  NAS 侧运维脚本
+  cfnat-watchdog.py           隧道看门狗（root cron，每分钟；见 §16）
+  cfnat-watchdog-drill.py     看门狗故障演练（注入故障 + finally 恢复）
+  singbox-fallback-refresh.py 机场订阅刷新（cron 04:41；见 §15.4）
 .github/workflows/ci.yml      Linux CI
 ```
 
@@ -567,118 +570,68 @@ NODE_USE_ENV_PROXY=1 node -e 'fetch("https://api.telegram.org/").then(r=>console
 
 `/vol1/1000/Docker/sing-box/` 是 NAS 上所有需要出网的进程共用的本地代理，监听 `0.0.0.0:39281`。
 它不属于本仓库的构建产物，但它的失效会连带 OpenClaw、`cf_inspect.py` 告警、所有走代理的脚本一起断掉。
+主出站指向 `192.168.1.50:1234`（cfnat），cfnat 出口死了自动落到机场节点——「最后的波纹」。
 
-**版本**：1.11.3 → 1.13.18（容器内 `sing-box version` 为准）。升级动机：1.11 不认
-`anytls://`（1.12+ 才有），而订阅里一批可用节点正是 anytls。1.12+ 的配置语法变化：
-DNS server 必须写 `type: tcp|udp`，不再支持 `"detour": "direct"`（direct 是空 outbound，
-会直接 FATAL：`detour to an empty direct outbound makes no sense`），clash_api 在官方构建里已移除。
+### 15.1 为什么升级 / 破坏性变更
 
-**镜像**：`Dockerfile` 为 `FROM scratch`，只带 `sing-box` 二进制和 `/etc/ssl/certs/ca-certificates.crt`
-（`SSL_CERT_FILE` 指向它）。用 `FROM busybox` 会因为 `docker.fnnas.com` 镜像源 401 而构建失败。
+1.11.3 → 1.13.18（容器内 `sing-box version` 为准；旧二进制留 `sing-box.bak-20261117-200128`）。
+动机：1.11 不认 `anytls`（1.12+ 才有），订阅里一批可用节点正是 anytls。1.12+ 的语法变化：
 
-**网络**：`network_mode: host`。原因是要拿 IPv6——fnOS 没有 `ip6tables` 二进制（只有
-`xtables-nft-multi`），bridge 网络无法做 NAT66；host 网络直接继承宿主机的 `240e:` 全局地址。
-实测容器内经代理访问 `https://api6.ipify.org/` 返回 200。
+- DNS server 必须写 `"type": "tcp"|"udp"`，旧的 `address: tcp://…` 失效；本地解析要 `route.default_domain_resolver`。
+- DNS server **不能** `detour: "direct"`——direct 是空 outbound，启动即
+  `FATAL start service: start dns/udp[local]: detour to an empty direct outbound makes no sense`。
+- 官方精简构建**不含 clash_api**（`clash api is not included in this build`），别配。
 
-**host 网络必踩的坑**：`route.auto_detect_interface: true` 会给拨号 socket 做
-`SO_BINDTODEVICE`。host 模式下拨 `192.168.1.50:1234`（宿主机自己的 IP）会被强制从 `enp1s0`
-发出去，本机回环路径被绕过，结果是 `dial tcp 192.168.1.50:1234: i/o timeout`（恰好 5s），
-而宿主机 shell 里 `curl` 同一个地址却是 200。**必须设 `auto_detect_interface: false`**。
+镜像 `FROM scratch` + 拷宿主 `/etc/ssl/certs/ca-certificates.crt`（`SSL_CERT_FILE` 指向它）。
+`FROM busybox` 从 `docker.fnnas.com` 拉会 401。
 
-**兜底链**：`outbounds` = `proxy`（VLESS → 192.168.1.50:1234）+ `fb0..fb5`（机场节点）+
-`urltest` 组 `auto`，`route.final = "auto"`，探测 URL `https://api.telegram.org/`、间隔 2m。
-主通道还活着时自动选 `proxy`；cfnat 出口彻底死掉时自动切到机场节点。
-这就是「最后的波纹」：`cf_inspect.py` 的 Telegram 告警本来就先走 39281，
-所以即使 cfnat 全灭，只要机场还有活节点，当天的风控告警仍然发得出去。
-实测（把 proxy 指向 `127.0.0.1:9` 模拟死亡）：`tg 302 2.44s`、`gfw 204 0.23s`。
+### 15.2 host 网络（为了 IPv6）与必踩的坑
 
-**节点刷新**：`scripts/nas/singbox-fallback-refresh.py`（已部署到
-`/vol1/1000/Docker/sing-box/scripts/`，cron 每天 04:41 跑）。流程：
-拉订阅（直连 → 39281 代理 → 本地缓存）→ TCP 预筛（连不上不启动 sing-box）→
-第一轮 gfw/tg 实测 → 存活者第二轮复测，两轮都通才算稳定，延迟取两轮最大值 →
-前 10 个下载 1MB 测吞吐（`MIN_SPEED_MBPS=0.05`，只淘汰几乎不能传数据的节点；
-测不出保留，不据未知判死）→ 按延迟排序、同类型最多 3 个、总共最多 8 个 →
-`sing-box check` 验证（容器内挂 srs 与临时 cache）→ 通过才写盘并重启 →
-Telegram 推送刷新结果（凭据读 `openclaw.json`，读不到静默跳过；重启后 39281 未就绪会重试 5 次）。
-存活少于 2 个不动现有 `fb*` 并发一条失败通知。手动只看结果：`--dry-run`。
-吞吐门槛故意定得很低：兜底只用来发告警文本，几十 kbps 就够；排序依据是延迟，不是带宽。
+NAS 有全局 IPv6（`240e:313:b59:a400::/64`），但只有 `xtables-nft-multi`、**没有 `ip6tables`**，
+Docker 无法给 bridge 做 NAT66，所以 `network_mode: host`（去掉 `ports`/`networks`）。
+实测容器内 `curl https://api6.ipify.org/` → 200。
 
-**订阅源**（UA 用 `v2rayN/6.42` 拿 base64 URI 列表）。2026-11-17 实测（NAS 直连）：
-- ripaojiedian：`raw.githubusercontent.com` 超时（10s），`raw.kkgithub.com` 直接失败；
-  可用镜像 `down.nigx.cn`（2.0s）、`cdn.jsdelivr.net/gh/ripaojiedian/freenode@main/sub`（1.2s）、
-  `ghfast.top/...`（1.4s）、`gh-proxy.com/...`（1.1s）。
-- laziji：`https://gy.xiaozi.us.kg/sub?token=laziji` 直连 200（2.8s），但**经 39281 代理反而失败**
-  （Worker 到该域名不通）。
-- 拉取顺序：**先直连所有源 → 再经 39281 代理试所有源 → 最后读上次成功的本地缓存**
-  （`scripts/cache/<tag>.sub`）。GFW 收紧时直连常正是断的，而 39281 会落到机场节点上，
-  这条反向路径才是关键时刻的活路。
+**host 模式必踩**：`route.auto_detect_interface: true` 会给拨号 socket 做 `SO_BINDTODEVICE=enp1s0`，
+于是拨 `192.168.1.50:1234`（宿主自己的 IP）被强行送到网线，路由器不做 hairpin，
+表现为 `dial tcp 192.168.1.50:1234: i/o timeout`（正好 5 秒），而宿主 shell 里 `curl` 同一地址 0.2 秒通。
+**必须 `auto_detect_interface: false`**。排查时用 `ss -ltnp` + 宿主 `curl --connect-to …:127.0.0.1:1234` 对照，
+能立刻区分「cfnat 死」和「sing-box 拨号路径有问题」。
 
-**备份**：`config.json.bak-*`、`docker-compose.yml.bak-hostnet-20261117-201800`、
-`sing-box.bak-20261117-200128`（1.11.3 二进制）。回滚 = 恢复 compose 的 bridge 配置 +
-旧二进制 + `config.json.bak-20261117-200128`，再 `docker compose up -d --build`。
+### 15.3 兜底链
 
----
+```
+proxy (vless → 192.168.1.50:1234)   ← 主通道
+fb0..fb7                            ← 机场节点（ripaojiedian + laziji）
+auto = urltest[proxy, fb0..fbN]     ← url=https://api.telegram.org/ interval=2m
+route.final = auto
+```
 
-## 15. sing-box 主通道与机场兜底（2026-11-17）
-
-**最终形态**：`/vol1/1000/Docker/sing-box`，sing-box **1.13.18**，`network_mode: host`。
-入站 `0.0.0.0:39281`，出站组 `auto` = urltest `[proxy, fb0…fb5]`，`route.final=auto`。
-`proxy` 指向 `192.168.1.50:1234`（cfnat 主通道）；`fb*` 是机场兜底节点。
-
-### 15.1 为什么升级
-
-旧 1.11.3 不认 `anytls`（1.12+ 才有），laziji 订阅里大量可用节点是 anytls，全被浪费。
-1.12/1.13 的破坏性改动：
-- DNS server 必须写 `"type": "tcp"|"udp"`（旧的 `address: tcp://…` 全部失效）；
-- DNS server 不能 `detour: "direct"`——空的 direct 出站会被拒，启动即
-  `FATAL start service: start dns/udp[local]: detour to an empty direct outbound makes no sense`；
-- 本地域名解析要 `route.default_domain_resolver`；
-- 官方发布的精简二进制**不含 clash_api**（`clash api is not included in this build`），别配。
-
-镜像已改成 `FROM scratch` + 复制宿主 `/etc/ssl/certs/ca-certificates.crt`（`SSL_CERT_FILE` 指向它），
-因为 `busybox:latest` 从 `docker.fnnas.com` 拉会 401。
-
-### 15.2 为什么用 host 网络（IPv6）
-
-NAS 有全局 IPv6（`240e:313:b59:a400::/64`），但**没有 ip6tables**（只有 `xtables-nft-multi`），
-Docker 无法给 bridge 网络做 NAT66。`network_mode: host` 让容器直接共享宿主网络栈，IPv6 立刻可用
-（实测容器内 `curl https://api6.ipify.org/` → 200）。
-
-**代价与坑**：host 模式下 `route.auto_detect_interface: true` 会给出站 socket 做 `SO_BINDTODEVICE=enp1s0`，
-此时拨 `192.168.1.50:1234`（宿主自己的 IP）会被强行送到网线上，而不是走本地环回，路由器不做 hairpin，
-于是 5 秒后 `dial tcp 192.168.1.50:1234: i/o timeout`，而宿主机 shell 里同样的连接 0.2 秒就通。
-**修法：`route.auto_detect_interface = false`。** 这个开关在纯代理模式下没有用处。
-
-### 15.3 兜底链与「最后的波纹」
-
-`urltest` 每 2 分钟用 `https://api.telegram.org/` 探测 `proxy` 与 6 个机场节点，
-cfnat 出口死掉时自动切到机场节点。实测：把 `proxy` 临时改成 `127.0.0.1:9` 起第二个容器，
-Telegram 仍 `302 2.4s`、gstatic `204 0.2s`。
-
-`cf_inspect.py` 的 Telegram 告警本来就固定走 `http://127.0.0.1:39281`，所以**兜底自动覆盖告警链路**：
-cfnat 死了，告警仍能发出去报「今天风控加强」，这就是「最后的波纹」。
-停机风险只剩 sing-box 本身，由 compose `restart: unless-stopped` 兜。
+主通道活着时 urltest 选 `proxy`（约 0.25s，机场节点 1.4s 起）。`cf_inspect.py` 的 Telegram 告警
+本来就固定走 `http://127.0.0.1:39281`，所以兜底自动覆盖告警链路：cfnat 全灭也能把
+「今天 GFW 风控加强」发出去。实测（`proxy` 指向 `127.0.0.1:9`）：`tg 302 2.44s`、`gfw 204 0.23s`。
 
 ### 15.4 订阅与刷新
 
-两个来源：
-- `https://gy.xiaozi.us.kg/sub?token=laziji`（UA 用 `v2rayN/6.42` 拿 base64 列表）
+两个来源（UA 用 `v2rayN/6.42` 拿 base64 URI 列表）：
+
 - `https://raw.githubusercontent.com/ripaojiedian/freenode/main/sub`
-  （镜像 `https://down.nigx.cn/…`、`https://raw.kkgithub.com/…`）
+- `https://gy.xiaozi.us.kg/sub?token=laziji`
 
-实测约 120 个候选里只有 6~9 个真正活着（Telegram 能通），以意大利 ss、法国/日本/新加坡 vless 为主。
-机场节点寿命短，所以有刷新脚本：
+2026-11-17 实测（NAS 直连）：`raw.githubusercontent.com` 超时、`raw.kkgithub.com` 直接失败；
+可用镜像 `down.nigx.cn`（2.0s）、`cdn.jsdelivr.net/gh/ripaojiedian/freenode@main/sub`（1.2s）、
+`ghfast.top/…`（1.4s）、`gh-proxy.com/…`（1.1s）。laziji 直连 200（2.8s），**经 39281 代理反而失败**
+（Worker 到该域名不通）。
+拉取顺序：**先直连所有源 → 再经 39281 代理试所有源 → 最后读上次成功的本地缓存**（`scripts/cache/<tag>.sub`）。
+GFW 收紧时直连常正是断的，而 39281 会落到机场节点上，这条反向路径才是关键时刻的活路。
 
-```bash
-# 干跑，只看结果
-/usr/bin/python3 /vol1/1000/Docker/sing-box/scripts/singbox-fallback-refresh.py --dry-run
-# 正式刷新（校验通过才写盘并重启）
-/usr/bin/python3 /vol1/1000/Docker/sing-box/scripts/singbox-fallback-refresh.py
-```
-
-脚本逻辑：存活 < 2 个就不动现有 `fb*`；新配置先 `sing-box check`（挂 geosite/geoip + 独立 cache 目录），
-通过才备份、写盘、重启。已加 cron：`41 4 * * *`，日志在 `scripts/refresh.log`。
-源码在仓库 `scripts/nas/singbox-fallback-refresh.py`。
+刷新脚本 `scripts/nas/singbox-fallback-refresh.py`（NAS 上 `/vol1/1000/Docker/sing-box/scripts/`，
+cron `41 4 * * *`，日志 `scripts/refresh.log`）。流程：拉订阅 → TCP 预筛（连不上不启动 sing-box）→
+第一轮 gfw/tg 实测 → 存活者第二轮复测（两轮都通才算稳定，延迟取两轮最大值）→ 前 10 个下载 1MB 测吞吐
+（`MIN_SPEED_MBPS=0.05`，只淘汰几乎不能传数据的节点，测不出保留）→ 按延迟排序、同类型最多 3 个、
+总共最多 8 个 → `sing-box check`（容器内挂 srs 与独立 cache）→ 通过才写盘并重启 →
+Telegram 推送结果（凭据读 `openclaw.json`，读不到静默跳过；重启后 39281 未就绪会重试 5 次）。
+存活 < 2 个不动现有 `fb*` 并发一条失败通知。手动只看结果：`--dry-run`。
+吞吐门槛故意很低：兜底只用来发告警文本，排序依据是延迟不是带宽。
 
 ### 15.5 回滚点
 
@@ -688,114 +641,43 @@ cfnat 死了，告警仍能发出去报「今天风控加强」，这就是「�
 | `docker-compose.yml` | `.bak-20261117-200128`（bridge + 端口映射）、`.bak-hostnet-20261117-201800` |
 | `sing-box` 二进制 | `sing-box.bak-20261117-200128`（1.11.3） |
 
-回滚 bridge 模式时记得把 `auto_detect_interface` 改回 `true`，否则不影响功能但没必要关。
+回滚 = 恢复 bridge compose + 旧二进制 + 旧配置 + `docker compose up -d --build`；
+bridge 模式下 `auto_detect_interface` 改回 `true` 也无害。
 
 ---
 
-## 15. sing-box 升级、IPv6 与机场兜底（2026-11-17）
+## 16. cfnat 看门狗（`scripts/nas/cfnat-watchdog.py`，2026-11-18 修）
 
-**位置**：NAS `/vol1/1000/Docker/sing-box`。sing-box 是 NAS 的出网代理（mixed 入站 `0.0.0.0:39281`），
-上游是 cfnat 的 `127.0.0.1/192.168.1.50:1234`。OpenClaw、`cf_inspect.py` 的 Telegram 告警都走这个代理。
+NAS 上 root cron 每分钟跑一次，判断「39281 隧道还通不通」，不通就把 sing-box 的 vless `server`
+切到兜底域名；池子恢复再切回 `192.168.1.50:1234`。状态在 `watchdog-state.json`，日志 `watchdog.log`。
+**2026-11-18 之前的版本把好隧道判成死的**，一周内反复重启 sing-box，这是「告警空发」的真正根因。
 
-### 15.1 升到 1.13.18
+### 16.1 根因：探针说谎
 
-1.11.3 不认识 `anytls`，订阅里大量可用节点因此被排除。1.13.18 支持 anytls/hysteria2/tuic，
-但有几处破坏性变更：
+探针原来打 `https://www.google.com/generate_204`。2026-11-17 夜里这个地址**经隧道恒 000**，
+而 `https://www.cloudflare.com/cdn-cgi/trace` 经隧道 200、出口 IP 是境外 `51.255.37.164`（≠ 本机 IPv6）
+——隧道一直是好的，坏的是探针。后果：每分钟判死 → 重启 sing-box → 轮换兜底 → 报「恢复」→ 再判死，
+池子/兜底每 2–3 分钟来回切，OpenClaw 和 Telegram 跟着抖。
 
-- DNS server 必须写 `"type": "tcp" / "udp"`；旧的 `address` 写法废弃。
-- 需要 `route.default_domain_resolver`（或每个 outbound 自带 resolver）。
-- `experimental.clash_api` 在这份构建里没有，写了会 FATAL。
-- **`dns.servers[].detour` 不能指向空 `direct`**，否则：
-  `FATAL: start service: start dns/udp[local]: detour to an empty direct outbound makes no sense`。
-  本地 DNS 直接删掉 `detour` 字段即可。
+**探针必须同时满足两条**：不被 geosite-cn/geoip-cn 规则直连（`gstatic` 就是这样撒谎的，回 204 但走的是本机），
+且在节点出口真的可达。现在只用 CF 自家端点（隧道本身就是 CF 边缘）：
+`www.cloudflare.com/cdn-cgi/trace`（要 200 且 body 含 `ip=`）+ `cp.cloudflare.com/generate_204`（要 204），互为备份。
 
-Dockerfile 已改为 `FROM scratch`（NAS 的 `docker.fnnas.com` 镜像源拉 busybox 会 401），
-CA 证书从宿主 `/etc/ssl/certs/ca-certificates.crt` 复制进镜像并设 `SSL_CERT_FILE`。
+### 16.2 防抽风的阈值
 
-### 15.2 IPv6：改用 host 网络
+| 常量 | 值 | 含义 |
+|---|---|---|
+| `DEAD_CONSEC` | 2 | 连续两轮失败才判死（CF 直连握手 1.4–6.8s，单次失败是常态）|
+| `RECOVERY_CONSEC` / `RECOVERY_WINDOW` | 5 / 180s | 切回池子要连续 5 次通过且跨度 ≥ 3 分钟 |
+| `MIN_FALLBACK_DWELL` | 900s | 进兜底后至少停留 15 分钟 |
+| `FLAP_BACKOFF_MAX` / `STABLE_RESET` | 3600s / 3600s | 一小时内再死则停留翻倍（15→30→60 分钟封顶）；池子活过 1 小时才清零抖动计数 |
+| `ALERT_COOLDOWN` / `RECOVERY_ALERT_COOLDOWN` | 1800s / 1800s | ⚠️ 与 ✅ 都限频；**✅ 只在发过 ⚠️（`dead_alerted`）时才发** |
 
-桥接网络下容器拿不到 IPv6：NAS 有全局 IPv6（`240e:…/64`），但宿主只有 `xtables-nft-multi`、
-没有 `ip6tables`，Docker 无法给 bridge 做 NAT66。改成 `network_mode: host` 后容器直接用宿主协议栈，
-`curl -x 127.0.0.1:39281 https://api6.ipify.org/` → 200。
+`mode` 每轮按 sing-box 实际 target 校正（轮换失败时旧版会把 mode 留在 `pool` 而 target 已是兜底域名，
+导致「切回」分支永不执行）。隧道断时 TG 发不出去，`notify()` 有待发队列，恢复后每轮补发一条。
 
-**关键坑**：host 模式下 `route.auto_detect_interface: true` 会把出站 socket `SO_BINDTODEVICE` 到 `enp1s0`，
-于是连 `192.168.1.50:1234`（宿主自己的 IP）时被强制走网线而不是 loopback，路由器不做 hairpin，
-表现为 `dial tcp 192.168.1.50:1234: i/o timeout`（正好 5 秒）。**必须设 `auto_detect_interface: false`。**
-桥接模式下这个选项无害，所以之前没暴露。
+### 16.3 演练
 
-### 15.3 机场兜底（urltest）
-
-`config.json` 的 outbounds 现在是：
-
-```
-proxy (vless → 192.168.1.50:1234)   ← 主通道
-fb0..fb5                            ← 机场节点（ripaojiedian + laziji）
-auto = urltest[proxy, fb0..fb5]     ← url=https://api.telegram.org/ interval=2m tolerance=100
-route.final = auto
-```
-
-cfnat 出口还活着时 urltest 选 `proxy`（约 0.25s，机场节点 1.4s 起）；
-cfnat 彻底死了就自动换机场节点——这就是「最后的波纹」：`cf_inspect.py` 的告警走 39281，
-不依赖 OpenClaw、也不依赖 cfnat，仍然能把「当天 GFW 风控加强」发到 Telegram。
-实测：把 `proxy` 指向 `127.0.0.1:9` 后，`api.telegram.org` 仍返回 302（2.4s）。
-
-**维护**：机场节点会死。刷新脚本在
-`/vol1/1000/Docker/sing-box/scripts/singbox-fallback-refresh.py`（仓库 `scripts/nas/` 同名文件）。
-它拉订阅、逐节点实测、按延迟选最多 6 个（同类型≤3），存活 <2 个就保持旧配置，
-新配置先 `sing-box check` 通过才落盘并重启。建议每日 cron，别在白天跑（探测会占用带宽）。
-
-### 15.4 回滚点
-
-- `config.json.bak-20261117-200128`：1.11.3 时代可用的旧配置
-- `sing-box.bak-20261117-200128`：1.11.3 二进制
-- `docker-compose.yml.bak-20261117-200128`：桥接版 compose
-- `config.json.bak-prefb-*`：加 urltest 之前
-- `config.json.bak-autodetect-*`：关 `auto_detect_interface` 之前
-
----
-
-## 15. sing-box 升级与「最后的波纹」兜底（2026-11-17）
-
-NAS 上 `/vol1/1000/Docker/sing-box` 是 39281 HTTP 代理的服务端，主出站指向 `192.168.1.50:1234`（cfnat）。
-当 cfnat 出口整体失效时，所有依赖代理的东西（OpenClaw、cf_inspect 的告警）都会断。本轮把它改成
-「主通道死了自动切机场节点」，并顺手拿到 IPv6。
-
-**版本**：1.11.3 → 1.13.18（旧二进制保留 `sing-box.bak-20261117-200128`）。升级理由：1.11 不认识
-`anytls`（1.12 才加），而订阅里大量可用节点是 anytls；另外 1.12+ 改了 DNS 写法。
-
-**镜像**：`Dockerfile` 改成 `FROM scratch` + 拷宿主 `/etc/ssl/certs/ca-certificates.crt`
-（`ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt`）。原来 `FROM busybox` 在本机镜像源
-`docker.fnnas.com` 会 401，且容器本来就没有 shell。
-
-**配置改造**（`config.json`）：
-1. DNS 服务器迁到 1.13 写法：`{"type":"tcp","server":"8.8.8.8"}` / `{"type":"udp",...}`，
-   并设 `route.default_domain_resolver`。**DNS server 不能写 `"detour":"direct"`**——
-   1.13 把空 `direct` 出站视为无效 detour，启动直接
-   `FATAL start service: start dns/udp[local]: detour to an empty direct outbound makes no sense`。
-2. `route.final` 从 `proxy` 改成 `auto`；新增 urltest 组：
-   `{"type":"urltest","tag":"auto","outbounds":["proxy","fb0"..."fb5"],"url":"https://api.telegram.org/","interval":"2m","tolerance":100}`。
-   主通道健康时 39281 仍走 cfnat；连续失败后自动落到机场节点。**这就是「最后的波纹」**：
-   `scripts/cf_inspect.py` 默认 `CF_TG_PROXY=http://127.0.0.1:39281`，cfnat 死光也能把
-   「今天 GFW 风控加强」发出去。
-3. `route.auto_detect_interface` 改为 `false`，见下面的坑。
-4. clash_api 不在这版二进制里（`clash api is not included in this build`），已删除。
-
-**IPv6**：宿主有全局 IPv6（`240e:313:b59:a400::/64`）但没有可用的 `ip6tables`，Docker 桥接网络
-无法 NAT66。解决办法是 `docker-compose.yml` 改 `network_mode: host`（去掉 `ports` 和 `networks`），
-容器直接共用宿主网络栈，IPv6 直通（实测 `api6.ipify.org` 200/0.56s）。备份
-`docker-compose.yml.bak-hostnet-20261117-201800`。
-
-**坑（很隐蔽）**：host 网络下 `auto_detect_interface: true` 会给拨号 socket 绑 `SO_BINDTODEVICE=enp1s0`，
-于是连 `192.168.1.50:1234`（宿主自己的 IP）时数据包被强制从网卡发出而不是走 loopback，
-路由器不做 hairpin → `dial tcp 192.168.1.50:1234: i/o timeout`。现象是 cfnat 本身 curl 200，
-sing-box 却 5 秒超时。关掉 `auto_detect_interface` 即恢复（实测 302/1.4s）。
-排查时用 `ss -ltnp` 和宿主直接 `curl --connect-to …:127.0.0.1:1234` 对照，能立刻区分「cfnat 死」和
-「sing-box 拨号路径有问题」。
-
-**机场兜底节点**：两个订阅源——
-`https://raw.githubusercontent.com/ripaojiedian/freenode/main/sub`（镜像 `down.nigx.cn`、`raw.kkgithub.com`）
-与 `https://gy.xiaozi.us.kg/sub?token=laziji`（UA 用 `v2rayN/6.42` 拿 base64 URI 列表）。
-实测 120 个候选里长期可用约 9 个，选 6 个进 urltest（同类型最多 3 个）。
-节点会过期，刷新脚本：`scripts/nas/singbox-fallback-refresh.py`（NAS 上是
-`/vol1/1000/Docker/sing-box/scripts/`）。它拉订阅→逐节点起临时 mixed 入站实测→存活 < 2 个就保持旧配置
-→新配置先 `sing-box check` 通过才写盘并重启。建议每日 cron 跑一次。
+`scripts/nas/cfnat-watchdog-drill.py`：注入故障（`server=192.168.1.50:1` 且**必须连 WS path 里的
+`proxyip=` 一起剥掉**，否则 sing-box 静默改道，造不出真故障）→ `finally` 恢复配置 → 出口 IP 判定。
+recovery 步骤前清零 `dwell_until/consec_ok/recovery_since`，deadline 480s。
