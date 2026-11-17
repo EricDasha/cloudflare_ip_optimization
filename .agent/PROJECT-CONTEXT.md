@@ -512,3 +512,38 @@ scripts/nas/                  NAS 侧运维脚本
 5. 看 `.agent/CHANGE-D-DESIGN.md` 的 D2 部分 —— 那是下一件该做的事。
 
 **不要**一上来就改代码。先确认现象，再定位，再改。这个项目踩过的坑大多来自「看到一个现象就下结论」。
+
+---
+
+## 14. OpenClaw 的 Telegram 通道（2026-11-17 修）
+
+**现象**：Telegram bot 不回消息。`/vol2/@apphome/trim.openclaw/data/openclaw/gateway.log` 每 60 秒一条
+`[fetch-timeout] fetch timeout after 10000ms operation=fetchWithTimeout url=https://api.telegram.org/bot…/getMe`。
+
+**根因**：OpenClaw 实际跑在 Node 24（`/vol2/@appcenter/nodejs_v24/bin/node`），不是 bun。
+Node 18+ 的内建 `fetch`（undici）**默认不读** `HTTP_PROXY` / `HTTPS_PROXY`。进程环境里四个代理变量本来就是齐的
+（`http://127.0.0.1:39281`），所以「查环境变量」这条线索会把人带偏。
+
+**验证**：
+```bash
+node -e 'fetch("https://api.telegram.org/").then(r=>console.log(r.status))'                      # UND_ERR_CONNECT_TIMEOUT
+NODE_USE_ENV_PROXY=1 node -e 'fetch("https://api.telegram.org/").then(r=>console.log(r.status))' # 200
+```
+
+**修法**：`/vol2/@appcenter/trim.openclaw/server/index.js` 的 `openclawEnv()` 里，在
+`OPENCLAW_HIDE_BANNER: "1",` 之后补 `NODE_USE_ENV_PROXY: process.env.NODE_USE_ENV_PROXY || "1"`
+（以及四个代理变量的默认值）。备份：`index.js.bak-20261117-183348`。
+改完 `node --check` + `bun build --target=bun` 各跑一次，语法不过就别重启。
+**应用升级会覆盖这个文件，升级后要重打。**
+
+**拉起顺序**（server 管 gateway，gateway 管 Telegram）：
+1. 应用中心启动应用 → `bun …/server/index.js` 起来（unix socket `…/trim.openclaw.sock`）。
+2. server 用 `[openclaw, "gateway", "run", "--port", "21942", "--bind", "loopback"]` 拉起 gateway。
+   若它没自动起，手动跑同一条命令（带 `NODE_USE_ENV_PROXY=1`，uid 用 trim.openclaw），
+   再把 pid 写进 `/vol2/@apphome/trim.openclaw/data/openclaw/gateway.pid`（纯文本，无 JSON）。
+   `/api/status` 靠「端口在听 + pid 文件」判 running，缺一个就显示 stopped。
+
+**模型链路**：`openclaw.json` 里 `models.providers.newapi.baseUrl=http://127.0.0.1:3000/v1`（本地 new-api），
+与公网封锁无关；启动时 `model warmup timed out after 5000ms` 不致命。
+
+**告警不走 OpenClaw**：`scripts/cf_inspect.py` 自己直发 Bot API（先走 39281 代理），OpenClaw 挂了告警照发。
