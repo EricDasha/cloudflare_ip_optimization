@@ -1100,7 +1100,8 @@ func (a *app) refillPoolAfterKick() {
 		// 补位与全量漏斗同口径：先按实测吞吐排序，再按段健康降权/打散，
 		// 最后剔除吞吐低于参考值的成员。旧实现只判 VLESS 通不通，会把
 		// 龟速 IP 和同一 /16 扎堆的候选直接塞回在位池。
-		passed = rankVLESSPassesBySpeedWithHistory(ctx, passed, results, cfg.Port, cfg.VLESS, template, a.proxyActivePoolSnapshot().Results)
+		rankingHistory := mergeRankingHistory(a.proxyActivePoolSnapshot().Results, a.ledgerRankingHistory())
+		passed = rankVLESSPassesBySpeedWithHistory(ctx, passed, results, cfg.Port, cfg.VLESS, template, rankingHistory)
 	} else {
 		for _, result := range results {
 			if result.Error == "" {

@@ -955,9 +955,12 @@ func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"proxyAuto":           pool,
 		"backgroundOptimizer": a.backgroundOptimizerStatus(),
 		"qualityScheduler":    a.qualitySnapshot(),
-		"activeProbe":         a.activeProbeStatus(),
-		"disabledBench":       a.disabledBenchStatus(),
-		"sources":             a.sourceHealthSnapshot(),
+		// poolLedger 是逐成员的历史账摘要（最近 50 条）。排序用的跨轮吞吐
+		// 就是从这里来的；页面想知道「为什么这个人排前面」看它即可。
+		"poolLedger":    a.poolLedgerSummary(50),
+		"activeProbe":   a.activeProbeStatus(),
+		"disabledBench": a.disabledBenchStatus(),
+		"sources":       a.sourceHealthSnapshot(),
 		// sourceChannels 是逐源账的渠道汇总（四层各一行），优选台饼图与
 		// 渠道排行只读这一份；归类规则留在后端，前端不再各自猜。
 		"sourceChannels": a.sourceChannelSummary(),

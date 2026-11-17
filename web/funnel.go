@@ -320,6 +320,33 @@ func blendSpeedsWithHistory(speeds map[string]float64, history []proxyScanResult
 	}
 }
 
+// mergeRankingHistory 把「上一轮在位成绩」与「台账里的跨轮成绩」合成排序历史。
+//
+// 上一轮成绩更新，优先保留；台账只补上一轮没有的地址——这样刚掉出池的
+// 稳定成员不会因为一轮缺席就被当成零分，新面孔也不会凭空获得历史。
+func mergeRankingHistory(fresh, ledger []proxyScanResult) []proxyScanResult {
+	if len(ledger) == 0 {
+		return fresh
+	}
+	seen := make(map[string]bool, len(fresh))
+	out := make([]proxyScanResult, 0, len(fresh)+len(ledger))
+	for _, result := range fresh {
+		if result.IP == "" || seen[result.IP] {
+			continue
+		}
+		seen[result.IP] = true
+		out = append(out, result)
+	}
+	for _, result := range ledger {
+		if result.IP == "" || seen[result.IP] || result.DownloadMbps <= 0 {
+			continue
+		}
+		seen[result.IP] = true
+		out = append(out, result)
+	}
+	return out
+}
+
 // speedBucket 把测速结果分成三档，供排序使用：
 //
 //	0 = 实测及格（>= minMbps），1 = 未测（未知），2 = 实测不及格。
@@ -893,7 +920,8 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 		finalStage = "VLESS"
 		a.setScanActivityPhase(kind, "VLESS 终审", 0, len(results))
 		passed = probeVLESSPool(runCtx, results, cfg.Port, min(cfg.VLESS.MaxCandidates, len(results)), cfg.VLESS, vlessTemplate)
-		passed = rankVLESSPassesBySpeedWithHistory(runCtx, passed, results, cfg.Port, cfg.VLESS, vlessTemplate, a.proxyActivePoolSnapshot().Results)
+		rankingHistory := mergeRankingHistory(a.proxyActivePoolSnapshot().Results, a.ledgerRankingHistory())
+		passed = rankVLESSPassesBySpeedWithHistory(runCtx, passed, results, cfg.Port, cfg.VLESS, vlessTemplate, rankingHistory)
 		// 机房软偏好：Mbps 序排定后分区重排，截断时充裕取偏好、匮乏放行。
 		passed = orderPassedByColoPreference(passed, results, poolColoPreferenceSet())
 		// 片区降权：整片高失败率的段排到末尾（不淘汰，候选不够照样用）。

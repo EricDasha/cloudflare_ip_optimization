@@ -133,6 +133,14 @@ type ipLedgerEntry struct {
 	Sources []string `json:"sources,omitempty"`
 	// BestMbps 历史最好吞吐，用于展示与人工判断。
 	BestMbps float64 `json:"bestMbps,omitempty"`
+	// EWMAMbps 按轮平滑的吞吐。换池排序把它当历史值，避免单轮抖动
+	// 直接改写一个稳定成员的名次。系数复用 PROXY_EWMA_ALPHA。
+	EWMAMbps float64 `json:"ewmaMbps,omitempty"`
+	// LastMbps 最近一次成功的实测吞吐，用来判断账本是否过时。
+	LastMbps float64 `json:"lastMbps,omitempty"`
+	// FailStreak 连续考试失败次数。成功清零；连续失败很多次的地址
+	// 不再拿账本历史替它说话，让本轮鲜值决定排序。
+	FailStreak int `json:"failStreak,omitempty"`
 
 	Excluded      bool      `json:"excluded,omitempty"`
 	ExcludedAt    time.Time `json:"excludedAt,omitempty"`
@@ -306,8 +314,19 @@ func (a *app) ledgerObserveProbe(ip string, ok bool, mbps float64) {
 		verdict = "pass"
 		entry.PassCount++
 		entry.LastPassAt = now
+		entry.FailStreak = 0
 		if mbps > entry.BestMbps {
 			entry.BestMbps = mbps
+		}
+		// 吞吐只在真测到字节时更新：WS 通过但没有数据面成绩（mbps=0）
+		// 不该把账本里的历史吞吐抹成 0。
+		if mbps > 0 {
+			entry.LastMbps = mbps
+			if alpha := ewmaRankingAlpha(); alpha > 0 && entry.EWMAMbps > 0 {
+				entry.EWMAMbps = alpha*mbps + (1-alpha)*entry.EWMAMbps
+			} else {
+				entry.EWMAMbps = mbps
+			}
 		}
 		// 通过过的地址不再受「从未通过」规则约束，顺手解除自动排除，
 		// 让它重新参与竞争。人工排除（Manual）不受影响。
@@ -316,6 +335,8 @@ func (a *app) ledgerObserveProbe(ip string, ok bool, mbps float64) {
 			entry.ExcludedAt = time.Time{}
 			entry.ExcludeReason = ""
 		}
+	} else {
+		entry.FailStreak++
 	}
 	if entry.LastVerdict != verdict {
 		entry.LastVerdict = verdict
@@ -669,6 +690,95 @@ func (a *app) ledgerThroughputSnapshot() map[string]float64 {
 		}
 		out[ip] = entry.BestMbps
 	}
+	return out
+}
+
+// ledgerRankingHistory 把账本里的历史吞吐整理成排名用的 history。
+//
+// 只放「真的通过过、最近没连续失败、并且有吞吐记录」的地址：账本是参考，
+// 不是免死金牌。连续失败 3 次以上就不再拿历史替它说话，让本轮鲜值决定。
+func (a *app) ledgerRankingHistory() []proxyScanResult {
+	a.ledgerMu.Lock()
+	defer a.ledgerMu.Unlock()
+	if len(a.ledger.IPs) == 0 {
+		return nil
+	}
+	type item struct {
+		ip   string
+		at   time.Time
+		mbps float64
+	}
+	items := make([]item, 0, len(a.ledger.IPs))
+	for ip, entry := range a.ledger.IPs {
+		if entry == nil || entry.PassCount == 0 || entry.FailStreak >= 3 || entry.EWMAMbps <= 0 {
+			continue
+		}
+		items = append(items, item{ip: ip, at: entry.LastSeen, mbps: entry.EWMAMbps})
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].at.After(items[j].at) })
+	if len(items) > 200 {
+		items = items[:200]
+	}
+	out := make([]proxyScanResult, 0, len(items))
+	for _, it := range items {
+		out = append(out, proxyScanResult{IP: it.ip, DownloadMbps: it.mbps})
+	}
+	return out
+}
+
+// poolLedgerMember 是 /api/status 里暴露的单成员摘要。
+type poolLedgerMember struct {
+	IP          string    `json:"ip"`
+	ProbeCount  int       `json:"probeCount"`
+	PassCount   int       `json:"passCount"`
+	SuccessRate float64   `json:"successRate"`
+	EWMAMbps    float64   `json:"ewmaMbps,omitempty"`
+	LastMbps    float64   `json:"lastMbps,omitempty"`
+	FailStreak  int       `json:"failStreak,omitempty"`
+	LastSeen    time.Time `json:"lastSeen"`
+}
+
+type poolLedgerSummaryData struct {
+	UpdatedAt time.Time          `json:"updatedAt"`
+	Total     int                `json:"total"`
+	Members   []poolLedgerMember `json:"members"`
+}
+
+// poolLedgerSummary 返回最近 limit 个成员的摘要，供 /api/status 使用。
+// 全量可能上千条，不能整本塞进状态接口。
+func (a *app) poolLedgerSummary(limit int) poolLedgerSummaryData {
+	if limit <= 0 {
+		limit = 50
+	}
+	a.ledgerMu.Lock()
+	defer a.ledgerMu.Unlock()
+	out := poolLedgerSummaryData{UpdatedAt: a.ledger.UpdatedAt, Total: len(a.ledger.IPs)}
+	if len(a.ledger.IPs) == 0 {
+		return out
+	}
+	members := make([]poolLedgerMember, 0, len(a.ledger.IPs))
+	for ip, entry := range a.ledger.IPs {
+		if entry == nil {
+			continue
+		}
+		rate := 0.0
+		if entry.ProbeCount > 0 {
+			rate = float64(entry.PassCount) / float64(entry.ProbeCount)
+		}
+		members = append(members, poolLedgerMember{
+			IP: ip, ProbeCount: entry.ProbeCount, PassCount: entry.PassCount,
+			SuccessRate: rate, EWMAMbps: entry.EWMAMbps, LastMbps: entry.LastMbps,
+			FailStreak: entry.FailStreak, LastSeen: entry.LastSeen,
+		})
+	}
+	sort.Slice(members, func(i, j int) bool { return members[i].LastSeen.After(members[j].LastSeen) })
+	if len(members) > limit {
+		members = members[:limit]
+	}
+	out.Members = members
 	return out
 }
 

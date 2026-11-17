@@ -182,11 +182,8 @@ func (r *qualitySchedulerRuntime) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	tmp := r.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, r.path)
+	// 与池文件同一套写盘语义：临时文件 + fsync + rename，掉电不会留下半截 JSON。
+	return writeFileAtomic(r.path, b, 0600)
 }
 
 // demoteOrphanActivesLocked 维护「同一时刻只有一个 ACTIVE」这条不变量。

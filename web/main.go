@@ -567,7 +567,8 @@ func (a *app) runQualitySchedulerProbe(_ context.Context) {
 		vlessCtx, vlessCancel := context.WithTimeout(bgCtx, autoApplyBudget)
 		defer vlessCancel()
 		passed = probeVLESSPool(vlessCtx, results, cfg.Port, len(results), cfg.VLESS, template)
-		passed = rankVLESSPassesBySpeedWithHistory(vlessCtx, passed, results, cfg.Port, cfg.VLESS, template, a.proxyActivePoolSnapshot().Results)
+		rankingHistory := mergeRankingHistory(a.proxyActivePoolSnapshot().Results, a.ledgerRankingHistory())
+		passed = rankVLESSPassesBySpeedWithHistory(vlessCtx, passed, results, cfg.Port, cfg.VLESS, template, rankingHistory)
 		if bgCtx.Err() != nil {
 			return
 		}

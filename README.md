@@ -284,7 +284,7 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 | `PROXY_SCHEDULER_PROBE_INTERVAL_SECONDS` | 后台调度探测间隔，秒 | `300` |
 | `PROXY_SCHEDULER_BATCH_SIZE` | 每轮调度候选数 | `12` |
 | `PROXY_SCHEDULER_SEGMENT_GAIN` | 片区多样性门禁的换池代价阈值：减段换池需候选吞吐高出该比例；`0` 恢复严格拦截 | `0.15` |
-| `PROXY_EWMA_ALPHA` | 跨轮吞吐平滑系数，只影响排序，不改准入与落盘实测值；`0` 关闭 | `0.3` |
+| `PROXY_EWMA_ALPHA` | 跨轮吞吐平滑系数。历史来自「上一轮池成绩 + 逐成员台账（`proxy-source-ledger.json` 的 `ewmaMbps`）」，只影响排序，不改准入与落盘实测值；`0` 关闭 | `0.3` |
 | `PROXY_ACTIVE_PROBE_ENABLED` | 在位验活总闸：定时复检生效池每个 IP，坏者请下台（独立于后台优化器） | `true` |
 | `PROXY_ACTIVE_PROBE_INTERVAL_SECONDS` | 在位验活间隔，秒（钳制 `[300,1800]`＝5~30 分，越界回落 `600`） | `600` |
 | `PROXY_ACTIVE_PROBE_FAIL_THRESHOLD` | 连续失败几次才请下台（钳制 `[1,10]`，越界回落 `3`；单次抖动不换人） | `3` |
