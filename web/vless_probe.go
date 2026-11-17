@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -31,6 +32,9 @@ type vlessProbeConfig struct {
 	MaxCandidates  int
 	ReadLimit      int64
 	MinBytes       int64
+	// EarlyAbortMbps 非零时启用「提前放弃」：观察期过后持续低于该速率
+	// 的候选不必读满整个预算。只影响测速耗时，不影响判定口径。
+	EarlyAbortMbps float64
 }
 
 // defaultVLESSSpeedHost 是 VLESS 测速的默认下载主机（Cloudflare 官方测速端点）。
@@ -44,22 +48,27 @@ const vlessSpeedPartialFloor = 64 * 1024
 const speedSamplerSlice = 250 * time.Millisecond
 
 type vlessProbeMetrics struct {
-	Bytes    int64
-	Duration time.Duration
-	Mbps     float64
+	Bytes      int64
+	Duration   time.Duration
+	Mbps       float64
+	EarlyAbort bool
 }
 
 // speedSampler 分片采样读取器：边读边按固定时间片记字节账。
 // 意义：CDN 突发尖峰会被 EWMA 衰减，持续速率主导排序（CFST 同源思想）。
 type speedSampler struct {
-	r        io.Reader
-	slices   []int64
-	deadline time.Time
-	current  int64
+	r              io.Reader
+	slices         []int64
+	deadline       time.Time
+	current        int64
+	started        time.Time
+	earlyAbortMbps float64
+	early          bool
 }
 
 func newSpeedSampler(r io.Reader) *speedSampler {
-	return &speedSampler{r: r, deadline: time.Now().Add(speedSamplerSlice)}
+	now := time.Now()
+	return &speedSampler{r: r, deadline: now.Add(speedSamplerSlice), started: now}
 }
 
 func (s *speedSampler) copyTo(dst io.Writer) (int64, error) {
@@ -90,6 +99,18 @@ func (s *speedSampler) copyTo(dst io.Writer) (int64, error) {
 			s.current = 0
 			s.deadline = now.Add(speedSamplerSlice)
 		}
+		// 提前放弃：观察期 3 秒，持续低于阈值 40% 的线路不必读满预算。
+		// 3 秒是为了让 TCP 慢启动走完，避免把「刚起步」误判成「一直慢」。
+		if s.earlyAbortMbps > 0 {
+			elapsed := time.Since(s.started)
+			if elapsed >= 3*time.Second {
+				mbps := float64(total*8) / elapsed.Seconds() / 1_000_000
+				if mbps < s.earlyAbortMbps {
+					s.early = true
+					return total, nil
+				}
+			}
+		}
 	}
 }
 
@@ -110,13 +131,16 @@ func ewmaMbpsFromSlices(slices []int64, sliceDur time.Duration) float64 {
 
 // vlessSpeedTestURL 决定 VLESS 数据面测速的下载端点。
 //
-// 默认 speed.cloudflare.com：从生产容器直连时可达（实测约 5.5 Mbps），
-// 但经 sing-box 隧道（VLESS→WS→TLS→目标）常在 20s 预算内跑不完而超时。
-// 故支持 PROXY_VLESS_SPEED_URL 覆盖；其中 {bytes} 会被替换为实际请求字节数。
+// 默认走 disabledBenchSpeedURLDefault（OVH 定长文件），不能再用
+// speed.cloudflare.com：这条 Worker+ProxyIP 隧道对 Cloudflare 目标会零字节
+// 挂死（2026-11-10 实测 256KB/30s 超时）。2026-11-13 核查生产数据，
+// 1500 条 IP 质量记录里没有任何一条拿到过 Mbps——自动排序因此一直是盲选，
+// 池子实际按握手延迟决定成员。域名侧早已改用同一端点，两侧同口径后成绩才可比。
+// 仍支持 PROXY_VLESS_SPEED_URL 覆盖；其中 {bytes} 会被替换为实际请求字节数。
 func vlessSpeedTestURL(size int) string {
 	candidate := strings.TrimSpace(env("PROXY_VLESS_SPEED_URL", ""))
-	if candidate == "" {
-		candidate = "https://" + defaultVLESSSpeedHost + "/__down?bytes={bytes}"
+	if candidate == "" || customSpeedURLUnhealthy.Load() {
+		candidate = disabledBenchSpeedURLDefault
 	}
 	if !strings.Contains(candidate, "{bytes}") {
 		return candidate
@@ -282,6 +306,10 @@ func probeVLESSPool(parent context.Context, results []proxyScanResult, candidate
 		if err != nil {
 			results[i].Stage = "VLESS_FAIL"
 			results[i].Error = err.Error()
+			// 失败必须归类：降级逻辑（degradedFromWSResults）靠 ErrorClass
+			// 区分「数据面超时」与「快速失败」；此前这里从不写 ErrorClass，
+			// VLESS_FAIL 的 errorClass 一律为空，降级无从判断。
+			results[i].ErrorClass = classifyProbeError(err)
 			continue
 		}
 		results[i].Stage = "VLESS_PASS"
@@ -296,11 +324,28 @@ func vlessProbeOrder(results []proxyScanResult) []int {
 			order = append(order, i)
 		}
 	}
-	sort.SliceStable(order, func(i, j int) bool {
-		if results[order[i]].SourceRank != results[order[j]].SourceRank {
-			return results[order[i]].SourceRank < results[order[j]].SourceRank
+	// 人工指定的 user 候选永远先测；其余来源只按握手延迟排队。
+	//
+	// 旧实现让 cfdata 的 rank 压过 bestcf 的延迟，shortlist 前 10 个终审
+	// 名额被 cfdata 的 550~722ms 候选占满，bestcf 的 10~20 Mbps 候选连
+	// 测速机会都没有。user 是主席亲手指定的，保留插队权；cfdata /
+	// subscription / bestcf 都是机器供给，谁快谁先测。
+	tier := func(rank int) int {
+		if rank == 0 {
+			return 0
 		}
-		return results[order[i]].Latency < results[order[j]].Latency
+		return 1
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		left, right := results[order[i]], results[order[j]]
+		leftTier, rightTier := tier(left.SourceRank), tier(right.SourceRank)
+		if leftTier != rightTier {
+			return leftTier < rightTier
+		}
+		if left.Latency != right.Latency {
+			return left.Latency < right.Latency
+		}
+		return left.SourceRank < right.SourceRank
 	})
 	return order
 }
@@ -312,14 +357,31 @@ func fastestVLESSPasses(results []proxyScanResult, poolSize int) []string {
 			passed = append(passed, i)
 		}
 	}
+	// 数据面实测延迟优先，来源只在同分时裁决。
+	//
+	// 旧实现先比 SourceRank，cfdata 的慢候选会压过 bestcf 的快候选；
+	// 结果就是「来源好的慢节点」长期占池，而实测更快的社区节点永远
+	// 进不来。user 候选保留插队权（人工指定优先），其余来源一律按
+	// 数据面实测说话。
+	tier := func(rank int) int {
+		if rank == 0 {
+			return 0
+		}
+		return 1
+	}
 	sort.SliceStable(passed, func(i, j int) bool {
-		if results[passed[i]].SourceRank != results[passed[j]].SourceRank {
-			return results[passed[i]].SourceRank < results[passed[j]].SourceRank
+		left, right := results[passed[i]], results[passed[j]]
+		leftTier, rightTier := tier(left.SourceRank), tier(right.SourceRank)
+		if leftTier != rightTier {
+			return leftTier < rightTier
 		}
-		if results[passed[i]].DataLatency == results[passed[j]].DataLatency {
-			return results[passed[i]].Latency < results[passed[j]].Latency
+		if left.DataLatency != right.DataLatency {
+			return left.DataLatency < right.DataLatency
 		}
-		return results[passed[i]].DataLatency < results[passed[j]].DataLatency
+		if left.Latency != right.Latency {
+			return left.Latency < right.Latency
+		}
+		return left.SourceRank < right.SourceRank
 	})
 	if len(passed) > poolSize {
 		passed = passed[:poolSize]
@@ -336,15 +398,59 @@ func probeVLESSCandidate(ctx context.Context, candidateIP string, candidatePort 
 	return err
 }
 
-func probeVLESSCandidateMetrics(ctx context.Context, candidateIP string, candidatePort int, cfg vlessProbeConfig, template map[string]any) (vlessProbeMetrics, error) {
-	metrics := vlessProbeMetrics{}
+// maxVLESSProbePortAttempts 探针端口被抢占时换端口重试的次数上限。
+const maxVLESSProbePortAttempts = 3
+
+// allocProbePort 向内核要一个空闲本地端口。注意拿到的瞬间就已释放，
+// 调用方必须尽快让 sing-box 绑上去，窗口期内别的进程可能抢走——
+// 因此 probeVLESSCandidateMetrics 在绑定冲突时换端口重试。
+func allocProbePort() (int, error) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
-		return metrics, fmt.Errorf("分配本地探针端口失败: %w", err)
+		return 0, err
 	}
-	inboundPort := listener.Addr().(*net.TCPAddr).Port
+	port := listener.Addr().(*net.TCPAddr).Port
 	_ = listener.Close()
+	return port, nil
+}
 
+// isBindConflictError 识别「端口被抢占」导致的 sing-box 启动失败：
+// 进程退出前输出里带有 bind address already in use。其它启动失败
+// （模板错、二进制缺失）重试换端口也没用，直接返回。
+func isBindConflictError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "address already in use")
+}
+
+// probeVLESSCandidateMetrics 起 sing-box 探针测一次 VLESS 数据面。
+// 端口分配与绑定之间存在 TOCTOU 窗口（先 Listen 取端口、Close 释放，
+// 再起 sing-box 去绑）：窗口期内端口被别的进程或并发探针抢走时，
+// sing-box 绑失败，本次失败会被记到被测 IP 头上。绑定冲突时换一个
+// 新分配的端口重试，最多 3 次。
+func probeVLESSCandidateMetrics(ctx context.Context, candidateIP string, candidatePort int, cfg vlessProbeConfig, template map[string]any) (vlessProbeMetrics, error) {
+	metrics := vlessProbeMetrics{}
+	var lastErr error
+	for attempt := 0; attempt < maxVLESSProbePortAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return metrics, ctx.Err()
+		}
+		inboundPort, err := allocProbePort()
+		if err != nil {
+			return metrics, fmt.Errorf("分配本地探针端口失败: %w", err)
+		}
+		metrics, lastErr = probeVLESSCandidateMetricsOnce(ctx, candidateIP, candidatePort, cfg, template, inboundPort)
+		if lastErr == nil || !isBindConflictError(lastErr) {
+			return metrics, lastErr
+		}
+		log.Printf("VLESS probe port %d taken, retrying with a fresh port (attempt %d/%d)", inboundPort, attempt+1, maxVLESSProbePortAttempts)
+	}
+	return metrics, lastErr
+}
+
+func probeVLESSCandidateMetricsOnce(ctx context.Context, candidateIP string, candidatePort int, cfg vlessProbeConfig, template map[string]any, inboundPort int) (vlessProbeMetrics, error) {
+	metrics := vlessProbeMetrics{}
 	probeConfig, err := buildSingBoxProbeConfig(template, candidateIP, candidatePort, inboundPort)
 	if err != nil {
 		return metrics, fmt.Errorf("生成 sing-box 配置失败: %w", err)
@@ -432,8 +538,14 @@ func probeVLESSCandidateMetrics(ctx context.Context, candidateIP string, candida
 		return metrics, fmt.Errorf("VLESS 数据面请求失败: %w", err)
 	}
 	defer resp.Body.Close()
+	// 状态码先验：403/404 的错误体不必读满预算才判失败，且读超时会
+	// 先于状态码返回、把报错原因写错。
+	if resp.StatusCode != cfg.ExpectedStatus {
+		return metrics, fmt.Errorf("VLESS 数据面状态码 %d，预期 %d", resp.StatusCode, cfg.ExpectedStatus)
+	}
 	started := time.Now()
 	sampler := newSpeedSampler(io.LimitReader(resp.Body, cfg.ReadLimit))
+	sampler.earlyAbortMbps = cfg.EarlyAbortMbps
 	n, readErr := sampler.copyTo(io.Discard)
 	metrics.Bytes = n
 	metrics.Duration = time.Since(started)
@@ -454,8 +566,14 @@ func probeVLESSCandidateMetrics(ctx context.Context, candidateIP string, candida
 		}
 		return metrics, fmt.Errorf("读取 VLESS 测试响应失败: %w", readErr)
 	}
-	if resp.StatusCode != cfg.ExpectedStatus {
-		return metrics, fmt.Errorf("VLESS 数据面状态码 %d，预期 %d", resp.StatusCode, cfg.ExpectedStatus)
+	if sampler.early {
+		// 提前放弃只省时间，不改判定：实读字节不足时仍按失败处理，
+		// 够样本就返回诚实低速分，让下游照常排序与剔除。
+		if metrics.Bytes < vlessSpeedPartialFloor {
+			return metrics, fmt.Errorf("VLESS 提前放弃且样本不足: %d/%d bytes", metrics.Bytes, vlessSpeedPartialFloor)
+		}
+		metrics.EarlyAbort = true
+		return metrics, nil
 	}
 	if metrics.Bytes < cfg.MinBytes {
 		return metrics, fmt.Errorf("VLESS 下载数据不足: %d/%d bytes", metrics.Bytes, cfg.MinBytes)

@@ -139,3 +139,16 @@ func TestWorstPoolMemberPrefersHighestLatency(t *testing.T) {
 		t.Fatalf("empty pool: worst = %s", got)
 	}
 }
+
+func TestWorstPoolMemberSkipsPinnedPriorityMembers(t *testing.T) {
+	a := &app{}
+	ips := []string{"pinned.one", "pinned.two", "spare.one", "spare.two"}
+	if got := a.worstPoolMember(ips, "pinned.two", "spare.two"); got != "spare.one" {
+		t.Fatalf("worst = %s, want non-pinned spare.one", got)
+	}
+	// 全部被固定时仍须给出一个候选，不能返回空把顶替流程卡死。
+	got := a.worstPoolMember(ips, ips...)
+	if got == "" || got == ips[0] {
+		t.Fatalf("all pinned: worst = %q, want a fallback candidate outside the protected head", got)
+	}
+}

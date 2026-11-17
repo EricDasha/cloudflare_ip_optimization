@@ -7,7 +7,10 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -292,5 +295,153 @@ func TestValidForwardHostname(t *testing.T) {
 		if validForwardHostname(bad) {
 			t.Fatalf("validForwardHostname(%q) = true, want false", bad)
 		}
+	}
+}
+
+func TestCapFixedTargetsKeepsAllDomains(t *testing.T) {
+	results := []result{
+		{ip: "192.0.2.1"},
+		{ip: "a.example.com"},
+		{ip: "192.0.2.2"},
+		{ip: "b.example.com"},
+		{ip: "192.0.2.3"},
+	}
+	got := capFixedTargets(results, 1)
+	want := []string{"192.0.2.1", "a.example.com", "b.example.com"}
+	var targets []string
+	for _, r := range got {
+		targets = append(targets, r.ip)
+	}
+	if !reflect.DeepEqual(targets, want) {
+		t.Fatalf("capFixedTargets() = %v, want %v", targets, want)
+	}
+	if n := countIPTargets(got); n != 1 {
+		t.Fatalf("countIPTargets() = %d, want 1", n)
+	}
+	if ipN, domainN := countFixedKinds(got); ipN != 1 || domainN != 2 {
+		t.Fatalf("countFixedKinds() = (%d,%d), want (1,2)", ipN, domainN)
+	}
+}
+
+func TestCapFixedTargetsZeroIPKeepsDomains(t *testing.T) {
+	results := []result{{ip: "a.example.com"}, {ip: "b.example.com"}}
+	got := capFixedTargets(results, 20)
+	if len(got) != 2 {
+		t.Fatalf("capFixedTargets() dropped domains: %v", got)
+	}
+}
+
+func TestApplyColoFilter(t *testing.T) {
+	results := []result{
+		{ip: "1.1.1.1", dataCenter: "HKG"},
+		{ip: "2.2.2.2", dataCenter: "SJC"},
+		{ip: "3.3.3.3", dataCenter: "LAX"},
+	}
+	if got := applyColoFilter(results, "hkg,sjc"); len(got) != 2 {
+		t.Fatalf("applyColoFilter(hkg,sjc) = %d results, want 2", len(got))
+	}
+	// 全部滤掉必须返回空切片，调用方据此重扫、不得进 accept 循环。
+	if got := applyColoFilter(results, "XXX"); len(got) != 0 {
+		t.Fatalf("applyColoFilter(XXX) = %d results, want 0", len(got))
+	}
+}
+
+func TestReadIPsRejectsHugeCIDR(t *testing.T) {
+	write := func(content string) string {
+		f := filepath.Join(t.TempDir(), "ip.csv")
+		if err := os.WriteFile(f, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	// /24 展开 256 个，正常。
+	if ips, err := readIPs(write("10.0.0.0/24\n")); err != nil || len(ips) != 256 {
+		t.Fatalf("readIPs(/24) = %d, %v, want 256, nil", len(ips), err)
+	}
+	// IPv4 /8 与 IPv6 /48 展开天文数字，必须直接拒绝而不是硬跑。
+	for _, cidr := range []string{"10.0.0.0/8\n", "2001:db8::/48\n"} {
+		if ips, err := readIPs(write(cidr)); err == nil {
+			t.Fatalf("readIPs(%q) = %d, want error", cidr, len(ips))
+		}
+	}
+}
+
+func TestClampThreads(t *testing.T) {
+	if got := clampThreads(0, "task"); got != 1 {
+		t.Fatalf("clampThreads(0) = %d, want 1", got)
+	}
+	if got := clampThreads(-5, "task"); got != 1 {
+		t.Fatalf("clampThreads(-5) = %d, want 1", got)
+	}
+	if got := clampThreads(1001, "task"); got != 1000 {
+		t.Fatalf("clampThreads(1001) = %d, want 1000", got)
+	}
+	if got := clampThreads(100, "task"); got != 100 {
+		t.Fatalf("clampThreads(100) = %d, want 100", got)
+	}
+}
+
+// -task 0 曾让 scanIPs 在第一次发送即永久阻塞；现在应钳到 1 并跑完。
+func TestScanIPsZeroThreadsDoesNotDeadlock(t *testing.T) {
+	done := make(chan []result, 1)
+	go func() { done <- scanIPs([]string{"127.0.0.1"}, map[string]location{}, 0) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("scanIPs(maxThreads=0) deadlocked")
+	}
+}
+
+// 装死的空闲连接必须在空闲超时后断开，不再永远占着 goroutine 与 FD。
+func TestPipeConnectionsIdleTimeout(t *testing.T) {
+	old := pipeIdleTimeout
+	pipeIdleTimeout = 100 * time.Millisecond
+	defer func() { pipeIdleTimeout = old }()
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	done := make(chan struct{})
+	go func() { pipeConnections(a, b); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pipeConnections did not close idle connection")
+	}
+}
+
+func TestGetRandomIPv4sRejectsMalformed(t *testing.T) {
+	got := getRandomIPv4s([]string{"1.2.3.4.5/24", "a.b.c.d/24", "1.2.3.4/16", "1.2.3.0/24"})
+	if len(got) != 1 {
+		t.Fatalf("got %v, want exactly 1 valid address", got)
+	}
+	ip := net.ParseIP(got[0])
+	if ip == nil || ip.To4() == nil {
+		t.Fatalf("got %q, not a valid IPv4", got[0])
+	}
+	if got[0] == "1.2.3.0" || got[0] == "1.2.3.255" {
+		t.Fatalf("got network/broadcast address %q", got[0])
+	}
+	if !strings.HasPrefix(got[0], "1.2.3.") {
+		t.Fatalf("got %q, want 1.2.3.x", got[0])
+	}
+}
+
+func TestGetRandomIPv6sHandlesCompressed(t *testing.T) {
+	for _, cidr := range []string{"2400::/48", "2606:4700::/48"} {
+		got := getRandomIPv6s([]string{cidr})
+		if len(got) != 1 {
+			t.Fatalf("%s: got %v, want exactly 1 address", cidr, got)
+		}
+		ip := net.ParseIP(got[0])
+		if ip == nil {
+			t.Fatalf("%s: got %q, not a valid IPv6", cidr, got[0])
+		}
+		_, ipnet, _ := net.ParseCIDR(cidr)
+		if !ipnet.Contains(ip) {
+			t.Fatalf("%s: got %q, outside the /48", cidr, got[0])
+		}
+	}
+	if got := getRandomIPv6s([]string{"not-an-ip", "2001:db8::/32"}); len(got) != 0 {
+		t.Fatalf("invalid input: got %v, want none", got)
 	}
 }

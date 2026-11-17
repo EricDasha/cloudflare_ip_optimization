@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -203,6 +206,33 @@ func TestSubscriptionPassedIPsOrdering(t *testing.T) {
 	}
 }
 
+// 劣质维护者的 IP 按吞吐打折排序，但不影响 pass 语义。
+func TestSubscriptionPassedIPsPenalizesLowQualityMaintainer(t *testing.T) {
+	a := newInventoryTestApp(t)
+	now := time.Now()
+	a.subInv.Entries["10.0.0.1"] = &subEntry{
+		State: subStatePass, Mbps: 20, LatencyMs: 100, FirstSeen: now,
+		Sources: []string{"sub.danfeng.eu.org"},
+	}
+	a.subInv.Entries["10.0.0.2"] = &subEntry{
+		State: subStatePass, Mbps: 10, LatencyMs: 200, FirstSeen: now,
+		Sources: []string{"zrf.zrf.me"},
+	}
+	a.subInv.Entries["10.0.0.3"] = &subEntry{
+		State: subStatePass, Mbps: 15, LatencyMs: 150, FirstSeen: now,
+		Sources: []string{"sub.danfeng.eu.org", "zrf.zrf.me"},
+	}
+	got := a.subscriptionPassedIPs(10)
+	// 10.0.0.1 打折后 13，排在 15 与 10 之间；多来源取最好系数，10.0.0.3 不打折。
+	want := []string{"10.0.0.3", "10.0.0.1", "10.0.0.2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("penalized passed = %v, want %v", got, want)
+	}
+	if quality := subscriptionSourceQuality(nil); quality != 1 {
+		t.Fatalf("unknown source quality = %v, want 1", quality)
+	}
+}
+
 // 淘汰规则：必须同时满足「久未露面」与「连败到两倍阈值」。
 // 只满足一条的留下——维护者暂时拉不到不等于 IP 死了。
 func TestPruneSubscriptionInventoryRequiresBothConditions(t *testing.T) {
@@ -302,5 +332,25 @@ func TestSubscriptionInventorySummaryCounts(t *testing.T) {
 	classes := summary["errorClasses"].(map[string]int)
 	if classes[failureTimeout] != 2 {
 		t.Fatalf("errorClasses = %v", classes)
+	}
+}
+
+// 本子损坏不得静默丢弃：文件改名备查，内存用空本子启动。
+func TestLoadSubscriptionInventoryRenamesCorruptFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, subscriptionInventoryFile), []byte("{not json"), 0600); err != nil {
+		t.Fatalf("write corrupt file: %v", err)
+	}
+	a := &app{dataDir: dir}
+	a.loadSubscriptionInventory()
+	if _, err := os.Stat(filepath.Join(dir, subscriptionInventoryFile)); !os.IsNotExist(err) {
+		t.Fatalf("corrupt file still in place")
+	}
+	entries, err := filepath.Glob(filepath.Join(dir, subscriptionInventoryFile+".corrupt-*"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("corrupt backups = %v, want 1", entries)
+	}
+	if len(a.subInv.Entries) != 0 {
+		t.Fatalf("subInv.Entries = %d, want 0", len(a.subInv.Entries))
 	}
 }

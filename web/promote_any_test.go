@@ -2,6 +2,9 @@ package main
 
 import (
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -30,5 +33,19 @@ func TestHandleProxyPromoteAcceptsAnyPublicIPv4(t *testing.T) {
 				t.Fatalf("isPublicIPv4(%q) = %v, want %v", tc.ip, got, tc.want)
 			}
 		})
+	}
+}
+
+// 未配 PROXY_AUTO_HOST 时顶替不得跳过体检：与体检接口同口径回 412，
+// 不能让任意公网 IP 不经 WS 握手进池。
+func TestHandleProxyPromoteRequiresProbeConfig(t *testing.T) {
+	t.Setenv("PROXY_AUTO_HOST", "")
+	a := &app{}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/cfnat/proxy-promote",
+		strings.NewReader(`{"ip":"203.0.113.77"}`))
+	a.handleProxyPromote(rec, req)
+	if rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("未配置时顶替 = %d, want 412", rec.Code)
 	}
 }

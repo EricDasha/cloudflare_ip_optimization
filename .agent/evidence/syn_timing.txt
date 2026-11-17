@@ -1,0 +1,22 @@
+== 10s-timeout connect x5 per IP, report ms or -1 ==
+104.18.42.163    [-1, -1, -1, -1, -1]
+172.64.147.104   [-1, -1, -1, -1, -1]
+23.227.38.74     [-1, -1, -1, 5325, 176]
+151.101.1.140    [80, 96, 70, 74, 80]
+207.57.125.21    [71, 62, 63, 71, 67]
+== after-connect data test (send TLS ClientHello prefix) ==
+104.18.42.163    FAIL TimeoutError 6103ms
+104.18.42.163    FAIL TimeoutError 6108ms
+104.18.42.163    FAIL TimeoutError 6114ms
+172.64.147.104   FAIL TimeoutError 6120ms
+172.64.147.104   FAIL TimeoutError 6099ms
+172.64.147.104   FAIL TimeoutError 6118ms
+23.227.38.74     FAIL TimeoutError 6192ms
+23.227.38.74     FAIL TimeoutError 6195ms
+23.227.38.74     FAIL TimeoutError 6213ms
+151.101.1.140    FAIL TimeoutError 6081ms
+151.101.1.140    FAIL TimeoutError 6076ms
+151.101.1.140    FAIL TimeoutError 6108ms
+207.57.125.21    FAIL TimeoutError 6075ms
+207.57.125.21    FAIL TimeoutError 6071ms
+207.57.125.21    FAIL TimeoutError 6072ms

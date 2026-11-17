@@ -222,7 +222,7 @@ The debug surface (`/api/debug/*`) exists only in builds compiled with `-tags de
 
 ### Subscription Feed (daily IP supply)
 - `PROXY_SUBSCRIPTION_CONVERTER`: Subscription converter base URL (default: `https://vlesdy.trojanjd.dpdns.org/sub`); requests are `?token=…&sub=<maintainer>`
-- `PROXY_SUBSCRIPTION_MAINTAINERS`: Comma/space-separated third-party maintainer hosts (default: 8 maintainers incl. `owo.o00o.ooo`, `cm.soso.edu.kg`, `zrf.zrf.me`)
+- `PROXY_SUBSCRIPTION_MAINTAINERS`: Comma/space-separated third-party maintainer hosts (default: 6 maintainers incl. `cm.soso.edu.kg`, `zrf.zrf.me`, `sub.xdu.qzz.io`; low-yield `owo.o00o.ooo` and `sub.mot.cloudns.biz` removed 2026-11-15)
 - `PROXY_SUBSCRIPTION_TOKEN`: Converter token, injected from `.env`, never committed
 - `PROXY_SUBSCRIPTION_REFRESH_ENABLED`: Enable the daily slow sweep (default: true)
 - `PROXY_SUBSCRIPTION_REFRESH_MINUTES`: Sweep interval in minutes (default: 360, min: 30)

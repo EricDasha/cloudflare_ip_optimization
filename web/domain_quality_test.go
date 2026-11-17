@@ -199,6 +199,82 @@ func TestRecordDomainProbeCountsFailuresWhenPeerSucceeds(t *testing.T) {
 	}
 }
 
+// 改动 A：DNS 解析失败占大头且无一例测速成功时，判定为体检通路故障——
+// 本轮失败样本不入账、不累计连败、状态不重算，且返回 true 让调用方跳过
+// reconcile（池子成员数量不变）。
+func TestRecordDomainProbePathBrokenOnDNSFailures(t *testing.T) {
+	a := newProbeTestApp(t)
+	samples := map[string]domainProbeSample{
+		"a.example.com": failSample("dns"),
+		"b.example.com": failSample("dns"),
+		"c.example.com": failSample("dns"),
+		"d.example.com": failSample("tcp"),
+	}
+	if broken := a.recordDomainProbeResults(samples); !broken {
+		t.Fatal("4/4 解析+建连失败应判定为通路故障")
+	}
+	for domain, rec := range a.domainQuality {
+		if len(rec.Samples) != 0 {
+			t.Fatalf("%s samples = %d, want 0 (path-broken rounds must not enter the ledger)", domain, len(rec.Samples))
+		}
+		if rec.ConsecutiveFailures != 0 {
+			t.Fatalf("%s consecutiveFailures = %d, want 0", domain, rec.ConsecutiveFailures)
+		}
+		if rec.State != "" {
+			t.Fatalf("%s state = %q, want untouched empty state", domain, rec.State)
+		}
+	}
+}
+
+// 改动 A：失败占比低于阈值（<70%）时不是通路故障——有个别域名真死时，
+// 它的失败仍要照常计数，否则坏域名永远清不掉。
+func TestRecordDomainProbeNotBrokenBelowThreshold(t *testing.T) {
+	a := newProbeTestApp(t)
+	samples := map[string]domainProbeSample{
+		"a.example.com": failSample("dns"),
+		"b.example.com": failSample("tcp"),
+		"c.example.com": okSample(12, 25),
+		"d.example.com": okSample(10, 30),
+	}
+	if broken := a.recordDomainProbeResults(samples); broken {
+		t.Fatal("2/4 解析+建连失败且有测速成功，不应判定为通路故障")
+	}
+}
+
+// 改动 A：纯函数分账与 70% 阈值边界——恰好 7/10 失败判通路故障，6/10 不判。
+func TestClassifyDomainProbeRoundThreshold(t *testing.T) {
+	build := func(dns, tcp, speedFail int) map[string]domainProbeSample {
+		samples := make(map[string]domainProbeSample, dns+tcp+speedFail)
+		for i := 0; i < dns; i++ {
+			samples["dns"+string(rune('a'+i))+".example.com"] = failSample("dns")
+		}
+		for i := 0; i < tcp; i++ {
+			samples["tcp"+string(rune('a'+i))+".example.com"] = failSample("tcp")
+		}
+		for i := 0; i < speedFail; i++ {
+			samples["spd"+string(rune('a'+i))+".example.com"] = failSample("speed")
+		}
+		return samples
+	}
+	stats := classifyDomainProbeRound(build(4, 3, 3))
+	if stats.DNSFailed != 4 || stats.TCPFailed != 3 || stats.SpeedFailed != 3 || stats.Total != 10 {
+		t.Fatalf("stats = %+v, want dns=4 tcp=3 speed=3 total=10", stats)
+	}
+	if !stats.pathBroken() {
+		t.Fatal("7/10 解析+建连失败应判定为通路故障")
+	}
+	if stats := classifyDomainProbeRound(build(3, 3, 4)); stats.pathBroken() {
+		t.Fatal("6/10 解析+建连失败不应判定为通路故障")
+	}
+	// 只要有一例测速成功，即使 9/10 解析失败也不是通路故障——
+	// 同伴成功证明通路本身还活着。
+	samples := build(9, 0, 0)
+	samples["ok.example.com"] = okSample(12, 25)
+	if stats := classifyDomainProbeRound(samples); stats.pathBroken() {
+		t.Fatal("有测速成功时不应判定为通路故障")
+	}
+}
+
 func TestRecordDomainProbePrunesRemovedDomains(t *testing.T) {
 	a := newProbeTestApp(t)
 	a.recordDomainProbeResults(map[string]domainProbeSample{
@@ -315,5 +391,88 @@ func TestDomainSpeedProbeConfigClamp(t *testing.T) {
 	}
 	if cfg.ReadLimit != int64(domainSpeedDefaultBytes) || cfg.Timeout != time.Duration(domainSpeedDefaultTimeoutSeconds)*time.Second {
 		t.Fatalf("越界值未回落默认: ReadLimit=%d Timeout=%v", cfg.ReadLimit, cfg.Timeout)
+	}
+}
+
+// 改动 A 的补漏：通路故障轮失败的样本连账都不入——不建空记录，
+// 已有记录的 LastProbeAt 也不被没测过的轮次刷新。旧实现先建记录再
+// 跳过入账，账本凭空多出 state="" 的空记录，闸门对空状态一律放行。
+func TestRecordDomainProbeBrokenRoundCreatesNoRecords(t *testing.T) {
+	a := newProbeTestApp(t)
+	old := freshRecord(domainStateHealthy)
+	oldAt := time.Now().Add(-time.Hour)
+	old.LastProbeAt = oldAt
+	a.domainQuality["old.example.com"] = old
+	samples := map[string]domainProbeSample{
+		"a.example.com":   failSample("dns"),
+		"b.example.com":   failSample("dns"),
+		"c.example.com":   failSample("dns"),
+		"old.example.com": failSample("tcp"),
+	}
+	if broken := a.recordDomainProbeResults(samples); !broken {
+		t.Fatal("4/4 解析+建连失败应判定为通路故障")
+	}
+	if got := len(a.domainQuality); got != 1 {
+		t.Fatalf("broken round ledger = %d records, want 1 (only pre-existing)", got)
+	}
+	if rec := a.domainQuality["old.example.com"]; rec == nil {
+		t.Fatal("pre-existing record pruned by broken round")
+	} else if !rec.LastProbeAt.Equal(oldAt) {
+		t.Fatalf("LastProbeAt = %v, want untouched %v", rec.LastProbeAt, oldAt)
+	} else if rec.State != domainStateHealthy {
+		t.Fatalf("state = %q, want healthy", rec.State)
+	}
+}
+
+// tcp-only 降级样本只报可达性：攒够 3 轮也不能判 healthy——
+// 一次测速都没做过，凭 TCP 通就放行等于质量闸对它永久失明。
+func TestRecalculateTCPOnlyNeverHealthy(t *testing.T) {
+	q := &domainQuality{Domain: "x.example.com"}
+	for i := 0; i < 5; i++ {
+		q.Samples = append(q.Samples, domainProbeSample{At: time.Now(), OK: true, Stage: "tcp-only", TCPMs: 50})
+		q.ConsecutiveSuccesses++
+	}
+	q.recalculate()
+	if q.State != domainStateTesting {
+		t.Fatalf("tcp-only state = %q, want testing", q.State)
+	}
+	// 一次真实测速后即可正常晋升。
+	q.Samples = append(q.Samples, domainProbeSample{At: time.Now(), OK: true, Stage: "speed", TCPMs: 50, Mbps: 20})
+	q.ConsecutiveSuccesses++
+	q.recalculate()
+	if q.State != domainStateHealthy {
+		t.Fatalf("mixed state = %q, want healthy", q.State)
+	}
+}
+
+// 账本损坏不得静默丢弃：文件改名备查，内存用空账本启动。
+func TestLoadDomainQualityRenamesCorruptFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, domainQualityFile), []byte("{not json"), 0600); err != nil {
+		t.Fatalf("write corrupt file: %v", err)
+	}
+	a := &app{dataDir: dir, domainQuality: make(map[string]*domainQuality)}
+	a.loadDomainQuality()
+	if _, err := os.Stat(filepath.Join(dir, domainQualityFile)); !os.IsNotExist(err) {
+		t.Fatalf("corrupt file still in place")
+	}
+	entries, err := filepath.Glob(filepath.Join(dir, domainQualityFile+".corrupt-*"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("corrupt backups = %v, want 1", entries)
+	}
+	if len(a.domainQuality) != 0 {
+		t.Fatalf("domainQuality = %d records, want 0", len(a.domainQuality))
+	}
+}
+
+// 质量账本损坏时构造函数不得崩溃，空账本启动（失败原因已记日志）。
+func TestNewQualitySchedulerRuntimeToleratesCorruptCache(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, proxyQualityFile), []byte("{not json"), 0600); err != nil {
+		t.Fatalf("write corrupt file: %v", err)
+	}
+	r := newQualitySchedulerRuntime(dir)
+	if r == nil || r.data.ActiveIP != "" || len(r.data.Records) != 0 {
+		t.Fatalf("corrupt cache produced non-empty runtime: %#v", r.data)
 	}
 }

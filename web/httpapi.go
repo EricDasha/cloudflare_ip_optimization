@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -477,6 +478,15 @@ func (a *app) handleProxyPromote(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
+	// 先占扫描锁再拿换池锁，与踢人同模式：后台漏斗持 proxyScanMu 跑
+	// 几分钟、最后才拿 cfnatCtlMu 落池，池是开考前的快照；这里若只拿
+	// 换池锁，刚做的顶替会在漏斗落池时被旧快照整批覆盖。锁序全局规范
+	// refresh → proxyScan → cfnatCtl。用户操作优先：先取消后台扫描再排队。
+	releaseScan, ok := a.lockScanForManual(w)
+	if !ok {
+		return
+	}
+	defer releaseScan()
 	// 只拿换池锁；与 kick 同链，等待而非立即拒绝。
 	if !lockTimeout(&a.cfnatCtlMu, 15*time.Second) {
 		http.Error(w, "换池操作正在运行，请稍后再试", http.StatusTooManyRequests)
@@ -499,7 +509,21 @@ func (a *app) handleProxyPromote(w http.ResponseWriter, r *http.Request) {
 	ip := target.To4().String()
 	current := a.proxyActivePoolSnapshot()
 	if containsString(current.IPs, ip) {
-		writeJSON(w, map[string]any{"ok": true, "promoted": ip, "already": true})
+		if !containsString(current.Disabled, ip) {
+			writeJSON(w, map[string]any{"ok": true, "promoted": ip, "already": true})
+			return
+		}
+		// 池内但被停用：顶替语义应当是「解禁」，而不是假幂等返回。
+		now := time.Now()
+		pool := current
+		pool.UpdatedAt = now
+		pool.Disabled = withoutStringValue(current.Disabled, ip)
+		if err := a.applyPoolLocked(pool, current); err != nil {
+			http.Error(w, "解禁失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		a.markPoolSwitched(now)
+		writeJSON(w, map[string]any{"ok": true, "promoted": ip, "enabled": true})
 		return
 	}
 	// 空池播种：皇位空悬时单 IP 直接登基（worstPoolMember 空池返回 ""，
@@ -509,30 +533,36 @@ func (a *app) handleProxyPromote(w http.ResponseWriter, r *http.Request) {
 	// 旧实现只考握手，于是 1168ms 的慢 IP 也能堂堂正正换进池，
 	// 再被设备粘性锁死——生产事故的根因。
 	cfg := defaultProxyAutoConfig()
+	// 未配置 SNI 时不得跳过体检直接顶替：与 handleProxyProbe 同口径回
+	// 412。旧实现用 if 守着体检块，Host/Path 为空就整段跳过，任何公网
+	// IP 都能不经 WS 握手进池。
+	if cfg.Host == "" || cfg.Path == "" {
+		http.Error(w, "未配置 PROXY_AUTO_HOST/PATH，无法体检", http.StatusPreconditionFailed)
+		return
+	}
 	entryColo := ""
 	fresh := make([]proxyScanResult, 0, 1)
-	if cfg.Host != "" && cfg.Path != "" {
-		measureCtx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-		latency, colo, fails := measurePoolEntryLatency(measureCtx, ip, cfg)
-		cancel()
-		if latency == 0 {
-			http.Error(w, "体检未通过（WS 握手三次全败），拒绝顶替", http.StatusBadRequest)
-			return
-		}
-		if ceiling := poolEntryMaxLatencyMs(); latency > ceiling {
-			http.Error(w, fmt.Sprintf("延迟 %dms 超过进池上限 %dms，拒绝顶替：握手虽通但太慢，进池会拖垮粘在那台设备上的所有连接", latency, ceiling), http.StatusBadRequest)
-			return
-		}
-		entryColo = colo
-		_ = fails // 失败次数并入体检注记，软信号不否决
-		// 入池体检结果写进新成员的成绩单：机房码随行，丢手率记档。
-		fresh = append(fresh, proxyScanResult{
-			IP: ip, Latency: latency, Colo: colo, Stage: "WS_PASS",
-			Note: fmt.Sprintf("入池体检 %d/3 通过", 3-fails),
-		})
+	measureCtx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	latency, colo, fails := measurePoolEntryLatency(measureCtx, ip, cfg)
+	cancel()
+	if latency == 0 {
+		http.Error(w, "体检未通过（WS 握手三次全败），拒绝顶替", http.StatusBadRequest)
+		return
 	}
-	// 先踢在位最差者：按质量记录里延迟最差者，无记录则末位。
-	victim := a.worstPoolMember(current.IPs)
+	if ceiling := poolEntryMaxLatencyMs(); latency > ceiling {
+		http.Error(w, fmt.Sprintf("延迟 %dms 超过进池上限 %dms，拒绝顶替：握手虽通但太慢，进池会拖垮粘在那台设备上的所有连接", latency, ceiling), http.StatusBadRequest)
+		return
+	}
+	entryColo = colo
+	_ = fails // 失败次数并入体检注记，软信号不否决
+	// 入池体检结果写进新成员的成绩单：机房码随行，丢手率记档。
+	fresh = append(fresh, proxyScanResult{
+		IP: ip, Latency: latency, Colo: colo, Stage: "WS_PASS",
+		Note: fmt.Sprintf("入池体检 %d/3 通过", 3-fails),
+	})
+	// 先踢在位最差者：按质量记录里延迟最差者，无记录则末位；固定成员
+	// 优先避让，否则锁位（只转固定）时可能把唯一固定成员顶掉导致换池失败。
+	victim := a.worstPoolMember(current.IPs, current.Priority...)
 	pool := current
 	pool.UpdatedAt = time.Now()
 	pool.IPs = replacePoolMember(current.IPs, victim, ip)
@@ -568,13 +598,18 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 	// 与全量重挑/补位互斥：它们只持 proxyScanMu 跑几分钟考试，最后才拿
 	// cfnatCtlMu 落池。这期间若放行踢人，漏斗用的是开考前复制的候选快照，
 	// 被踢的 IP 会照样通过考试、在落池时被写回来——用户的操作被静默撤销。
-	// 用 TryLock 立即拒绝而非排队：踢人点下去要立刻有结果，排在几分钟的
-	// 考试后面比报错更难理解。锁序仍是 proxyScanMu → cfnatCtlMu。
-	if !a.proxyScanMu.TryLock() {
-		http.Error(w, "优选或补位正在运行，等它结束再踢", http.StatusConflict)
+	// 用户操作优先：先取消后台扫描，再排队等它退出，而不是立刻 409。
+	// 锁序仍是 proxyScanMu → cfnatCtlMu。
+	releaseScan, ok := a.lockScanForManual(w)
+	if !ok {
 		return
 	}
-	defer a.proxyScanMu.Unlock()
+	released := false
+	defer func() {
+		if !released {
+			releaseScan()
+		}
+	}()
 	// 只拿换池锁（cfnatCtlMu），锁序全局规范 refresh → proxyScan → cfnatCtl，
 	// 绝不交叉持锁。等待而非立即拒绝——用户操作不排队吃闭门羹。
 	if !lockTimeout(&a.cfnatCtlMu, 15*time.Second) {
@@ -610,6 +645,19 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "最后一个在位成员不能踢：先点「立即优选」补充新池", http.StatusConflict)
 		return
 	}
+	// 踢出域名必须同步清理 Priority 与 Disabled，否则后台 reconcilePoolDomains
+	// 会把仍列在 Priority 里的域名当成「该回来」的成员重新加回池子。
+	// 同时用 planFixedMembers 预演：只剩 Disabled 成员时提前拒绝，别等
+	// applyPoolLocked 在深处报 500。
+	kicked := current
+	kicked.IPs = newIPs
+	kicked.Domains = newDomains
+	kicked.Priority = withoutStringValue(current.Priority, member)
+	kicked.Disabled = withoutStringValue(current.Disabled, member)
+	if _, _, err := planFixedMembers(kicked); err != nil {
+		http.Error(w, "踢除后没有可转发成员，请先补位："+err.Error(), http.StatusConflict)
+		return
+	}
 	keptResults := make([]proxyScanResult, 0, len(current.Results))
 	for _, result := range current.Results {
 		if result.IP != member {
@@ -621,7 +669,20 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 	pool.UpdatedAt = now
 	pool.IPs = newIPs
 	pool.Domains = newDomains
+	pool.Priority = kicked.Priority
+	pool.Disabled = kicked.Disabled
 	pool.Results = keptResults
+	// 成员通道映射也要同步修剪：等到下一次 applyProxyPool 的
+	// reconcileMemberChannels 才自愈会留下一个指向已踢成员的落盘残留。
+	if len(pool.MemberChannels) > 0 {
+		channels := make(map[string]string, len(pool.MemberChannels))
+		for name, channel := range pool.MemberChannels {
+			if name != member {
+				channels[name] = channel
+			}
+		}
+		pool.MemberChannels = channels
+	}
 	if err := a.applyPoolLocked(pool, current); err != nil {
 		http.Error(w, "踢除换池失败: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -632,8 +693,107 @@ func (a *app) handleActiveKick(w http.ResponseWriter, r *http.Request) {
 	a.markPoolSwitched(now)
 	log.Printf("active pool kicked %s: %d IPs + %d domains remain", member, len(newIPs), len(newDomains))
 	writeJSON(w, map[string]any{"ok": true, "kicked": member, "remaining": len(newIPs), "ips": newIPs})
-	// 自动补位：后台考试补满 PoolSize，失败静默（六小时全量维护兜底）。
-	go a.refillPoolAfterKick()
+	// 自动补位：只补 IP、且确有缺口时才开考；踢域名不该触发只考 IP 的补位。
+	if isIP && refillGap(pool, defaultProxyAutoConfig().PoolSize) > 0 {
+		// 补位是踢人的后续动作，不该被刚刚这次手动操作自己的优先级标记挡住。
+		// 先释放手动标记与扫描锁，再让补位按后台任务排队。
+		released = true
+		releaseScan()
+		go a.refillPoolAfterKick()
+	}
+}
+
+// handleSegmentToggle 是「段分布」那排段按钮的开关：把某一段在当前池里的
+// 全部 IP 一起关闭（或一起恢复）。
+//
+// 语义复用 pool.Disabled——成员仍在位、仍可体检，只是不参与转发。为什么不
+// 直接删出池：删出去之后 pruneDisabledMissingIPs 会顺手把这个成员从 Disabled
+// 里清掉，下一次全量刷新它若无其事地回来，用户的操作被静默撤销。留在位上
+// 关闭，标记才留得住，界面上也才显示得出「这一段是我关的」。
+//
+// 只影响当前这一轮：全量重挑会整批换 IP，新池里的段不再带这个标记。这与
+// 「在下一次刷池之前这些段的 IP 都会被禁用」的约定一致。
+func (a *app) handleSegmentToggle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	// 与踢人同一把锁、同一套理由：全量重挑/补位拿的是开考前复制的候选快照，
+	// 放行会让落池那一步把刚关掉的段又写回来。用户操作优先，先取消后台扫描。
+	releaseScan, ok := a.lockScanForManual(w)
+	if !ok {
+		return
+	}
+	defer releaseScan()
+	if !lockTimeout(&a.cfnatCtlMu, 15*time.Second) {
+		http.Error(w, "换池操作正在运行，请稍后再试", http.StatusTooManyRequests)
+		return
+	}
+	defer a.cfnatCtlMu.Unlock()
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var body struct {
+		Segment  string `json:"segment"`
+		Disabled *bool  `json:"disabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "无效的请求体", http.StatusBadRequest)
+		return
+	}
+	seg := strings.TrimSpace(body.Segment)
+	if seg == "" {
+		http.Error(w, "缺少段标识", http.StatusBadRequest)
+		return
+	}
+	// 缺省是「关闭」：按钮的主用途是关掉一个正在拖后腿的段。
+	want := true
+	if body.Disabled != nil {
+		want = *body.Disabled
+	}
+	current := a.proxyActivePoolSnapshot()
+	members := make([]string, 0, 4)
+	for _, raw := range current.IPs {
+		if segmentOf(net.ParseIP(raw)) == seg {
+			members = append(members, raw)
+		}
+	}
+	if len(members) == 0 {
+		http.Error(w, "该段当前没有在位成员", http.StatusNotFound)
+		return
+	}
+	set := make(map[string]struct{}, len(current.Disabled)+len(members))
+	for _, m := range current.Disabled {
+		set[m] = struct{}{}
+	}
+	for _, m := range members {
+		if want {
+			set[m] = struct{}{}
+		} else {
+			delete(set, m)
+		}
+	}
+	next := current
+	next.UpdatedAt = time.Now()
+	next.Disabled = sortedKeys(set)
+	if len(forwardingMembers(next)) == 0 {
+		http.Error(w, "这是最后一个还在转发的成员：先点「立即优选」补充新池", http.StatusConflict)
+		return
+	}
+	if err := a.applyPoolLocked(next, current); err != nil {
+		http.Error(w, "应用换池失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	action := "disabled"
+	if !want {
+		action = "enabled"
+	}
+	log.Printf("segment %s %s: %d IPs (%s)", seg, action, len(members), strings.Join(members, ","))
+	writeJSON(w, map[string]any{
+		"ok":               true,
+		"segment":          seg,
+		"disabled":         want,
+		"members":          members,
+		"disabledSegments": poolDisabledSegments(next),
+	})
 }
 
 func (a *app) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -795,9 +955,12 @@ func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"proxyAuto":           pool,
 		"backgroundOptimizer": a.backgroundOptimizerStatus(),
 		"qualityScheduler":    a.qualitySnapshot(),
-		"activeProbe":         a.activeProbeStatus(),
-		"disabledBench":       a.disabledBenchStatus(),
-		"sources":             a.sourceHealthSnapshot(),
+		// poolLedger 是逐成员的历史账摘要（最近 50 条）。排序用的跨轮吞吐
+		// 就是从这里来的；页面想知道「为什么这个人排前面」看它即可。
+		"poolLedger":    a.poolLedgerSummary(50),
+		"activeProbe":   a.activeProbeStatus(),
+		"disabledBench": a.disabledBenchStatus(),
+		"sources":       a.sourceHealthSnapshot(),
 		// sourceChannels 是逐源账的渠道汇总（四层各一行），优选台饼图与
 		// 渠道排行只读这一份；归类规则留在后端，前端不再各自猜。
 		"sourceChannels": a.sourceChannelSummary(),
@@ -808,6 +971,13 @@ func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// poolSegments 是当前池的 CF 段分布。段数 < 2 意味着抗单点能力弱，
 		// 2026-10-22 事故就是池里只有一个段，该段一挂全灭。
 		"poolSegments": poolSegmentStats(pool.IPs),
+		// disabledSegments 是「整段都被关掉」的段标识，前端据此把段按钮画成
+		// 关闭态。只列全段关闭的：还有一个成员在转发就不算关，否则界面会
+		// 谎报「整段已停」，而实际还有流量在走。
+		"disabledSegments": poolDisabledSegments(pool),
+		// scanBusy 回答「按钮点了为什么没反应」：现在是谁占着扫描锁、跑到
+		// 哪一步、已经跑了多久。没有它，用户只能看到一句笼统的冲突提示。
+		"scanBusy": a.scanActivitySnapshot(),
 		// poolBlock 是最近一次「换池被拦」的结构化原因（reason/source/at/
 		// nextAllowedAt）。与 proxyAuto.error 的自由文本互补：那个带时间戳但
 		// 仍是句子，这个可以直接当判据用。blocked=false 表示当前无拦截。
@@ -835,12 +1005,20 @@ func (a *app) qualitySnapshot() map[string]any {
 func (a *app) backgroundOptimizerStatus() map[string]any {
 	a.optimizerMu.RLock()
 	defer a.optimizerMu.RUnlock()
+	// 节拍读调度器运行时的真实配置（PROXY_SCHEDULER_*），不是写死的
+	// 5 分钟/12 个；调度器未初始化时回落默认值。concurrency 4 是
+	// runQualitySchedulerProbe 里硬编码的真实值，保持不动。
+	intervalMinutes, batchSize := 5, 12
+	if a.quality != nil {
+		interval, batch := a.quality.probeCadence()
+		intervalMinutes, batchSize = int(interval.Minutes()), batch
+	}
 	return map[string]any{
 		"enabled":         a.optimizerEnabled,
 		"lastRun":         a.optimizerLastRun,
 		"lastError":       a.optimizerLastError,
-		"intervalMinutes": 5,
-		"batchSize":       12,
+		"intervalMinutes": intervalMinutes,
+		"batchSize":       batchSize,
 		"concurrency":     4,
 	}
 }
@@ -880,7 +1058,12 @@ func (a *app) handleCFnatStart(w http.ResponseWriter, r *http.Request) {
 	a.cfnatCtlMu.Lock()
 	defer a.cfnatCtlMu.Unlock()
 	var cfg cfnatConfig
-	_ = json.NewDecoder(r.Body).Decode(&cfg)
+	// 空 body 即用默认配置（EOF 不算错）；真正的语法错误回 400，
+	// 不再静默当成零值配置。
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
 	cfg = normalizeCFnat(cfg)
 	if err := a.cfnat.stop(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -914,7 +1097,10 @@ func (a *app) handleCFdataRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var cfg cfdataConfig
-	_ = json.NewDecoder(r.Body).Decode(&cfg)
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
 	cfg = normalizeCFdata(cfg)
 	if err := a.cfdata.start(a.dataDir, cfg.args(), ""); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

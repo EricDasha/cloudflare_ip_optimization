@@ -10,6 +10,7 @@ services:
     ports:
       - "8080:8080"   # Web 控制台
       - "1234:1234"   # CFnat 本地转发入口
+      - "1235:1235"   # CFnat 实验性第二入口（CFNAT_ALT_ADDR 为空时不监听）
     environment:
       TZ: Asia/Shanghai
       DATA_DIR: /data
@@ -18,6 +19,10 @@ services:
       # 与 cmliu/CFnat-Docker 思路一致：用环境变量生成 cfnat 运行参数；Web 页面也可覆盖后重启。
       CFNAT_AUTO_START: "true"
       CFNAT_ADDR: 0.0.0.0:1234
+      # 实验性第二入口：同一个 cfnat 进程、同一个池，换一个本地端口和目标端口。
+      # 用于验证「443 被干扰时，8443/2053 等端口是否更稳」。留空关闭。
+      CFNAT_ALT_ADDR: "${CFNAT_ALT_ADDR:-}"
+      CFNAT_ALT_PORT: "${CFNAT_ALT_PORT:-0}"
       CFNAT_COLO: ""                 # 例如 HKG,SJC,LAX；留空则不过滤
       CFNAT_DELAY: "2000"
       CFNAT_DOMAIN: cloudflaremirrors.com/debian
@@ -59,6 +64,8 @@ services:
       PROXY_AUTO_MIN_POOL: "3"
       # 优选域名直连：显式指定后并入 CFnat 固定转发池；IP 池结果仍来自 VLESS 终审。
       PROXY_DOMAIN_FORWARD: "${PROXY_DOMAIN_FORWARD:-}"
+      # 自动并入的优选域名在 -fixed 段内按质量排序；stable 保持原序。
+      PROXY_DOMAIN_ORDER: "${PROXY_DOMAIN_ORDER:-quality}"
       # 优选域名兜底转发：置 true 时把已启用的优选域名并入 cfnat -fallback
       # （上限 12 个），仅在固定 IP 池全部拨号失败时才直连域名，不解析不探测。
       PROXY_AUTO_DOMAINS: "true"
@@ -76,6 +83,10 @@ services:
       PROXY_SCHEDULER_PROBE_INTERVAL_SECONDS: "300"
       PROXY_SCHEDULER_BATCH_SIZE: "12"
       PROXY_SCHEDULER_APPLY: "true"
+      # 片区多样性门禁：减段换池需候选吞吐高出该比例；0 恢复严格拦截。
+      PROXY_SCHEDULER_SEGMENT_GAIN: "${PROXY_SCHEDULER_SEGMENT_GAIN:-0.15}"
+      # 跨轮 EWMA 只影响排序；0 关闭。
+      PROXY_EWMA_ALPHA: "${PROXY_EWMA_ALPHA:-0.3}"
       # CFdata 供给层：启动即后台自扫一次，此后每 6 小时一轮（CFDATA_AUTO_SCAN
       # 默认开启，置 false 退回纯手动 /api/cfdata/run）。结果写 result.csv，
       # 只要求公网 IPv4，直接汇入候选池（第二大供给层；2026-11-05 起不再过
@@ -85,7 +96,8 @@ services:
       # 这里的 MAINTAINERS 只是「首次启动的种子」：之后维护者清单以页面上编辑的
       # data/proxy-subscriptions.json 为准，改这里不会覆盖页面上的增删。
       PROXY_SUBSCRIPTION_CONVERTER: "https://vlesdy.trojanjd.dpdns.org/sub"
-      PROXY_SUBSCRIPTION_MAINTAINERS: "owo.o00o.ooo,cm.soso.edu.kg,zrf.zrf.me,sub.keaeye.icu,sub.mot.cloudns.biz,sub.mia.xx.kg,sub.lzjbaby.com,sub.xdu.qzz.io"
+      # 2026-11-15 按实测通过率移除 owo.o00o.ooo(22.6%)、sub.mot.cloudns.biz(2.9%)。
+      PROXY_SUBSCRIPTION_MAINTAINERS: "cm.soso.edu.kg,zrf.zrf.me,sub.keaeye.icu,sub.mia.xx.kg,sub.lzjbaby.com,sub.xdu.qzz.io"
       PROXY_SUBSCRIPTION_TOKEN: "${PROXY_SUBSCRIPTION_TOKEN:-}"
       PROXY_SUBSCRIPTION_REFRESH_ENABLED: "true"
       # 收与考分开两条节奏：
@@ -141,15 +153,17 @@ services:
       PROXY_VLESS_TIMEOUT: "15"
       PROXY_VLESS_MAX_CANDIDATES: "20"
       # 测速为软门槛：只影响排序与展示，不再否决已通过 204 的候选。
-      # 注意：PROXY_VLESS_SPEED_URL 未设时默认落在 speed.cloudflare.com，
-      # 与上面域名测速踩的是同一个坑（链路到不了 CF 目标）。故 IP 侧吞吐
-      # 排序目前恒为空、形同虚设。改法是把它也指向非 CF 定长文件——这会
-      # 改变优选排序、进而影响换池，属独立决策，需明示后再动。
-      # 关闭成员体检不共享这个坑：它有自己的 PROXY_DISABLED_BENCH_SPEED_URL，
-      # 默认已指向非 CF 的 OVH 定长文件。
+      # 测速端点默认走非 CF 的 OVH 定长文件（disabledBenchSpeedURLDefault）；
+      # 仍可用 PROXY_VLESS_SPEED_URL 覆盖，{bytes} 会替换为实际字节数。
       PROXY_VLESS_SPEED_BYTES: "2097152"
       PROXY_VLESS_SPEED_TIMEOUT: "20"
       PROXY_VLESS_MIN_DOWNLOAD_MBPS: "3"
+      # 数据面延迟超线按「低于参考值」处理；串行测速间隔 250ms；
+      # 观察 3 秒仍低于参考值 40% 时提前放弃；入池前 trace L7 复验。
+      PROXY_VLESS_DATA_LATENCY_CEILING_MS: "1200"
+      PROXY_VLESS_SPEED_INTERVAL_MS: "250"
+      PROXY_VLESS_SPEED_EARLY_ABORT: "true"
+      PROXY_TRACE_L7: "true"
       SING_BOX_BIN: /usr/local/bin/sing-box
     volumes:
       - ./data:/data

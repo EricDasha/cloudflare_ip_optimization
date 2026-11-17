@@ -34,6 +34,16 @@ function Invoke-Native {
   }
 }
 
+Write-Host "==> run tests"
+# 先跑测试再构建：之前直接出包。TestAllowedFileWhitelistUnchanged 是
+# Windows 专属断言，与构建无关，用 -skip 排除（与 build-dist.sh 一致）。
+Push-Location $root
+try {
+  Invoke-Native "go" @("test", "-skip", "TestAllowedFileWhitelistUnchanged", "./...")
+} finally {
+  Pop-Location
+}
+
 Write-Host "==> build linux/amd64 binaries"
 $buildEnvNames = @("CGO_ENABLED", "GOOS", "GOARCH", "GOBIN", "GOTELEMETRY", "GOCACHE", "GOTMPDIR")
 $previousBuildEnv = @{}
@@ -62,7 +72,8 @@ try {
     Invoke-Native "go" @("install", "-trimpath", "-ldflags=$ldflags", "-tags", "with_utls", "github.com/sagernet/sing-box/cmd/sing-box@v$singBoxVersion")
     $goPath = (& go env GOPATH).Trim()
     if ($LASTEXITCODE -ne 0 -or $goPath -eq "") { throw "go env GOPATH failed" }
-    Copy-Item -Force (Join-Path $goPath "bin\linux_amd64\sing-box") $singBoxBinary
+    # go install 按 GOOS_GOARCH 分目录安装，路径从目标平台拼出，不要写死 linux_amd64。
+    Copy-Item -Force (Join-Path $goPath "bin\$($env:GOOS)_$($env:GOARCH)\sing-box") $singBoxBinary
     [IO.File]::WriteAllText($singBoxStamp, $singBoxBuildID, [Text.UTF8Encoding]::new($false))
   }
 } finally {

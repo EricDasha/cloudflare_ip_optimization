@@ -1,0 +1,80 @@
+=== spacing ===
+official      104.18.42.163    gap= 0.0s  0/5  [-1, -1, -1, -1, -1]
+official      104.18.42.163    gap= 1.0s  1/5  [-1, -1, 111, -1, -1]
+official      104.18.42.163    gap= 5.0s  0/5  [-1, -1, -1, -1, -1]
+official      104.18.42.163    gap=15.0s  0/5  [-1, -1, -1, -1, -1]
+official      172.64.147.104   gap= 0.0s  0/5  [-1, -1, -1, -1, -1]
+official      172.64.147.104   gap= 1.0s  0/5  [-1, -1, -1, -1, -1]
+official      172.64.147.104   gap= 5.0s  0/5  [-1, -1, -1, -1, -1]
+official      172.64.147.104   gap=15.0s  0/5  [-1, -1, -1, -1, -1]
+official      104.18.41.208    gap= 0.0s  1/5  [111, -1, -1, -1, -1]
+official      104.18.41.208    gap= 1.0s  1/5  [-1, -1, -1, 2133, -1]
+official      104.18.41.208    gap= 5.0s  1/5  [106, -1, -1, -1, -1]
+official      104.18.41.208    gap=15.0s  0/5  [-1, -1, -1, -1, -1]
+non-official  207.57.125.21    gap= 0.0s  5/5  [66, 70, 62, 66, 61]
+non-official  207.57.125.21    gap= 1.0s  5/5  [64, 72, 63, 67, 65]
+non-official  207.57.125.21    gap= 5.0s  5/5  [68, 71, 68, 68, 63]
+non-official  207.57.125.21    gap=15.0s  5/5  [70, 63, 66, 67, 62]
+non-official  47.244.225.39    gap= 0.0s  5/5  [70, 65, 60, 63, 68]
+non-official  47.244.225.39    gap= 1.0s  4/5  [67, 66, 69, 66, -1]
+non-official  47.244.225.39    gap= 5.0s  5/5  [67, 66, 69, 68, 66]
+non-official  47.244.225.39    gap=15.0s  5/5  [66, 71, 70, 61, 63]
+{"at": "2026-11-11T18:19:33Z", "rows": [{"grp": "official", "ip": "104.18.42.163", "gap": 0.0, "n": 5, "ok": 0, "ms": [-1, -1, -1, -1, -1]}, {"grp": "official", "ip": "104.18.42.163", "gap": 1.0, "n": 5, "ok": 1, "ms": [-1, -1, 111, -1, -1]}, {"grp": "official", "ip": "104.18.42.163", "gap": 5.0, "n": 5, "ok": 0, "ms": [-1, -1, -1, -1, -1]}, {"grp": "official", "ip": "104.18.42.163", "gap": 15.0, "n": 5, "ok": 0, "ms": [-1, -1, -1, -1, -1]}, {"grp": "official", "ip": "172.64.147.104", "gap": 0.0, "n": 5, "ok": 0, "ms": [-1, -1, -1, -1, -1]}, {"grp": "official", "ip": "172.64.147.104", "gap": 1.0, "n": 5, "ok": 0, "ms": [-1, -1, -1, -1, -1]}, {"grp": "official", "ip": "172.64.147.104", "gap": 5.0, "n": 5, "ok": 0, "ms": [-1, -1, -1, -1, -1]}, {"grp": "official", "ip": "172.64.147.104", "gap": 15.0, "n": 5, "ok": 0, "ms": [-1, -1, -1, -1, -1]}, {"grp": "official", "ip": "104.18.41.208", "gap": 0.0, "n": 5, "ok": 1, "ms": [111, -1, -1, -1, -1]}, {"grp": "official", "ip": "104.18.41.208", "gap": 1.0, "n": 5, "ok": 1, "ms": [-1, -1, -1, 2133, -1]}, {"grp": "official", "ip": "104.18.41.208", "gap": 5.0, "n": 5, "ok": 1, "ms": [106, -1, -1, -1, -1]}, {"grp": "official", "ip": "104.18.41.208", "gap": 15.0, "n": 5, "ok": 0, "ms": [-1, -1, -1, -1, -1]}, {"grp": "non-official", "ip": "207.57.125.21", "gap": 0.0, "n": 5, "ok": 5, "ms": [66, 70, 62, 66, 61]}, {"grp": "non-official", "ip": "207.57.125.21", "gap": 1.0, "n": 5, "ok": 5, "ms": [64, 72, 63, 67, 65]}, {"grp": "non-official", "ip": "207.57.125.21", "gap": 5.0, "n": 5, "ok": 5, "ms": [68, 71, 68, 68, 63]}, {"grp": "non-official", "ip": "207.57.125.21", "gap": 15.0, "n": 5, "ok": 5, "ms": [70, 63, 66, 67, 62]}, {"grp": "non-official", "ip": "47.244.225.39", "gap": 0.0, "n": 5, "ok": 5, "ms": [70, 65, 60, 63, 68]}, {"grp": "non-official", "ip": "47.244.225.39", "gap": 1.0, "n": 5, "ok": 4, "ms": [67, 66, 69, 66, -1]}, {"grp": "non-official", "ip": "47.244.225.39", "gap": 5.0, "n": 5, "ok": 5, "ms": [67, 66, 69, 68, 66]}, {"grp": "non-official", "ip": "47.244.225.39", "gap": 15.0, "n": 5, "ok": 5, "ms": [66, 71, 70, 61, 63]}]}
+=== broad ===
+== round 1 02:20:02 ==
+  cf-official  104.18.42.163    FAIL  3002ms TimeoutError
+  cf-official  172.64.147.104   FAIL  3003ms TimeoutError
+  cf-official  172.64.145.93    FAIL  3000ms TimeoutError
+  cf-official  162.159.36.1     FAIL  3003ms TimeoutError
+  cf-official  104.18.33.74     FAIL  3000ms TimeoutError
+  cf-official  104.18.40.77     FAIL  3003ms TimeoutError
+  cf-proxy     207.57.125.21    OK     64ms 
+  cf-proxy     47.244.225.39    OK     65ms 
+  cf-proxy     108.160.135.122  OK    115ms 
+  non-cf       23.227.38.74     FAIL  3003ms TimeoutError
+  non-cf       20.205.243.166   OK    154ms 
+  non-cf       151.101.1.140    OK     78ms 
+  non-cf       93.184.216.34    FAIL  3003ms TimeoutError
+  non-cf       142.250.66.100   FAIL  3003ms TimeoutError
+  non-cf       104.244.42.1     FAIL  3002ms TimeoutError
+  non-cf       199.232.0.1      FAIL  3003ms TimeoutError
+  domestic     223.5.5.5        OK     26ms 
+  domestic     110.242.68.66    FAIL  3002ms TimeoutError
+== round 2 02:21:38 ==
+  cf-official  104.18.42.163    OK    107ms 
+  cf-official  172.64.147.104   FAIL  3002ms TimeoutError
+  cf-official  172.64.145.93    FAIL  3003ms TimeoutError
+  cf-official  162.159.36.1     FAIL  3003ms TimeoutError
+  cf-official  104.18.33.74     FAIL  3001ms TimeoutError
+  cf-official  104.18.40.77     OK    101ms 
+  cf-proxy     207.57.125.21    OK     73ms 
+  cf-proxy     47.244.225.39    OK     67ms 
+  cf-proxy     108.160.135.122  OK    131ms 
+  non-cf       23.227.38.74     FAIL  3002ms TimeoutError
+  non-cf       20.205.243.166   OK    155ms 
+  non-cf       151.101.1.140    OK     74ms 
+  non-cf       93.184.216.34    FAIL  3003ms TimeoutError
+  non-cf       142.250.66.100   FAIL  3003ms TimeoutError
+  non-cf       104.244.42.1     FAIL  3003ms TimeoutError
+  non-cf       199.232.0.1      FAIL  3003ms TimeoutError
+  domestic     223.5.5.5        OK     21ms 
+  domestic     110.242.68.66    FAIL  3002ms TimeoutError
+== round 3 02:23:09 ==
+  cf-official  104.18.42.163    FAIL  3003ms TimeoutError
+  cf-official  172.64.147.104   FAIL  3003ms TimeoutError
+  cf-official  172.64.145.93    FAIL  3003ms TimeoutError
+  cf-official  162.159.36.1     FAIL  3002ms TimeoutError
+  cf-official  104.18.33.74     FAIL  3002ms TimeoutError
+  cf-official  104.18.40.77     FAIL  3003ms TimeoutError
+  cf-proxy     207.57.125.21    OK     72ms 
+  cf-proxy     47.244.225.39    OK     61ms 
+  cf-proxy     108.160.135.122  OK    156ms 
+  non-cf       23.227.38.74     FAIL  3000ms TimeoutError
+  non-cf       20.205.243.166   OK    161ms 
+  non-cf       151.101.1.140    OK     74ms 
+  non-cf       93.184.216.34    FAIL  3002ms TimeoutError
+  non-cf       142.250.66.100   FAIL  3000ms TimeoutError
+  non-cf       104.244.42.1     FAIL  3003ms TimeoutError
+  non-cf       199.232.0.1      FAIL  3003ms TimeoutError
+  domestic     223.5.5.5        OK     25ms 
+  domestic     110.242.68.66    FAIL  3003ms TimeoutError

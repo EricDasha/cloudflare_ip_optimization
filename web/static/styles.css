@@ -315,6 +315,14 @@ select, input[type="search"] {
    界面毫无提示。两者都必须一眼看见，故此处是全站唯一的色彩破例。 */
 .segline { display: flex; flex-direction: column; gap: var(--s2); margin-top: var(--s2); }
 .seg-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+/* 段按钮：点一下关掉整段，再点恢复。关闭态用降饱和 + 删除线表达，不能只靠
+   颜色——色弱用户在深色主题下分不出「已关」和「高占比」。 */
+.seg-chip { cursor: pointer; font: inherit; }
+.seg-chip:hover { border-color: var(--accent); }
+.seg-chip:disabled { opacity: .55; cursor: progress; }
+.seg-chip.off { opacity: .5; filter: grayscale(1); }
+.seg-chip.off b { text-decoration: line-through; }
+.seg-hint { margin-left: 8px; color: var(--text-3); }
 .seg-chip {
   position: relative; display: inline-flex; align-items: center; gap: 6px;
   padding: 3px 8px; border: 1px solid var(--line); border-radius: var(--radius);

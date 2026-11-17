@@ -50,6 +50,7 @@ type app struct {
 	proxyScanMu      sync.Mutex
 	cfnatCtlMu       sync.Mutex
 	candidateMu      sync.RWMutex
+	candidateSaveMu  sync.Mutex
 	refreshMu        sync.Mutex
 	candidates       proxyCandidateSnapshot
 	activeMu         sync.RWMutex
@@ -101,6 +102,12 @@ type app struct {
 	domainQuality   map[string]*domainQuality
 	sourceHealthMu  sync.Mutex
 	sourceHealth    map[string]*sourceHealthStat
+	// ledgerMu / ledger 是「优选来源台账」：每个候选 IP 被看到过几轮、被真实
+	// 考试考过几次、通过几次，每个来源的清单内容多久没变过。淘汰规则也存在
+	// 这份数据里，页面可改、改完即生效。详见 source_ledger.go。
+	ledgerMu        sync.Mutex
+	ledger          sourceLedgerData
+	ledgerLastSave  time.Time
 	throneProbeMu   sync.Mutex
 	throneProbe     map[string]*throneProbeStat
 	throneLastProbe time.Time
@@ -134,6 +141,13 @@ type app struct {
 	// 不允许同时跑——它们会争同一份探测预算与 cfnat 控制权。
 	optimizeMu sync.Mutex
 	optimize   optimizeState
+	// scanActMu 保护「此刻谁占着 proxyScanMu」的登记。这把锁有十几个持有者，
+	// 撞锁时只说「优选或补位正在运行」等于什么都没说，见 scan_activity.go。
+	scanActMu sync.Mutex
+	scanAct   scanActivity
+	// scanPriority 让用户操作优先于后台探测：用户一开始操作就取消后台扫描，
+	// 后台在落池前必须检查上下文，避免把旧快照写回去。见 scan_priority.go。
+	scanPriority manualScanPriority
 }
 
 func main() {
@@ -168,6 +182,7 @@ func main() {
 	a.loadSubscriptionSettings()
 	a.loadSubscriptionInventory()
 	a.loadDomainQuality()
+	a.loadSourceLedger()
 	a.seedPoolGuardFromActive()
 	a.quality = newQualitySchedulerRuntime(a.dataDir)
 	if pool := a.proxyActivePoolSnapshot(); len(pool.IPs) > 0 {
@@ -184,6 +199,7 @@ func main() {
 			log.Printf("auto-start cfnat failed: %v", err)
 		}
 	}
+	go preflightSpeedSources(context.Background())
 	go a.runProxyCandidateRefreshLoop()
 	go a.runBackgroundOptimizerLoop()
 	go a.runSubscriptionSweepLoop()
@@ -202,6 +218,8 @@ func main() {
 	mux.HandleFunc("/api/cfnat/proxy-probe", a.handleProxyProbe)
 	mux.HandleFunc("/api/cfnat/proxy-promote", a.handleProxyPromote)
 	mux.HandleFunc("/api/cfnat/proxy-candidates", a.handleProxyCandidates)
+	// 来源台账：谁供的货、供了多少、考没考过、多久没变过。淘汰规则也走这条。
+	mux.HandleFunc("/api/cfnat/source-ledger", a.handleSourceLedger)
 	// 在位成员实弹验证：暂停转发 → 逐个验 → 剔除不合格 → 恢复。
 	// 「当前测试」按钮打这条。
 	mux.HandleFunc("/api/cfnat/revalidate", a.handleRevalidate)
@@ -211,6 +229,7 @@ func main() {
 	mux.HandleFunc("/api/cfnat/connections", a.handleCFnatConnections)
 	mux.HandleFunc("/api/cfnat/upstreams", a.handleCFnatUpstreams)
 	mux.HandleFunc("/api/cfnat/active/kick", a.handleActiveKick)
+	mux.HandleFunc("/api/cfnat/active/segment", a.handleSegmentToggle)
 	mux.HandleFunc("/api/cfnat/active/endorse", a.handleActiveEndorse)
 	mux.HandleFunc("/api/cfnat/active/select", a.handleActiveSelect)
 	mux.HandleFunc("/api/cfnat/background-optimizer", a.handleBackgroundOptimizer)
@@ -342,6 +361,12 @@ func (a *app) refreshCandidatesAfterCFdata() {
 		if a.cfdata.status().Running {
 			continue
 		}
+		if st := a.cfdata.status(); st.LastError != "" {
+			// 扫描失败（如上游 CIDR/locations 拉取失败）时 cfdata 以非零码退出，
+			// 此时 ip.csv 仍是旧数据；继续重算会把陈旧供给当成新一轮成功。
+			log.Printf("post-cfdata candidate refresh skipped: cfdata exited with error: %s", st.LastError)
+			return
+		}
 		refreshCtx, cancelRefresh := context.WithTimeout(context.Background(), 60*time.Second)
 		ok, err := a.refreshProxyCandidates(refreshCtx)
 		cancelRefresh()
@@ -409,10 +434,37 @@ func (a *app) cfdataIPListStale() bool {
 //
 // ============================================================================
 
+// schedulerThroughputGain 估算换入候选相对在位成员的吞吐增益。
+//
+// 这里刻意不用 lineQualityScore：它的 stability 项按 CapacityMbps 缩放，
+// 任何成功率为 1 的成员都能拿到上百点的底分，速度差异会被完全淹没。
+// 换池闸要回答的是「牺牲一个片区，值不值」，必须看真实吞吐。
+// 任一方没有本轮/在位成绩时返回 0，让调用方维持严格拦截。
+func schedulerThroughputGain(current proxyActivePool, results []proxyScanResult, fromIP, toIP string) float64 {
+	base := proxyResultDownloadMbps(current.Results, fromIP)
+	candidate := proxyResultDownloadMbps(results, toIP)
+	if base <= 0 || candidate <= 0 {
+		return 0
+	}
+	return (candidate - base) / base
+}
+
+// allowSegmentDiversityTrade 决定「少一个片区」能不能用吞吐增益换。
+// 底线是至少保留两个片区；阈值 <=0 表示运营者要求严格拦截（旧行为）。
+func allowSegmentDiversityTrade(beforeSegs, afterSegs int, gain, threshold float64) bool {
+	if afterSegs < 2 {
+		return false
+	}
+	if threshold <= 0 {
+		return false
+	}
+	return gain >= threshold
+}
+
 // runQualitySchedulerProbe 后台优选主循环：
 // 从 Candidate Pool 取一批 IP → WS/VLESS 测试 → 观察结果 → 决定是否换池。
 // 此函数是三池模型的核心执行器。
-func (a *app) runQualitySchedulerProbe(parent context.Context) {
+func (a *app) runQualitySchedulerProbe(_ context.Context) {
 	if a.quality == nil {
 		return
 	}
@@ -426,6 +478,15 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 		return
 	}
 	defer a.proxyScanMu.Unlock()
+	if a.manualScanPending() {
+		// 用户操作优先：本轮后台体检直接让位，下一轮再来。
+		return
+	}
+	bgCtx, ok := a.backgroundScanContext()
+	if !ok {
+		return
+	}
+	defer a.noteScanActivity("background", "在位体检与替补")()
 	cfg := defaultProxyAutoConfig()
 	cfg.Concurrency = 4
 	cfg.MaxLatency = 1500
@@ -435,9 +496,13 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	// the health gate.
 	healthNow := time.Now()
 	if len(current.IPs) > 0 {
-		healthCtx, healthCancel := context.WithTimeout(parent, 5*time.Second)
+		healthCtx, healthCancel := context.WithTimeout(bgCtx, 5*time.Second)
 		activeResults := scanProxyWebSockets(healthCtx, current.IPs, cfg)
 		healthCancel()
+		if bgCtx.Err() != nil {
+			// 用户操作抢占导致的取消不能记成在位成员失败。
+			return
+		}
 		for _, result := range activeResults {
 			ok := result.Error == ""
 			a.recordActiveHealth(result.IP, ok, healthNow)
@@ -477,9 +542,12 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	// An empty batch is still a valid health-only scheduler round.
 
 	// 第一阶段：WS/TLS 初筛（低成本）
-	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
+	ctx, cancel := context.WithTimeout(bgCtx, 45*time.Second)
 	defer cancel()
 	results := scanProxyWebSockets(ctx, batch, cfg)
+	if bgCtx.Err() != nil {
+		return
+	}
 	applyCandidateSourcePriority(results, snapshot.SourceByIP)
 	now := time.Now()
 
@@ -491,8 +559,19 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 			a.quality.setError(err.Error())
 			return
 		}
-		passed = probeVLESSPool(ctx, results, cfg.Port, len(results), cfg.VLESS, template)
-		passed = rankVLESSPassesBySpeed(ctx, passed, results, cfg.Port, cfg.VLESS, template)
+		// VLESS 终审不得与 WS 初筛共用 45 秒预算：终审是串行的，每 IP
+		// 15 秒超时，12 个一批最坏 180 秒 + 测速 6×20 秒，45 秒一到
+		// 后面的尝试瞬间报 context 错误——不是 IP 死了，是预算没了，
+		// 降级逻辑（改动 B）还会把这些假超时当真失败采纳。与漏斗同款：
+		// 终审单独开一份 10 分钟预算，探测量不变，只是让它跑完。
+		vlessCtx, vlessCancel := context.WithTimeout(bgCtx, autoApplyBudget)
+		defer vlessCancel()
+		passed = probeVLESSPool(vlessCtx, results, cfg.Port, len(results), cfg.VLESS, template)
+		rankingHistory := mergeRankingHistory(a.proxyActivePoolSnapshot().Results, a.ledgerRankingHistory())
+		passed = rankVLESSPassesBySpeedWithHistory(vlessCtx, passed, results, cfg.Port, cfg.VLESS, template, rankingHistory)
+		if bgCtx.Err() != nil {
+			return
+		}
 	} else {
 		for _, result := range results {
 			if result.Error == "" {
@@ -510,6 +589,9 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	for _, result := range results {
 		_, ok := passedSet[result.IP]
 		a.quality.observe(result.IP, snapshot.SourceByIP[result.IP], result.DownloadMbps, result.Latency, ok, now)
+		// 台账另记一份：这个地址到今天为止被考过几次、通过过几次。质量账
+		// 会被上限裁掉旧记录，台账不会——淘汰判定要的正是「长期」。
+		a.ledgerObserveProbe(result.IP, ok, result.DownloadMbps)
 	}
 
 	// 决策：检查是否有 Standby IP 应该晋升为 Active
@@ -549,10 +631,22 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 	// spreadBySegment 只在全量重挑/踢人补位里跑过，这条路径此前完全绕过片区
 	// 检查——池结构可以一轮一轮被换成同一段，而所有指标都显示正常。
 	nextIPs := replacePoolMember(current.IPs, decision.FromIP, decision.ToIP)
-	if degradedSegmentDiversity(current.IPs, nextIPs) {
-		log.Printf("scheduler pool switch skipped: segment diversity would drop %v -> %v", poolSegmentStats(current.IPs), poolSegmentStats(nextIPs))
-		a.quality.setError("调度器换池被片区多样性检查拦截：换入后段数减少")
-		return
+	if degraded, beforeSegs, afterSegs := segmentDiversityDelta(current.IPs, nextIPs); degraded {
+		// 段数变少本身不是否决理由：池子只有 7 个成员时，硬拦会把「换入
+		// 同段的高质量候选」永久挡在门外——decideLineSwitch 每轮都给同一个人。
+		// 这里把决定权交回给代价：留住至少两个片区，且候选吞吐确实有明显
+		// 提升，才允许用一段多样性去换质量。阈值设 0 即恢复旧的严格拦截。
+		gain := schedulerThroughputGain(current, results, decision.FromIP, decision.ToIP)
+		threshold := envFloat("PROXY_SCHEDULER_SEGMENT_GAIN", 0.15)
+		if !allowSegmentDiversityTrade(beforeSegs, afterSegs, gain, threshold) {
+			log.Printf("scheduler pool switch skipped: segment diversity %d -> %d, throughput gain %.1f%% (threshold %.0f%%)",
+				beforeSegs, afterSegs, gain*100, threshold*100)
+			a.quality.setError(fmt.Sprintf("调度器换池被片区多样性检查拦截：段数 %d→%d，候选吞吐增益 %.1f%% 未达阈值 %.0f%%",
+				beforeSegs, afterSegs, gain*100, threshold*100))
+			return
+		}
+		log.Printf("scheduler pool switch allowed: segment diversity %d -> %d for %.1f%% throughput gain",
+			beforeSegs, afterSegs, gain*100)
 	}
 	pool := current
 	pool.UpdatedAt, pool.Host, pool.Path = now, cfg.Host, cfg.Path
@@ -567,6 +661,14 @@ func (a *app) runQualitySchedulerProbe(parent context.Context) {
 }
 
 func (a *app) refreshAndApplyProxyPool(ctx context.Context) {
+	if a.manualScanPending() {
+		return
+	}
+	bgCtx, ok := a.backgroundScanContext()
+	if !ok {
+		return
+	}
+	ctx = bgCtx
 	// CFdata 由独立后台扫描器（runCFdataBackgroundScan）驱动——本循环只读取
 	// 它产出的 result.csv，不启动扫描。两条链路解耦，互不阻塞。
 	ok, err := a.refreshProxyCandidates(ctx)
@@ -584,14 +686,26 @@ func (a *app) refreshAndApplyProxyPool(ctx context.Context) {
 
 func (a *app) cfnatStartupConfig() cfnatConfig {
 	cfg := defaultCFnatConfig()
-	a.activeMu.RLock()
-	defer a.activeMu.RUnlock()
-	// 与 applyPoolLocked 一致：登基 IP + 优选域名同为 -fixed 成员（域名拨号时活解析）。
-	fixed := append([]string(nil), a.activePool.IPs...)
-	fixed = append(fixed, a.activePool.Domains...)
-	if len(fixed) > 0 {
-		cfg.Fixed = strings.Join(fixed, ",")
+	cfg.Fallback = strings.TrimSpace(env("CFNAT_FALLBACK", ""))
+	// 先拿快照再算：gatePoolDomains 要读域名质量账，不能在 activeMu 里做，
+	// 否则形成 activeMu → domainQualityMu 的嵌套锁序。
+	pool := a.proxyActivePoolSnapshot()
+	if len(pool.IPs)+len(pool.Domains) == 0 {
+		return cfg
 	}
+	// 冷启动必须与 applyPoolLocked 同一套契约：剔除已关闭成员、过域名质量闸、
+	// 按 Priority/Lock 规划 -fixed。旧实现直接把 IPs+Domains 原样塞进去，
+	// 重启等于把用户刚关掉的成员和判死的域名重新投入转发。
+	pool.Domains = a.gatePoolDomains(pool)
+	pool.Disabled = pruneDisabledMissingIPs(pool)
+	fixed, priority, err := planFixedMembers(pool)
+	if err != nil {
+		// 历史脏盘可能全员关闭/锁位无置顶：宁可不自动启动 cfnat，也不违约转发。
+		log.Printf("cfnat startup config: active pool has no deliverable members: %v", err)
+		return cfg
+	}
+	cfg.Fixed = strings.Join(fixed, ",")
+	cfg.Priority = strings.Join(priority, ",")
 	return cfg
 }
 
@@ -648,24 +762,52 @@ func (a *app) poolDomainMembers() []string {
 		seen[domain] = struct{}{}
 		domains = append(domains, domain)
 	}
-	// 显式配置视为运营者本人担保，不参与质量闸。
+	// 显式配置视为运营者本人担保，不参与质量闸，也不参与质量排序：
+	// 它们永远置顶，顺序按配置书写。
+	explicit := make([]string, 0, 4)
+	explicitSeen := map[string]struct{}{}
 	for _, domain := range envForwardDomains("PROXY_DOMAIN_FORWARD") {
+		if !validCandidateHostname(domain) {
+			continue
+		}
+		if _, ok := explicitSeen[domain]; ok {
+			continue
+		}
+		explicitSeen[domain] = struct{}{}
+		explicit = append(explicit, domain)
 		add(domain)
 	}
 	snapshot := a.proxyCandidateSnapshot()
 	// 自动来源一律过质量闸：体检判 dead/unstable 的域名不再进 -fixed。
 	// 生产事故的形态就是 12 个 successRate≈0.2 的域名留在轮转池里，
 	// 每 4 次拨号有 3 次撞死目标，而 -num=1 时一次失败即断连。
+	//
+	// 观察期同在这道闸内判：在位验活刚把某个域名剔出去并压了 30 分钟观察期，
+	// 若这里不看观察期，自动换池就会在下一轮把它整批放回 -fixed——剔除与回池
+	// 各走各的口径，域名集合在两套算法之间来回摆动，每次摆动都是一次 cfnat 重启
+	// （生产日志 3 域名 ↔ 25 域名反复横跳）。观察期只在自动来源生效，
+	// PROXY_DOMAIN_FORWARD 是运营者担保，仍然放行。
+	now := time.Now()
 	for _, domain := range snapshot.ForwardDomains {
-		if a.domainUsableForForwarding(domain) {
-			add(domain)
+		if !a.domainUsableForForwarding(domain) {
+			continue
 		}
+		if a.domainQuarantined(domain, now) {
+			log.Printf("domain pool: %s 在观察期内，不进自动候选", domain)
+			continue
+		}
+		add(domain)
 	}
 	if envBool("PROXY_AUTO_DOMAINS", false) {
 		for _, domain := range snapshot.PreferredDomains {
-			if a.domainUsableForForwarding(domain) {
-				add(domain)
+			if !a.domainUsableForForwarding(domain) {
+				continue
 			}
+			if a.domainQuarantined(domain, now) {
+				log.Printf("domain pool: %s 在观察期内，不进自动候选", domain)
+				continue
+			}
+			add(domain)
 		}
 	}
 	// 兜底：闸门若把自动来源全拦下，转发池会退化成「只剩 IP」甚至空池，
@@ -676,9 +818,18 @@ func (a *app) poolDomainMembers() []string {
 	fallback := make([]string, 0, minFallbackForwardDomains)
 	if len(domains) == 0 && len(snapshot.ForwardDomains) > 0 {
 		before := len(domains)
-		for _, domain := range a.topDomainsByQuality(snapshot.ForwardDomains, minFallbackForwardDomains) {
+		for _, domain := range a.topDomainsByQuality(snapshot.ForwardDomains, len(snapshot.ForwardDomains)) {
 			if len(domains) >= minFallbackForwardDomains {
 				break
+			}
+			// 隔离期是体检当场给的「别放回」verdict：兜底也不该把它拉
+			// 回来，否则刚隔离的域名立刻回池、再被踢出，3 ↔ 25 域名横
+			// 跳、每摆一次重启一次 cfnat。只放行未隔离的（哪怕它体检
+			// 成绩差），兜底的本意就是「有总比没有强」。输入放宽到全部
+			// 候选、仍按成功率降序取前 3 个未隔离的，避免前 3 里有隔离
+			// 者时名额白白浪费。
+			if a.domainQuarantined(domain, now) {
+				continue
 			}
 			prev := len(domains)
 			add(domain)
@@ -691,8 +842,73 @@ func (a *app) poolDomainMembers() []string {
 				before, minFallbackForwardDomains, fallback)
 		}
 	}
+	// 自动来源按质量排序：慢域名仍留在池里，只往后站，降低被 sticky
+	// 设备首选的概率；真正的判死仍归在位验活路径。显式域名按配置顺序
+	// 置顶，不参与排序——即使同一域名也出现在自动来源里，也不会被降位。
+	automatic := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		if _, ok := explicitSeen[domain]; !ok {
+			automatic = append(automatic, domain)
+		}
+	}
+	domains = append(explicit[:len(explicit):len(explicit)], a.orderDomainsByQuality(automatic)...)
 	setDomainFallback(fallback)
 	return domains
+}
+
+func domainStateRank(state string) int {
+	switch state {
+	case domainStateHealthy:
+		return 0
+	case domainStateUnstable:
+		return 2
+	case domainStateDead:
+		return 3
+	default: // testing / 空记录
+		return 1
+	}
+}
+
+// orderDomainsByQuality 对自动来源的域名做稳定排序：
+// 健康 > 观察中 > 不稳 > 判死，同级按成功率、平均吞吐降序，最后按原名次兜底。
+// 只置换顺序，不增删成员；全部同分时保持原顺序。
+// PROXY_DOMAIN_ORDER=stable 可完全退回旧行为。
+func (a *app) orderDomainsByQuality(domains []string) []string {
+	if len(domains) < 2 || strings.EqualFold(strings.TrimSpace(env("PROXY_DOMAIN_ORDER", "quality")), "stable") {
+		return domains
+	}
+	type scored struct {
+		domain string
+		state  int
+		rate   float64
+		mbps   float64
+	}
+	list := make([]scored, 0, len(domains))
+	a.domainQualityMu.Lock()
+	for _, domain := range domains {
+		item := scored{domain: domain, state: 1}
+		if rec := a.domainQuality[domain]; rec != nil {
+			item.state = domainStateRank(rec.State)
+			item.rate = rec.SuccessRate
+			item.mbps = rec.AverageMbps
+		}
+		list = append(list, item)
+	}
+	a.domainQualityMu.Unlock()
+	sort.SliceStable(list, func(i, j int) bool {
+		if list[i].state != list[j].state {
+			return list[i].state < list[j].state
+		}
+		if list[i].rate != list[j].rate {
+			return list[i].rate > list[j].rate
+		}
+		return list[i].mbps > list[j].mbps
+	})
+	out := make([]string, len(list))
+	for i := range list {
+		out[i] = list[i].domain
+	}
+	return out
 }
 
 // topDomainsByQuality 从候选里按体检成功率降序取前 n 个，无记录者按 0 计。

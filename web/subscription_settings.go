@@ -191,8 +191,11 @@ func (a *app) updateSubscriptionSettings(add []string, remove []string, enable [
 				continue
 			}
 			if len(current) >= maxSubscriptionMaintainers {
+				// 遇上限立即返回、不落盘：旧代码只 break 出添加循环，
+				// 随后仍执行 enable/disable 并保存——调用方只看到 400，
+				// 实际却已部分生效（含先执行的 remove），重试会重复操作。
 				err = errSubscriptionMaintainerLimit
-				break
+				return
 			}
 			current = append(current, host)
 			existing[host] = struct{}{}

@@ -99,7 +99,9 @@ func (a *app) setRevalidatePhase(phase string, tested int) {
 	a.revalidateMu.Lock()
 	a.revalidate.Phase = phase
 	a.revalidate.Tested = tested
+	total := a.revalidate.Total
 	a.revalidateMu.Unlock()
+	a.setScanActivityPhase("revalidate", phase, tested, total)
 }
 
 func (a *app) endRevalidate(report revalidateReport) {
@@ -188,6 +190,10 @@ var revalidateDeps = revalidateDependencies{
 		if a.cfnat.status().Running {
 			return nil
 		}
+		// 与 applyPoolLocked 同口径：恢复转发前同样要过域名质量闸，
+		// 否则重验会把已判死的域名重新塞回 -fixed。
+		pool.Domains = a.gatePoolDomains(pool)
+		pool.Disabled = pruneDisabledMissingIPs(pool)
 		fixed, priority, err := planFixedMembers(pool)
 		if err != nil {
 			return err
@@ -218,6 +224,9 @@ var revalidateDeps = revalidateDependencies{
 // 抢席位放在调用方而不是这里，是为了让 HTTP 入口在起协程之前就能分辨
 // 「开跑了」和「已有一轮在跑」——否则用户连点两次都收到成功，第二次静默作废。
 func (a *app) revalidateActivePool(parent context.Context) (report revalidateReport, err error) {
+	// 用户手动验证同样是最高顺位：先取消后台扫描再排队等锁。
+	done := a.beginManualScan()
+	defer done()
 	current := a.proxyActivePoolSnapshot()
 	report = revalidateReport{StartedAt: time.Now()}
 	// 无论从哪条路返回都要把席位还回去，否则页面会永远显示「验证中」。
@@ -245,6 +254,7 @@ func (a *app) revalidateActivePool(parent context.Context) (report revalidateRep
 		return report, errors.New("已有优选或验证在运行，请稍后再试")
 	}
 	defer a.proxyScanMu.Unlock()
+	defer a.noteScanActivity("revalidate", "验证在位成员")()
 
 	cfg := defaultProxyAutoConfig()
 	if cfg.Port <= 0 {
@@ -310,9 +320,15 @@ func (a *app) revalidateActivePool(parent context.Context) (report revalidateRep
 
 	removed := make([]string, 0)
 	kept := make([]string, 0)
+	skipped := make([]string, 0)
 	for _, r := range all {
 		if r.OK {
 			report.Passed++
+			kept = append(kept, r.Member)
+		} else if r.Stage == "skipped" {
+			// 没轮上验证的成员不得按失败剔除：它根本没被测过，
+			// 预算耗尽时信号量没排上就直接判死，等于把好成员当垃圾清掉。
+			skipped = append(skipped, r.Member)
 			kept = append(kept, r.Member)
 		} else {
 			removed = append(removed, r.Member)
@@ -337,7 +353,11 @@ func (a *app) revalidateActivePool(parent context.Context) (report revalidateRep
 	report.Kept = kept
 
 	if len(removed) == 0 {
-		report.Note = "全部通过，未剔除任何成员"
+		if len(skipped) > 0 {
+			report.Note = fmt.Sprintf("全部通过，未剔除任何成员；%d 个未轮上验证（预算用尽），已保留", len(skipped))
+		} else {
+			report.Note = "全部通过，未剔除任何成员"
+		}
 		if err := restart(current); err != nil {
 			return report, fmt.Errorf("恢复转发失败: %w", err)
 		}
@@ -357,6 +377,21 @@ func (a *app) revalidateActivePool(parent context.Context) (report revalidateRep
 	// 「已关闭成员」的身份继续留在池定义里，下次重启又被读回来。
 	pool.Disabled = keepOnly(current.Disabled, kept)
 	pool.Priority = keepOnly(current.Priority, kept)
+
+	// 通过验证的成员可能全在 Disabled 里（或锁位下都不是固定成员）：
+	// 这种池子没有可转发成员，直接进 applyPoolLocked 只会拿到一个
+	// 「没有可转发的成员」错误。按「疑似通路异常」处理，保留原池。
+	if _, _, planErr := planFixedMembers(pool); planErr != nil {
+		report.Aborted = true
+		report.Removed = nil
+		report.Note = "剔除后没有可转发成员，已保留原池未作改动: " + planErr.Error()
+		log.Printf("revalidate: resulting pool has no forwardable member, keeping pool untouched: %v", planErr)
+		if err := restart(current); err != nil {
+			return report, fmt.Errorf("恢复转发失败: %w", err)
+		}
+		restarted = true
+		return report, nil
+	}
 
 	// applyPoolLocked 会先 stop（已是停的，空操作）再 start，
 	// 顺带把新池落盘。这里不直接调 start：落盘失败要能回滚。

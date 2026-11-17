@@ -48,9 +48,12 @@ func classifyProbeError(err error) string {
 		return failureHandshake
 	}
 	// 兜底：文本匹配。注意大小写与常见变体，宁可归 other 也不乱归类。
+	// 中文「超时」也要认：探针自己产的报错是中文（VLESS 探针启动超时），
+	// 只认英文会把它归成 other，改动 B 的降级防线（ErrorClass != timeout
+	// 才准入）就被绕过——超时类失败照样进降级池。
 	msg := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(msg, "timeout"), strings.Contains(msg, "deadline exceeded"):
+	case strings.Contains(msg, "timeout"), strings.Contains(msg, "deadline exceeded"), strings.Contains(msg, "超时"):
 		return failureTimeout
 	case strings.Contains(msg, "connection refused"):
 		return failureRefused
@@ -143,21 +146,25 @@ func orderPassedBySegmentHealth(passed []string, results []proxyScanResult) []st
 // 官方段外的公网成员按 /16 计入（见 segmentOf），非公网地址不计入，
 // 避免测试地址干扰判断。
 func degradedSegmentDiversity(before, after []string) bool {
-	beforeSegs := poolSegmentStats(before)
-	afterSegs := poolSegmentStats(after)
-	return len(afterSegs) < len(beforeSegs)
+	degraded, _, _ := segmentDiversityDelta(before, after)
+	return degraded
+}
+
+// segmentDiversityDelta 在报告是否减段的同时给回前后段数。
+// 调用方要按「牺牲多少多样性、换来多少质量」做裁决，只有布尔值不够用。
+func segmentDiversityDelta(before, after []string) (bool, int, int) {
+	beforeSegs := len(poolSegmentStats(before))
+	afterSegs := len(poolSegmentStats(after))
+	return afterSegs < beforeSegs, beforeSegs, afterSegs
 }
 
 // cloudflareIPv4CIDRs 是 Cloudflare 官方公布的 IPv4 边缘段（15 段）。
 //
-// 用途：候选池准入闸——入口 IP 必须是 Cloudflare 的 anycast 边缘，否则
-// cfnat -fixed 拨号时连上的是别人的 VPS。历史上 bestcf 生态里大量「优选 IP」
-// 实为第三方反代/ProxyIP（阿里云、DigitalOcean、OVH、M247 之类），混进入口
-// 候选后 TCP:443 必然能通、VLESS 终审必然全灭，白白烧掉探针预算与时间窗。
-// 此闸在源头掐断这类污染，让每一分探针预算都花在真正的边缘地址上。
-//
-// 注意：ProxyIP 有它自己的用途（Worker 出站中转），但那是另一条链路，
-// 不属于此处；本闸只判断「能不能作为 -fixed 入口」。
+// 用途：段标签与统计——2026-11-05 起不再作为候选池准入闸（实测：
+// 官方段外的反代 IP 同样可用，「像不像 Cloudflare 自己的地址」与
+// 「能不能把流量送到 Cloudflare」并不等价，后者由真实考试判定）。
+// 现仅用于：候选汇合时统计段外成员数（offEdgeCount）、池段分布
+// （poolSegmentStats）与降级多样性判断。
 var cloudflareIPv4CIDRs = []string{
 	"173.245.48.0/20",
 	"103.21.244.0/22",

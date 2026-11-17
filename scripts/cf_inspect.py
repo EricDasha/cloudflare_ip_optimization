@@ -23,6 +23,11 @@
   6. sources 全部处于退避期                    -> WARN 无可用供给源
   7. domainFallback 非空                       -> INFO 正在靠兜底撑（不算故障）
   8. proxyAuto.error 非空                       -> 只作 INFO 附注，不单独告警
+  9. 7 天滚动基线（scripts/cf_risk.py）
+     - 终审通过率跌破历史中位数的 50%，或稳健 z < -3.5 -> WARN 通过率断崖
+     - 连续 2 次官方段全测全灭                        -> CRITICAL 官方段全灭
+     - 源成功率跌破 40% 而历史 >= 80%                 -> WARN 供给塌方
+     - 池内 IP 数跌破历史中位数一半                   -> WARN 池缩水
 
   第 8 条是刻意的：proxyAuto.error 是**粘滞字段**，换池成功后不一定被清
   （线上实测：池子在 09:28 重建成功、转发正常，而 error 仍留着 08:52 的
@@ -47,6 +52,7 @@
 
 import argparse
 import calendar
+from datetime import datetime
 import json
 import os
 import re
@@ -104,6 +110,8 @@ TELEGRAM_PROXY = os.environ.get("CF_TG_PROXY", "http://127.0.0.1:39281")
 # 判定阈值
 DIAL_MS_WARN = int(os.environ.get("CF_DIAL_MS_WARN", "3000"))
 HTTP_TIMEOUT = float(os.environ.get("CF_HTTP_TIMEOUT", "20"))
+# /api/status 带完整池快照也不会超过此值；超限说明对端异常。
+MAX_HTTP_JSON_BYTES = 1 << 20
 MAX_FORWARD_AGE_SEC = int(os.environ.get("CF_MAX_FORWARD_AGE_SEC", "1800"))
 
 # CF 官方 IPv4 段（与 web/cfranges.go 的 cloudflareIPv4CIDRs 保持一致）。
@@ -138,7 +146,15 @@ def in_cf_segment(ip):
 def http_json(url, timeout=HTTP_TIMEOUT):
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        # urlopen 遇到 4xx/5xx 会直接抛 HTTPError；这里再显式校验，
+        # 防止 200 伪装的错误页（可解析为 JSON）被当成正常状态。
+        if resp.status != 200:
+            raise ValueError("unexpected HTTP status %s for %s" % (resp.status, url))
+        raw = resp.read(MAX_HTTP_JSON_BYTES + 1)
+        if len(raw) > MAX_HTTP_JSON_BYTES:
+            raise ValueError("response too large for %s (> %d bytes)"
+                             % (url, MAX_HTTP_JSON_BYTES))
+        return json.loads(raw.decode("utf-8"))
 
 
 # ---- 判定 ---------------------------------------------------------------
@@ -278,11 +294,12 @@ def check_forward(verdicts, status):
     age = None
     if at:
         try:
-            # forward.at 是 UTC（尾部带 Z），必须按 UTC 解析——用本地时间
-            # 会凭空差一个时区，把「刚刚的转发」误判成「几小时前的陈旧记录」。
-            ts = calendar.timegm(time.strptime(
-                at.replace("Z", "").split(".")[0], "%Y-%m-%dT%H:%M:%S"))
-            age = time.time() - ts
+            # forward.at 是 RFC3339，带容器时区偏移（compose 设 TZ=Asia/Shanghai，
+            # 形如 ...+08:00），不是 UTC 带 Z。旧写法 strptime 固定格式在
+            # +08:00 上必失败，age 恒为 None，stale 检查悄悄跳过。
+            # fromisoformat 同时接受 Z 与 +08:00 两种后缀。
+            ts = datetime.fromisoformat(at.replace("Z", "+00:00"))
+            age = time.time() - ts.timestamp()
         except Exception:
             age = None
     if age is not None and age > MAX_FORWARD_AGE_SEC:
@@ -359,7 +376,7 @@ def check_cfnat(verdicts, status):
                                 "pid=%s startedAt=%s" % (cn.get("pid"), cn.get("startedAt"))))
 
 
-def inspect():
+def inspect(record_samples=True):
     verdicts = []
     health = check_health(verdicts)
     if health is None:
@@ -378,6 +395,16 @@ def inspect():
     check_sources(verdicts, status)
     check_cfnat(verdicts, status)
     check_cf_segment(verdicts, ips or [])
+
+    # 9. 7 天滚动风控（scripts/cf_risk.py）。它自己落盘、自己算基线；
+    #    这里只负责把结论并进报告。单独 try：模型挂了不能拖垮巡检本身。
+    try:
+        import cf_risk
+        for level, title, detail in cf_risk.check(status, record_sample=record_samples):
+            verdicts.append(Verdict(level, title, detail))
+    except Exception as e:
+        verdicts.append(Verdict("INFO", "风控模型不可用",
+                                "%s %s" % (type(e).__name__, e)))
     return verdicts, status
 
 
@@ -525,7 +552,7 @@ def main():
     args = ap.parse_args()
 
     try:
-        verdicts, _ = inspect()
+        verdicts, _ = inspect(record_samples=not args.dry_run)
     except Exception as e:
         print("巡检脚本自身故障：%s %s" % (type(e).__name__, e), file=sys.stderr)
         return 2
