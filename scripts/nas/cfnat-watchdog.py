@@ -50,7 +50,28 @@ LOG_F = f"{SB_DIR}/watchdog.log"
 LOCK_F = f"{SB_DIR}/watchdog.lock"
 
 POOL_SERVER, POOL_PORT = "192.168.1.50", 1234
-PROXY = "http://127.0.0.1:39281"
+PROXY = "http://127.0.0.1:39281"          # 出网代理（urltest，机场兜底会自动接管），告警走这条
+# 探测专用入口：sing-box 里 probe-in → 只走 `proxy`（cfnat 主通道），不经过 urltest。
+# 没有它的话，urltest 一旦把流量交给机场节点，看门狗测到的就是机场节点，
+# 不是 cfnat——池子死了也看不见，还会把「机场节点连不上 google」当成池子故障。
+PROBE_PROXY = "http://127.0.0.1:39282"
+_PROBE_PROXY = None
+
+
+def probe_http_proxy():
+    """优先用 39282；配置回滚到没有 probe-in 的老版本时退回 39281。"""
+    global _PROBE_PROXY
+    if _PROBE_PROXY is None:
+        s = socket.socket()
+        s.settimeout(2)
+        try:
+            s.connect(("127.0.0.1", 39282))
+            _PROBE_PROXY = PROBE_PROXY
+        except OSError:
+            _PROBE_PROXY = PROXY
+        finally:
+            s.close()
+    return _PROBE_PROXY
 # 探针要同时满足两条：不会被 geosite-cn/geoip-cn 规则直连（gstatic 就是
 # 这样撒谎的），以及在节点出口真的可达。google 不满足第二条：2026-11-17
 # 夜里经隧道访问 google 全是 000，而 cloudflare trace 正常返回境外 IP——
@@ -164,7 +185,7 @@ def current_target():
 def probe_tunnel(timeout=PROBE_TIMEOUT):
     for url in PROBE_URLS:
         try:
-            r = run(["curl", "-s", "-m", str(timeout), "-x", PROXY,
+            r = run(["curl", "-s", "-m", str(timeout), "-x", probe_http_proxy(),
                      "-w", "\n%{http_code}", url], timeout=timeout + 6)
         except subprocess.TimeoutExpired:
             # 超时即探针失败：旧代码让 TimeoutExpired 一路抛到 cron 主流程，
@@ -183,7 +204,7 @@ def probe_tunnel(timeout=PROBE_TIMEOUT):
 def egress_ip(timeout=PROBE_TIMEOUT):
     """Exit IP as seen through the tunnel; empty on failure."""
     try:
-        r = run(["curl", "-s", "-m", str(timeout), "-x", PROXY, TRACE_URL],
+        r = run(["curl", "-s", "-m", str(timeout), "-x", probe_http_proxy(), TRACE_URL],
                 timeout=timeout + 6)
     except subprocess.TimeoutExpired:
         return ""

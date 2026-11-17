@@ -52,10 +52,19 @@ def tail_log(n=8):
 
 
 def tunnel_ok():
-    """Healthy = exit IP through the proxy differs from our own direct IP."""
-    r = run("curl -s -m 20 -x http://127.0.0.1:39281 "
-            "https://www.cloudflare.com/cdn-cgi/trace", timeout=30)
-    eip = next((l[3:].strip() for l in r.stdout.splitlines() if l.startswith("ip=")), "")
+    """Healthy = exit IP through the *cfnat* path differs from our own direct IP.
+
+    39282 是 probe-in（只连 proxy），39281 走 urltest、会自动落到机场节点——
+    用 39281 测等于没测主通道。只有 39282 这个入口压根不存在（curl rc=7）时才退回。
+    """
+    out = ""
+    for port in (39282, 39281):
+        r = run(f"curl -s -m 20 -x http://127.0.0.1:{port} "
+                "https://www.cloudflare.com/cdn-cgi/trace", timeout=30)
+        out = r.stdout
+        if "ip=" in out or r.returncode != 7:
+            break
+    eip = next((l[3:].strip() for l in out.splitlines() if l.startswith("ip=")), "")
     if not eip:
         return False, "no-egress"
     r = run("curl -s -m 10 https://www.cloudflare.com/cdn-cgi/trace", timeout=20)
