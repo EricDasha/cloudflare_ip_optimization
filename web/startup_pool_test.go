@@ -1,17 +1,37 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
+
+// fixedMembersOf 返回冷启动配置真正会交给 cfnat 的成员清单。
+//
+// 现在成员走清单文件（-fixedfile）而不是命令行，断言必须落到文件内容上，
+// 只看 cfg.Fixed 会永远看到空串而误判通过。
+func fixedMembersOf(t *testing.T, cfg cfnatConfig) string {
+	t.Helper()
+	if cfg.FixedFile == "" {
+		return cfg.Fixed
+	}
+	b, err := os.ReadFile(cfg.FixedFile)
+	if err != nil {
+		t.Fatalf("读目标清单 %s: %v", cfg.FixedFile, err)
+	}
+	return strings.Join(strings.Fields(string(b)), ",")
+}
 
 // 冷启动配置必须与运行态换池同一套契约：Disabled 成员不能因为进程重启复活。
 func TestCFnatStartupConfigExcludesDisabledMembers(t *testing.T) {
-	a := &app{}
+	a := &app{dataDir: t.TempDir()}
 	a.activePool = proxyActivePool{
 		IPs:      []string{"1.1.1.1", "2.2.2.2"},
 		Disabled: []string{"2.2.2.2"},
 	}
 	cfg := a.cfnatStartupConfig()
-	if cfg.Fixed != "1.1.1.1" {
-		t.Fatalf("fixed = %q, want only enabled member", cfg.Fixed)
+	if got := fixedMembersOf(t, cfg); got != "1.1.1.1" {
+		t.Fatalf("fixed = %q, want only enabled member", got)
 	}
 	if cfg.Priority != "" {
 		t.Fatalf("priority = %q, want empty", cfg.Priority)
@@ -19,15 +39,15 @@ func TestCFnatStartupConfigExcludesDisabledMembers(t *testing.T) {
 }
 
 func TestCFnatStartupConfigHonorsPriorityWhenLocked(t *testing.T) {
-	a := &app{}
+	a := &app{dataDir: t.TempDir()}
 	a.activePool = proxyActivePool{
 		IPs:      []string{"1.1.1.1", "2.2.2.2"},
 		Priority: []string{"2.2.2.2"},
 		Lock:     true,
 	}
 	cfg := a.cfnatStartupConfig()
-	if cfg.Fixed != "2.2.2.2" {
-		t.Fatalf("fixed = %q, want pinned member only", cfg.Fixed)
+	if got := fixedMembersOf(t, cfg); got != "2.2.2.2" {
+		t.Fatalf("fixed = %q, want pinned member only", got)
 	}
 	if cfg.Priority != "2.2.2.2" {
 		t.Fatalf("priority = %q", cfg.Priority)

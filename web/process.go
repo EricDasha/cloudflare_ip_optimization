@@ -362,6 +362,10 @@ type cfnatConfig struct {
 	Delay    int    `json:"delay"`
 	Domain   string `json:"domain"`
 	Fixed    string `json:"fixed"`
+	// FixedFile 是成员清单文件的路径。给了它，cfnat 就每 5 秒检查一次文件、
+	// 内容变了就热更新转发目标，于是换池不再需要重启进程（重启会掐断在途连接）。
+	// 与 Fixed 同时存在时以文件为准，Fixed 只为兼容旧调用方保留。
+	FixedFile string `json:"fixedFile,omitempty"`
 	Priority string `json:"priority"`
 	IPNum    int    `json:"ipnum"`
 	IPs      string `json:"ips"`
@@ -478,6 +482,7 @@ func (c cfnatConfig) args() []string {
 		"-delay", strconv.Itoa(c.Delay),
 		"-domain", c.Domain,
 		"-fixed", c.Fixed,
+		"-fixedfile", strings.TrimSpace(c.FixedFile),
 		"-fallback", c.Fallback,
 		"-priority", c.Priority,
 		"-ipnum", strconv.Itoa(c.IPNum),

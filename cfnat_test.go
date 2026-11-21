@@ -445,3 +445,20 @@ func TestGetRandomIPv6sHandlesCompressed(t *testing.T) {
 		t.Fatalf("invalid input: got %v, want none", got)
 	}
 }
+
+// 清单文件（-fixedfile）是一行一个成员，逗号与换行都必须认。
+func TestParseFixedTargetsAcceptsNewlineList(t *testing.T) {
+	got, err := parseFixedTargets("1.1.1.1\nexample.com\n\n2.2.2.2 \n")
+	if err != nil {
+		t.Fatalf("parseFixedTargets: %v", err)
+	}
+	want := []string{"1.1.1.1", "example.com", "2.2.2.2"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}

@@ -207,6 +207,45 @@ func planFixedMembers(pool proxyActivePool) ([]string, []string, error) {
 	return fixed, priority, nil
 }
 
+// cfnatFixedFile 返回 cfnat 成员清单文件的路径。
+//
+// 放在数据目录里、与 proxy-active.json 同级：容器重建后挂载点不变，清单跟着
+// 池子一起活下来，cfnat 重启后读到的就是当前池。
+func (a *app) cfnatFixedFile() string {
+	// 没有数据目录就不要写文件：相对路径会把清单落到进程的工作目录里，
+	// 既找不回来，也会污染仓库。
+	if strings.TrimSpace(a.dataDir) == "" {
+		return ""
+	}
+	return filepath.Join(a.dataDir, "cfnat-fixed.txt")
+}
+
+// writeCFnatFixedFile 把本次要转发的成员写进 cfnat 监视的清单文件。
+//
+// 返回上一份内容用于回滚：cfnat 启动失败时要把它改回去，否则回滚后的进程
+// 会在 5 秒内被热更新成新池，等于白回滚一次。
+func (a *app) writeCFnatFixedFile(members []string) (path string, prev []byte, err error) {
+	path = a.cfnatFixedFile()
+	if path == "" {
+		return "", nil, fmt.Errorf("数据目录未配置，无法写目标清单")
+	}
+	prev, _ = os.ReadFile(path)
+	body := strings.Join(members, "\n") + "\n"
+	if err := writeFileAtomic(path, []byte(body), 0o644); err != nil {
+		return path, prev, err
+	}
+	return path, prev, nil
+}
+
+// restoreCFnatFixedFile 把清单文件改回上一份；没有上一份就删掉。
+func restoreCFnatFixedFile(path string, prev []byte) {
+	if len(prev) == 0 {
+		_ = os.Remove(path)
+		return
+	}
+	_ = writeFileAtomic(path, prev, 0o644)
+}
+
 // disabledMemberSet 返回用户显式关闭的成员集合。空集合表示全开。
 func disabledMemberSet(pool proxyActivePool) map[string]bool {
 	if len(pool.Disabled) == 0 {
@@ -419,7 +458,13 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 		return err
 	}
 	cfnatCfg := defaultCFnatConfig()
-	cfnatCfg.Fixed = strings.Join(fixedMembers, ",")
+	// 成员清单写进文件，由 cfnat 自己热更新：这样 -fixedfile 参数恒定不变，
+	// shouldSkipCFnatRestart 几乎总成立，换池不再掐断在途连接。
+	fixedPath, prevFixed, fixedErr := a.writeCFnatFixedFile(fixedMembers)
+	if fixedErr != nil {
+		return fmt.Errorf("写入 cfnat 目标清单: %w", fixedErr)
+	}
+	cfnatCfg.FixedFile = fixedPath
 	cfnatCfg.Priority = strings.Join(priorityMembers, ",")
 	cfnatCfg.Fallback = strings.TrimSpace(env("CFNAT_FALLBACK", ""))
 	// 回滚目标是「换池前正在跑的那一份」，不是「用默认参数重算一份」：
@@ -434,7 +479,13 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 	if len(rollbackArgs) == 0 {
 		if fixed, priority, err := planFixedMembers(current); err == nil {
 			rollbackCfg := defaultCFnatConfig()
-			rollbackCfg.Fixed = strings.Join(fixed, ",")
+			// 同样走清单文件：此时文件已被 restore 回换池前的内容，
+			// 回滚进程读到的就是旧池，参数也与正常路径逐字一致。
+			if fixedPath != "" {
+				rollbackCfg.FixedFile = fixedPath
+			} else {
+				rollbackCfg.Fixed = strings.Join(fixed, ",")
+			}
 			rollbackCfg.Priority = strings.Join(priority, ",")
 			rollbackCfg.Fallback = strings.TrimSpace(env("CFNAT_FALLBACK", ""))
 			rollbackArgs = rollbackCfg.args()
@@ -468,6 +519,8 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 	}
 	if err := a.cfnat.start(a.dataDir, cfnatCfg.args(), ""); err != nil {
 		applyErr := fmt.Errorf("启动新 cfnat: %w", err)
+		// 清单先改回去：否则回滚后的进程 5 秒内又被热更新成新池。
+		restoreCFnatFixedFile(fixedPath, prevFixed)
 		if len(rollbackArgs) == 0 {
 			return fmt.Errorf("%w；无可回滚的运行配置（旧池规划也失败），cfnat 已停止", applyErr)
 		}
@@ -478,6 +531,7 @@ func (a *app) applyPoolLocked(pool, current proxyActivePool) error {
 	}
 	if err := a.saveProxyActivePool(pool); err != nil {
 		commitErr := fmt.Errorf("保存生效池: %w", err)
+		restoreCFnatFixedFile(fixedPath, prevFixed)
 		if stopErr := a.cfnat.stop(); stopErr != nil {
 			return fmt.Errorf("%w；回滚前停止新 cfnat 失败: %v", commitErr, stopErr)
 		}

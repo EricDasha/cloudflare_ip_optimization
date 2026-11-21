@@ -704,7 +704,15 @@ func (a *app) cfnatStartupConfig() cfnatConfig {
 		log.Printf("cfnat startup config: active pool has no deliverable members: %v", err)
 		return cfg
 	}
-	cfg.Fixed = strings.Join(fixed, ",")
+	// 冷启动就走清单文件，和 applyPoolLocked 同一条路：之后换池只改文件，
+	// 不需要为了更新 -fixed 重启进程。
+	if path, _, err := a.writeCFnatFixedFile(fixed); err == nil {
+		cfg.FixedFile = path
+	} else {
+		// 文件写不进去时退回命令行参数——宁可放弃热更新，也不能让 cfnat 空转。
+		log.Printf("cfnat startup config: 写入目标清单失败，改用 -fixed: %v", err)
+		cfg.Fixed = strings.Join(fixed, ",")
+	}
 	cfg.Priority = strings.Join(priority, ",")
 	return cfg
 }
