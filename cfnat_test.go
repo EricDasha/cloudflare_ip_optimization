@@ -462,3 +462,51 @@ func TestParseFixedTargetsAcceptsNewlineList(t *testing.T) {
 		}
 	}
 }
+
+// 成员离池时必须掐断已建立的连接：客端的 WS 长连接不会自己发现上游换了，
+// 池子换血后它还会钉在旧成员上——用户看到的就是「换了池还是慢，重连才快」。
+func TestSetIPAddressesClosesConnectionsToRemovedMembers(t *testing.T) {
+	m := NewIPManager()
+	m.SetIPAddresses([]string{"1.1.1.1", "2.2.2.2"})
+	client, peer := net.Pipe()
+	defer peer.Close()
+	liveConnections.Store(client, "1.1.1.1")
+	defer liveConnections.Delete(client)
+
+	m.SetIPAddresses([]string{"2.2.2.2"})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.Read(make([]byte, 1))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("read on a closed pipe returned no error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("connection pinned to a removed member is still open")
+	}
+}
+
+// 新池为空是解析失败，不是「成员被换掉」：这时候断连只会把还能用的连接一起打死。
+func TestSetIPAddressesKeepsConnectionsWhenNewPoolIsEmpty(t *testing.T) {
+	m := NewIPManager()
+	m.SetIPAddresses([]string{"1.1.1.1"})
+	client, peer := net.Pipe()
+	defer peer.Close()
+	defer client.Close()
+	liveConnections.Store(client, "1.1.1.1")
+	defer liveConnections.Delete(client)
+
+	m.SetIPAddresses(nil)
+
+	go func() { _, _ = peer.Write([]byte("x")) }()
+	if err := client.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	if _, err := client.Read(make([]byte, 1)); err != nil {
+		t.Fatalf("connection was closed although the new pool was empty: %v", err)
+	}
+}

@@ -70,9 +70,40 @@ func NewIPManager() *IPManager {
 	return &IPManager{assignments: map[string]string{}}
 }
 
+// liveConnections 记住每条已建立的转发连接选了哪个上游。
+// 换池只能改「下一条连接选谁」，改不了已经建好的那条：客户端（Throne）
+// 的 WS 长连接会一直钉在旧成员上，用户看到的就是「池子换了还是慢，
+// 手动重连才快」。所以成员离池时把这些连接掐掉，让客户端立刻重连。
+var liveConnections sync.Map // map[net.Conn]string
+
+// closeConnectionsToTargets 断开关联到 gone 里那些上游的连接，返回断掉的条数。
+func closeConnectionsToTargets(gone map[string]bool) int {
+	if len(gone) == 0 {
+		return 0
+	}
+	closed := 0
+	liveConnections.Range(func(key, value any) bool {
+		target, _ := value.(string)
+		if !gone[target] {
+			return true
+		}
+		if c, ok := key.(net.Conn); ok {
+			// 关掉客户端这一侧，pipeConnections 里的双向拷贝会读到错误
+			// 并关掉另一端，不会留下半条连接。
+			_ = c.Close()
+			closed++
+		}
+		return true
+	})
+	return closed
+}
+
 func (m *IPManager) SetIPAddresses(ips []string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	gone := make(map[string]bool, len(m.ipAddresses))
+	for _, old := range m.ipAddresses {
+		gone[old] = true
+	}
 	m.ipAddresses = ips
 	m.dispatchIndex = 0
 	m.assignCursor = 0
@@ -84,7 +115,6 @@ func (m *IPManager) SetIPAddresses(ips []string) {
 	}
 	if m.assignments == nil {
 		m.assignments = map[string]string{}
-		return
 	}
 	alive := make(map[string]struct{}, len(ips))
 	for _, ip := range ips {
@@ -94,6 +124,19 @@ func (m *IPManager) SetIPAddresses(ips []string) {
 		if _, ok := alive[target]; !ok {
 			delete(m.assignments, client)
 		}
+	}
+	m.mu.Unlock()
+
+	// 新池为空说明这一轮解析失败，不是「成员被换掉」——此时断连只会把
+	// 还能用的连接一起打死，宁可继续用旧的。
+	if len(ips) == 0 {
+		return
+	}
+	for _, ip := range ips {
+		delete(gone, ip)
+	}
+	if n := closeConnectionsToTargets(gone); n > 0 {
+		log.Printf("换池：%d 个成员已离开池子，断开钉在它们上面的 %d 条长连接，客户端会重连到在位成员", len(gone), n)
 	}
 }
 
@@ -1215,7 +1258,10 @@ func handleConnectionWithDial(conn net.Conn, forwardAddrs []string, dial func(co
 			continue
 		}
 		log.Printf("选择转发连接: 客户端 %s，地址: %s，拨号耗时: %d ms", clientHost, target, time.Since(started).Milliseconds())
+		// 登记这条连接钉在哪个上游，换池时才能把它掐掉（见 SetIPAddresses）。
+		liveConnections.Store(conn, target)
 		pipeConnections(conn, upstream)
+		liveConnections.Delete(conn)
 		return
 	}
 	log.Printf("未找到可用的转发连接: %v", lastErr)
