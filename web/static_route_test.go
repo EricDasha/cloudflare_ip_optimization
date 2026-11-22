@@ -22,7 +22,14 @@ func TestStaticHandlerServesSubscriptionPage(t *testing.T) {
 		}
 		body, _ := io.ReadAll(rec.Body)
 		html := string(body)
-		for _, want := range []string{"订阅本子", `id="subEntryBody"`, `id="subMaintainerBody"`, "/app.js"} {
+		for _, want := range []string{
+			"优选",
+			`id="subEntryBody"`, `id="subMaintainerBody"`,
+			// 台账是这一页的第三根柱子：没有它，「长期考不过」这件事在界面上
+			// 完全不可见，只能钻接口。
+			`id="ledgerBody"`, `id="ledgerSourceBody"`,
+			"/app.js",
+		} {
 			if !strings.Contains(html, want) {
 				t.Fatalf("%s missing %q", path, want)
 			}

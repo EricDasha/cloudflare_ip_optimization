@@ -73,6 +73,10 @@
   let sourceChannels = [];   // /api/status.sourceChannels 四层渠道汇总
   let speedPath = null;      // /api/status.speedPath 测速通路自检
   let poolSegments = {};     // /api/status.poolSegments：当前池的 CF 段分布
+  // 整段被关掉的段标识。后端只列「全段都关」的，前端据此给段按钮上关闭态。
+  let disabledSegments = [];
+  // scanBusy 回答「按钮点了为什么没反应」：现在是谁占着扫描锁、跑到哪一步。
+  let scanBusy = {};
   let domainFallback = [];   // /api/status.domainFallback：非空＝域名闸正在降级兜底
   let poolBlock = null;      // /api/status.poolBlock：最近一次「换池被拦」的结构化原因
   let qualityByIp = {};      // /api/status.qualityScheduler.records：最近一次探测成绩
@@ -132,6 +136,8 @@
       // 下一次全量 status 轮询才出现。
       if (lanSnapshot) renderLan(lanSnapshot);
       poolSegments = st.poolSegments || {};
+      disabledSegments = Array.isArray(st.disabledSegments) ? st.disabledSegments : [];
+      scanBusy = st.scanBusy || {};
       domainFallback = Array.isArray(st.domainFallback) ? st.domainFallback : [];
       poolBlock = st.poolBlock || null;
       renderPoolHealth();
@@ -307,6 +313,51 @@
   /* ---------- 渲染：在位（壹） ---------- */
   // 段分布与降级标记：2026-10-22 事故里池子只有一个段，该段一挂全灭，
   // 而域名闸在降级兜底时没有任何界面提示——两者都必须一眼可见。
+  // 扫描锁有十几个持有者，撞锁时只说「优选或补位正在运行」等于没说。
+  // 后端把持有者与阶段登记在 /api/status.scanBusy，这里翻成一句人话。
+  function scanBusyText() {
+    if (!scanBusy || !scanBusy.busy) return "";
+    const labels = {
+      optimize: "立即优选", revalidate: "当前测试", refill: "自动补位",
+      background: "后台优化器", "disabled-bench": "关闭席体检",
+      throne: "在位验活", scan: "优选扫描", probe: "手动体检",
+    };
+    let t = (labels[scanBusy.kind] || "优选") + "正在运行";
+    if (scanBusy.phase) t += `（${scanBusy.phase}）`;
+    if (scanBusy.total) t += `，已完成 ${scanBusy.done}/${scanBusy.total}`;
+    const sec = Number(scanBusy.elapsedSec);
+    if (Number.isFinite(sec) && sec > 0) t += ` · 已跑 ${Math.floor(sec / 60)} 分 ${sec % 60} 秒`;
+    return t + "，这期间踢人与关段会被拒绝";
+  }
+
+  // toggleSegment 关掉/恢复某一段：后端把这一段在当前池里的 IP 全部标成
+  // 关闭（仍在位、仍体检，但不转发），下一次全量刷池后标记自然消失。
+  async function toggleSegment(seg, disabled, chip) {
+    if (!seg) return;
+    if (chip) chip.disabled = true;
+    // 段开关改变了 Disabled 集合，在位表的勾选态必须立刻同步：否则在 9 秒
+    // 轮询窗口里，用户下一次勾选/固定会用旧快照把刚关掉的整段重新打开。
+    clearTimeout(selTimer);
+    invalidatePoll("pool");
+    invalidatePoll("status");
+    invalidatePoll("upstreams");
+    try {
+      const res = await fetch("/api/cfnat/active/segment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ segment: seg, disabled }),
+      });
+      if (!res.ok) throw new Error((await res.text()).trim() || `HTTP ${res.status}`);
+      const data = await res.json();
+      disabledSegments = Array.isArray(data.disabledSegments) ? data.disabledSegments : [];
+      renderPoolHealth();
+      await Promise.allSettled([pullPool(), pullStatus(), pullUpstreams()]);
+    } catch (err) {
+      if (chip) chip.disabled = false;
+      toast(`${disabled ? "关闭" : "恢复"} ${seg} 失败：${err.message}`);
+    }
+  }
+
   function renderPoolHealth() {
     const segs = Object.entries(poolSegments || {});
     const total = segs.reduce((s, [, n]) => s + (Number(n) || 0), 0);
@@ -318,15 +369,27 @@
         const sorted = segs.sort((a, b) => b[1] - a[1]);
         const segCount = sorted.length;
         const weak = segCount < 2;
+        const offCount = sorted.filter(([seg]) => disabledSegments.includes(seg)).length;
         const bars = sorted.map(([seg, n]) => {
           const pct = total ? Math.round((n / total) * 100) : 0;
-          return `<span class="seg-chip" title="${seg} · ${n} 个 · ${pct}%">` +
+          const off = disabledSegments.includes(seg);
+          const hint = off ? "已关闭，点击恢复" : "点击关闭这一段";
+          return `<button type="button" class="seg-chip${off ? " off" : ""}" data-seg="${seg}"` +
+            ` title="${seg} · ${n} 个 · ${pct}% · ${hint}">` +
             `<b class="mono">${seg.split("/")[0].replace(/\.0$/, "")}</b>` +
-            `<i style="width:${Math.max(pct, 4)}%"></i><em class="mono">${n}</em></span>`;
+            `<i style="width:${Math.max(pct, 4)}%"></i><em class="mono">${n}</em></button>`;
         }).join("");
+        const busy = scanBusyText();
         box.innerHTML =
-          `<span class="foot">段分布 · ${segCount} 段${weak ? ' <b class="warn">（单段，抗风险弱）</b>' : ""}</span>` +
-          `<span class="seg-chips">${bars}</span>`;
+          `<span class="foot">段分布 · ${segCount} 段${weak ? ' <b class="warn">（单段，抗风险弱）</b>' : ""}` +
+          `${offCount ? ` · <b class="warn">${offCount} 段已关闭</b>` : ""}` +
+          `<span class="seg-hint">点段即关，下次刷池后失效</span></span>` +
+          `<span class="seg-chips">${bars}</span>` +
+          (busy ? `<span class="foot warn">${busy}</span>` : "");
+        box.querySelectorAll(".seg-chip").forEach((chip) => {
+          chip.addEventListener("click", () => toggleSegment(chip.dataset.seg,
+            !disabledSegments.includes(chip.dataset.seg), chip));
+        });
       }
     }
     const flag = $("degradedFlag");
@@ -669,10 +732,14 @@
   function currentSelection() {
     const enabled = [];
     for (const b of document.querySelectorAll(".memchk")) if (b.checked) enabled.push(b.dataset.addr);
-    const priority = (poolSnapshot?.active?.priority || []).filter((m) => enabled.includes(m));
+    // Priority（固定身份）与 Disabled（临时停用）正交：后端 planFixedMembers
+    // 自己会跳过被关闭的固定成员。这里若按 enabled 过滤，用户临时取消勾选
+    // 或点「只开活跃」就会静默剥夺固定身份。只有 pinMember 有权改 priority。
+    const priority = [...(poolSnapshot?.active?.priority || [])];
     return { enabled, priority, lock: $("throneLock").checked };
   }
   async function commitSelection(note) {
+    clearTimeout(selTimer);
     const body = currentSelection();
     if (!body.enabled.length) {
       toast("至少要保留一个转发成员");
@@ -703,6 +770,7 @@
     await commitSelection(mode === "active" ? "已只勾活跃成员" : mode === "all" ? "已全部开启" : "已全部关闭");
   }
   async function pinMember(addr, on) {
+    clearTimeout(selTimer);
     const priority = (poolSnapshot?.active?.priority || []).filter((m) => m !== addr);
     if (on) priority.unshift(addr);
     // 「固定」的承诺是「它开始转发」。若这个成员正被关闭着，只写 Priority 是
@@ -1642,7 +1710,7 @@
     body.append(frag);
     const foot = $("subEntryFoot");
     if (foot) {
-      const total = subSummary.total ?? 0;
+      const total = subState === "all" ? (subSummary.total ?? 0) : (subSummary[subState] ?? subEntries.length);
       const shown = subEntries.length;
       foot.textContent = `显示 ${shown} / ${total} 条` +
         (total > shown ? "（只显示前 300 条，用上方筛选缩小范围）" : "");
@@ -1683,6 +1751,168 @@
       setTimeout(() => pullSubscriptions(true), 20000);
     } catch (e) {
       toast(`触发失败：${e.message}`);
+    } finally {
+      button.disabled = false;
+      button.textContent = prev;
+    }
+  }
+
+  /* ---------- 来源台账（肆） ----------
+     这本账回答的问题和上面两节都不一样：上面是「现在有什么」，这里是
+     「一直以来怎么样」。一个地址考不过一次不要紧，连续几周考不过才是结论；
+     一个源偶尔挂一次不要紧，连续几十轮内容一字不改才是结论。 */
+  let ledgerFilter = "all";
+  let ledgerData = { counts: {}, ips: [], sources: [] };
+
+  async function pullLedger() {
+    const version = beginPoll("ledger");
+    try {
+      const data = await api(`/api/cfnat/source-ledger?filter=${encodeURIComponent(ledgerFilter)}&limit=200`);
+      if (!isCurrentPoll("ledger", version)) return;
+      ledgerData = data || {};
+      renderLedger();
+    } catch (_) { /* 容错 */ }
+  }
+
+  function renderLedger() {
+    const body = $("ledgerBody");
+    if (!body) return;
+    const counts = ledgerData.counts || {};
+    const setNum = (id, v) => { const el = $(id); if (el) el.textContent = v == null ? "–" : String(v); };
+    setNum("ledgerTracked", counts.tracked ?? 0);
+    setNum("ledgerExcluded", counts.excluded ?? 0);
+    setNum("ledgerSources", counts.sources ?? 0);
+    setNum("ledgerStale", counts.stale ?? 0);
+    setNum("ledgerCount", counts.tracked ?? 0);
+    setNum("ledgerSourceCount", counts.sources ?? 0);
+
+    const ips = Array.isArray(ledgerData.ips) ? ledgerData.ips : [];
+    body.replaceChildren();
+    if (!ips.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 7;
+      td.className = "inline-status";
+      td.textContent = (counts.tracked ?? 0) > 0 && ledgerFilter !== "all"
+        ? "当前筛选条件下没有匹配记录。"
+        : "台账还是空的。下一轮候选刷新后开始记账。";
+      tr.append(td);
+      body.append(tr);
+    } else {
+      const frag = document.createDocumentFragment();
+      for (const e of ips) {
+        const tr = document.createElement("tr");
+        if (e.excluded) tr.className = "off";
+        const addr = document.createElement("td");
+        addr.className = "mono";
+        addr.textContent = e.ip;
+        if (e.cfEdge) {
+          addr.append(Object.assign(document.createElement("span"), {
+            className: "chip mono", textContent: "CF", style: "margin-left:6px",
+          }));
+        }
+        tr.append(addr);
+        tr.append(Object.assign(document.createElement("td"), { className: "mono", textContent: String(e.rounds ?? 0) }));
+        tr.append(Object.assign(document.createElement("td"), { className: "mono", textContent: `${e.probeCount ?? 0} / ${e.passCount ?? 0}` }));
+        tr.append(Object.assign(document.createElement("td"), { className: "mono", textContent: e.bestMbps ? `${Number(e.bestMbps).toFixed(1)} Mbps` : "–" }));
+        tr.append(Object.assign(document.createElement("td"), { className: "wrap", textContent: (e.sources || []).join("、") || "—" }));
+
+        const stTd = document.createElement("td");
+        const chip = document.createElement("span");
+        if (e.excluded) {
+          chip.className = "state-chip fail";
+          chip.textContent = "已请出";
+          chip.title = e.excludeReason || "";
+        } else if (e.manual) {
+          chip.className = "state-chip pass";
+          chip.textContent = "人工放行";
+        } else if ((e.passCount ?? 0) > 0) {
+          chip.className = "state-chip pass";
+          chip.textContent = "考过";
+        } else {
+          chip.className = "state-chip pending";
+          chip.textContent = "观察中";
+        }
+        stTd.append(chip);
+        tr.append(stTd);
+
+        const actTd = document.createElement("td");
+        const btn = document.createElement("button");
+        btn.className = "btn mini";
+        btn.type = "button";
+        btn.textContent = e.excluded ? "放行" : "请出";
+        btn.addEventListener("click", () => ledgerAct(e.excluded ? "allow" : "exclude", e.ip));
+        actTd.append(btn);
+        tr.append(actTd);
+        frag.append(tr);
+      }
+      body.append(frag);
+    }
+
+    const srcBody = $("ledgerSourceBody");
+    if (!srcBody) return;
+    const sources = Array.isArray(ledgerData.sources) ? ledgerData.sources : [];
+    srcBody.replaceChildren();
+    if (!sources.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 6;
+      td.className = "inline-status";
+      td.textContent = "还没有来源记录。";
+      tr.append(td);
+      srcBody.append(tr);
+      return;
+    }
+    const sfrag = document.createDocumentFragment();
+    for (const s of sources) {
+      const tr = document.createElement("tr");
+      if (s.stale) tr.className = "off";
+      tr.append(Object.assign(document.createElement("td"), { className: "mono wrap", textContent: s.key }));
+      tr.append(Object.assign(document.createElement("td"), { textContent: s.channel || "—" }));
+      tr.append(Object.assign(document.createElement("td"), { className: "mono", textContent: `${s.fetches ?? 0} / ${s.successes ?? 0}` }));
+      tr.append(Object.assign(document.createElement("td"), { className: "mono", textContent: String(s.lastCount ?? 0) }));
+      tr.append(Object.assign(document.createElement("td"), { className: "mono", textContent: String(s.unchangedRounds ?? 0) }));
+      const stTd = document.createElement("td");
+      const chip = document.createElement("span");
+      if (s.lastError) {
+        chip.className = "state-chip fail";
+        chip.textContent = "抓取失败";
+        chip.title = s.lastError;
+      } else if (s.stale) {
+        chip.className = "state-chip fail";
+        chip.textContent = "疑似停更";
+      } else {
+        chip.className = "state-chip pass";
+        chip.textContent = "在更新";
+      }
+      stTd.append(chip);
+      tr.append(stTd);
+      sfrag.append(tr);
+    }
+    srcBody.append(sfrag);
+  }
+
+  async function ledgerAct(action, ip) {
+    invalidatePoll("ledger");
+    try {
+      await api("/api/cfnat/source-ledger", { method: "POST", body: JSON.stringify({ action, ip }) });
+      toast(action === "allow" ? `${ip} 已放行` : `${ip} 已请出`);
+      await pullLedger();
+    } catch (e) {
+      toast(`台账未更新：${e.message}`);
+    }
+  }
+
+  async function ledgerEvaluate(button) {
+    button.disabled = true;
+    const prev = button.textContent;
+    button.textContent = "…";
+    try {
+      const data = await api("/api/cfnat/source-ledger", { method: "POST", body: JSON.stringify({ action: "evaluate" }) });
+      toast(`判定完成，新请出 ${data.newlyExcluded ?? 0} 个地址`);
+      await pullLedger();
+    } catch (e) {
+      toast(`判定失败：${e.message}`);
     } finally {
       button.disabled = false;
       button.textContent = prev;
@@ -1739,6 +1969,18 @@
   on("subHarvestBtn", "click", (e) => subTrigger("harvest", e.currentTarget));
   on("subProbeBtn", "click", (e) => subTrigger("probe", e.currentTarget));
   on("subRefreshBtn", "click", () => pullSubscriptions(true));
+  on("ledgerRefreshBtn", "click", pullLedger);
+  on("ledgerEvalBtn", "click", (e) => ledgerEvaluate(e.currentTarget));
+  on("ledgerFilter", "click", (e) => {
+    const btn = e.target.closest("button[data-filter]");
+    if (!btn) return;
+    ledgerFilter = btn.dataset.filter;
+    for (const b of $("ledgerFilter").querySelectorAll("button[data-filter]")) {
+      b.classList.toggle("on", b === btn);
+    }
+    invalidatePoll("ledger");
+    pullLedger();
+  });
   on("subFilter", "click", (e) => {
     const btn = e.target.closest("button[data-state]");
     if (!btn) return;
@@ -1772,8 +2014,8 @@
     if (SUB_PAGE) {
       // 订阅页：只拉订阅相关数据。不碰 cfnat 连接表、不外呼下游池——那些
       // 数据在这页上用不上，15 秒一次的轮询里白拉一遍纯属浪费。
-      await pullSubscriptions(true);
-      setInterval(() => pullSubscriptions(false), 15000);
+      await Promise.allSettled([pullSubscriptions(true), pullLedger()]);
+      setInterval(() => { pullSubscriptions(false); pullLedger(); }, 15000);
       return;
     }
     updateSupplyHint();

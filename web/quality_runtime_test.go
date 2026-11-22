@@ -202,3 +202,100 @@ func TestCommitSwitchKeepsNormalDemotionReason(t *testing.T) {
 		t.Fatalf("normal demotion reason overwritten: %q", got)
 	}
 }
+
+// 恢复的 Active 必须捡回 ACTIVE：3 次健康失败判 FAILED 后一次成功，
+// 状态应回 ACTIVE，且 decide 不得再判 FAILOVER。
+func TestQualityRuntimeActiveRecoversToActiveAfterHealthFailure(t *testing.T) {
+	r := testQualityRuntime(t)
+	now := time.Date(2026, 8, 21, 10, 0, 0, 0, time.UTC)
+	r.seedActive("1.1.1.1", now)
+	r.observe("8.8.8.8", "official", 600, 40, true, now)
+	r.observeActiveHealth(false, 80, now.Add(time.Minute))
+	r.observeActiveHealth(false, 80, now.Add(2*time.Minute))
+	r.observeActiveHealth(false, 80, now.Add(3*time.Minute))
+	if got := r.data.Records["1.1.1.1"].State; got != lineFailed {
+		t.Fatalf("after 3 failures state = %q, want FAILED", got)
+	}
+	r.observeActiveHealth(true, 80, now.Add(4*time.Minute))
+	if got := r.data.Records["1.1.1.1"].State; got != lineActive {
+		t.Fatalf("recovered active = %q, want ACTIVE", got)
+	}
+	if got := r.decide(now.Add(4 * time.Minute)); got.Event != switchNone {
+		t.Fatalf("recovered active still fails over: %#v", got)
+	}
+}
+
+// observe() 收到 Active 的成功样本时，同样要把它从 PROBING 捡回 ACTIVE。
+func TestQualityRuntimeObserveRestoresActiveAfterFailure(t *testing.T) {
+	r := testQualityRuntime(t)
+	now := time.Date(2026, 8, 21, 10, 0, 0, 0, time.UTC)
+	r.seedActive("1.1.1.1", now)
+	r.observe("1.1.1.1", "active_pool", 100, 60, false, now.Add(time.Minute))
+	r.observe("1.1.1.1", "active_pool", 100, 60, false, now.Add(2*time.Minute))
+	r.observe("1.1.1.1", "active_pool", 100, 60, false, now.Add(3*time.Minute))
+	if got := r.data.Records["1.1.1.1"].State; got != lineFailed {
+		t.Fatalf("after 3 failures state = %q, want FAILED", got)
+	}
+	r.observe("1.1.1.1", "active_pool", 100, 60, true, now.Add(4*time.Minute))
+	if got := r.data.Records["1.1.1.1"].State; got != lineActive {
+		t.Fatalf("recovered active = %q, want ACTIVE", got)
+	}
+}
+
+// 外部换池只推进 LastActiveChangeAt，不改写调度器自己的 LastSwitchAt。
+func TestSeedActiveFromPoolAdvancesAnchorOnlyWhenActiveChanges(t *testing.T) {
+	r := testQualityRuntime(t)
+	now := time.Date(2026, 8, 21, 10, 0, 0, 0, time.UTC)
+	r.seedActive("1.1.1.1", now)
+	r.commitSwitch(schedulerDecision{Event: switchPromotion, FromIP: "1.1.1.1", ToIP: "8.8.8.8", Reason: "test"}, now)
+	later := now.Add(10 * time.Minute)
+	r.seedActiveFromPool("8.8.8.8", later)
+	if !r.data.LastActiveChangeAt.IsZero() {
+		t.Fatalf("same active should not advance anchor: %v", r.data.LastActiveChangeAt)
+	}
+	if !r.data.LastSwitchAt.Equal(now) {
+		t.Fatalf("external apply rewrote scheduler clock: %v", r.data.LastSwitchAt)
+	}
+	changed := later.Add(time.Minute)
+	r.seedActiveFromPool("9.9.9.9", changed)
+	if !r.data.LastActiveChangeAt.Equal(changed) {
+		t.Fatalf("new active anchor = %v, want %v", r.data.LastActiveChangeAt, changed)
+	}
+	if !r.data.LastSwitchAt.Equal(now) {
+		t.Fatalf("external apply must not touch LastSwitchAt: %v", r.data.LastSwitchAt)
+	}
+}
+
+func TestSeedActiveFromPoolClearsStaleErrorOnlyOnActiveChange(t *testing.T) {
+	r := testQualityRuntime(t)
+	now := time.Date(2026, 8, 21, 10, 0, 0, 0, time.UTC)
+	r.seedActive("1.1.1.1", now)
+	r.setError("段数减少")
+	if r.data.LastErrorAt.IsZero() {
+		t.Fatal("setError did not stamp LastErrorAt")
+	}
+	r.seedActiveFromPool("1.1.1.1", now.Add(time.Minute))
+	if r.data.LastError != "段数减少" {
+		t.Fatalf("same active erased a still-valid error: %q", r.data.LastError)
+	}
+	r.seedActiveFromPool("8.8.8.8", now.Add(2*time.Minute))
+	if r.data.LastError != "" || !r.data.LastErrorAt.IsZero() {
+		t.Fatalf("active change did not clear stale error: %q %v", r.data.LastError, r.data.LastErrorAt)
+	}
+}
+
+// 手动优选刚落池后，30 分钟防抖必须立即生效：否则调度器会在新池上再换一次。
+func TestDecideUsesExternalActiveChangeAsDebounceAnchor(t *testing.T) {
+	r := testQualityRuntime(t)
+	now := time.Date(2026, 8, 21, 10, 0, 0, 0, time.UTC)
+	r.seedActive("1.1.1.1", now.Add(-3*time.Hour))
+	r.data.LastSwitchAt = now.Add(-2 * time.Hour)
+	r.seedActiveFromPool("8.8.8.8", now.Add(-5*time.Minute))
+	r.observe("8.8.8.8", "active_pool", 100, 60, true, now.Add(-5*time.Minute))
+	for i := 0; i < 3; i++ {
+		r.observe("9.9.9.9", "official", 500, 40, true, now.Add(time.Duration(i-3)*time.Minute))
+	}
+	if got := r.decide(now); got.Event != switchNone {
+		t.Fatalf("switched inside debounce window after manual pool apply: %#v", got)
+	}
+}

@@ -27,12 +27,17 @@ CFG_BAK = f"{SB_DIR}/config.json.drill-bak"
 STATE = f"{SB_DIR}/watchdog-state.json"
 # sudo 口令只从运行时环境读，绝不写进仓库。未设 NAS_SUDO_PW 时退回
 # `sudo -n`（要求已配 NOPASSWD，否则脚本会在第一次提权时明确失败）。
+# 有口令时 sudo -S 从 stdin 读口令：旧写法 `echo 口令 | sudo -S` 把口令
+# 拼进 sh -c 命令行，/proc/<pid>/cmdline 里明文可见。
 _SUDO_PW = os.environ.get("NAS_SUDO_PW", "")
-SUDO = f"echo {_SUDO_PW} | sudo -S -p '' " if _SUDO_PW else "sudo -n "
+SUDO = "sudo -S -p '' " if _SUDO_PW else "sudo -n "
 
 
 def run(cmd, timeout=90):
-    return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+    kwargs = dict(capture_output=True, text=True, timeout=timeout)
+    if _SUDO_PW and cmd.startswith("sudo -S "):
+        kwargs["input"] = _SUDO_PW + "\n"
+    return subprocess.run(cmd, shell=True, **kwargs)
 
 
 def read_state():
@@ -47,10 +52,19 @@ def tail_log(n=8):
 
 
 def tunnel_ok():
-    """Healthy = exit IP through the proxy differs from our own direct IP."""
-    r = run("curl -s -m 20 -x http://127.0.0.1:39281 "
-            "https://www.cloudflare.com/cdn-cgi/trace", timeout=30)
-    eip = next((l[3:].strip() for l in r.stdout.splitlines() if l.startswith("ip=")), "")
+    """Healthy = exit IP through the *cfnat* path differs from our own direct IP.
+
+    39282 是 probe-in（只连 proxy），39281 走 urltest、会自动落到机场节点——
+    用 39281 测等于没测主通道。只有 39282 这个入口压根不存在（curl rc=7）时才退回。
+    """
+    out = ""
+    for port in (39282, 39281):
+        r = run(f"curl -s -m 20 -x http://127.0.0.1:{port} "
+                "https://www.cloudflare.com/cdn-cgi/trace", timeout=30)
+        out = r.stdout
+        if "ip=" in out or r.returncode != 7:
+            break
+    eip = next((l[3:].strip() for l in out.splitlines() if l.startswith("ip=")), "")
     if not eip:
         return False, "no-egress"
     r = run("curl -s -m 10 https://www.cloudflare.com/cdn-cgi/trace", timeout=20)
@@ -74,7 +88,12 @@ def patch_vless(server, port, path):
 
 def restore():
     if os.path.exists(CFG_BAK):
-        run(SUDO + f"cp {CFG_BAK} {CFG}")
+        # 恢复 cp 失败必须停下：旧代码不看返回值，cp 失败仍重启旧配置
+        # 并删掉唯一备份，原配置永久丢失。
+        cp = run(SUDO + f"cp {CFG_BAK} {CFG}")
+        if cp.returncode != 0:
+            print(f"RESTORE FAILED: cp backup back failed (rc={cp.returncode}), keeping backup {CFG_BAK}")
+            sys.exit(1)
         run(SUDO + "docker restart sing-box", timeout=120)
         time.sleep(10)
         run(SUDO + f"rm -f {CFG_BAK}")
@@ -124,7 +143,16 @@ try:
     print("    (nothing is restored here; the watchdog compares the pool cert and rewrites)")
     ok, info = tunnel_ok()
     print("tunnel still on fallback:", ("OK via " + info) if ok else ("DOWN: " + info))
-    deadline = time.time() + 300
+    # 看门狗进兜底后有防抖停留期（首轮 15 分钟，抖动过则翻倍），
+    # 演练不能干等一小时：直接把停留期清零，模拟「停留期已过」。
+    st = read_state()
+    if isinstance(st, dict) and "err" not in st:
+        st["dwell_until"] = 0
+        st["consec_ok"] = 0
+        st["recovery_since"] = 0
+        json.dump(st, open(STATE, "w"), indent=2)
+        print("  dwell cleared for the drill")
+    deadline = time.time() + 480
     while time.time() < deadline:
         time.sleep(25)
         st = read_state()

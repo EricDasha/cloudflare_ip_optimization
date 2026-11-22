@@ -1,0 +1,1325 @@
+{
+ "activeProbe": {
+  "enabled": true,
+  "failThreshold": 3,
+  "fastRecheckSeconds": 120,
+  "intervalSeconds": 600,
+  "lastError": "",
+  "lastProbe": "2026-11-11T18:22:12.121337067Z",
+  "members": {
+   "123.111.169.70": {
+    "consecutiveFailures": 0,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "2026-11-11T18:16:07.798311717Z",
+    "lastLatencyMs": 506,
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "207.57.121.243": {
+    "consecutiveFailures": 0,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "2026-11-11T18:16:07.798311717Z",
+    "lastLatencyMs": 246,
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "207.57.123.31": {
+    "consecutiveFailures": 0,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "2026-11-11T18:16:07.798311717Z",
+    "lastLatencyMs": 246,
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "47.244.225.39": {
+    "consecutiveFailures": 0,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "2026-11-11T18:16:07.798311717Z",
+    "lastLatencyMs": 246,
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "bluehost.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2000,
+    "lastError": "dial tcp 172.64.146.48:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "cdn.aneko.ink": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2000,
+    "lastError": "dial tcp 104.18.40.77:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "cf-cname.xingpingcn.top": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2001,
+    "lastError": "dial tcp 172.64.53.247:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "cf.xreak.top": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2001,
+    "lastError": "dial tcp 172.64.52.32:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "cfsaas.080112.xyz": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2000,
+    "lastError": "dial tcp 172.64.153.74:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "cmcc.vvvv.ee": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2000,
+    "lastError": "dial tcp 172.64.52.209:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "cookiebot.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2000,
+    "lastError": "dial tcp 141.193.213.21:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "glassdoor.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2000,
+    "lastError": "dial tcp 104.18.39.196:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "investor.apple.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2001,
+    "lastError": "dial tcp 162.159.130.11:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "markmonitor.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2000,
+    "lastError": "dial tcp 104.18.39.152:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "mycareer.verizon.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2000,
+    "lastError": "dial tcp 104.18.20.249:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "nexusmods.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 2,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "2026-11-11T17:59:36.84920496Z",
+    "lastLatencyMs": 2001,
+    "lastError": "dial tcp 172.64.145.202:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "onetrust.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2001,
+    "lastError": "dial tcp 172.64.155.119:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "openai.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2000,
+    "lastError": "dial tcp 104.18.33.45:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "serviceshub.samsclub.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2000,
+    "lastError": "dial tcp 104.18.38.219:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "store.epicgames.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2000,
+    "lastError": "dial tcp 104.18.2.64:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "www.5h.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2001,
+    "lastError": "dial tcp 162.159.9.150:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "www.affirm.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2001,
+    "lastError": "dial tcp 162.159.140.33:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "www.allianz.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 2,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "2026-11-11T17:59:36.84920496Z",
+    "lastLatencyMs": 2001,
+    "lastError": "dial tcp 104.18.41.67:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "www.aneko.ink": {
+    "consecutiveFailures": 0,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "2026-11-11T18:16:07.798311717Z",
+    "lastLatencyMs": 344,
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "www.asda.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2000,
+    "lastError": "dial tcp 172.64.154.182:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "www.decathlon.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2001,
+    "lastError": "dial tcp 23.227.38.74:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "www.jimdo.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2001,
+    "lastError": "dial tcp 172.64.145.154:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "www.oopt.eu.cc": {
+    "consecutiveFailures": 2,
+    "slowStrikes": 2,
+    "lastProbe": "2026-11-11T18:22:12.121337067Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2001,
+    "lastError": "dial tcp 162.159.39.13:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "www.sage.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2000,
+    "lastError": "dial tcp 172.64.155.170:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "www.shopify.com": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 6,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2000,
+    "lastError": "dial tcp 104.18.42.163:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "www.speedtest.net": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2000,
+    "lastError": "dial tcp 104.17.148.22:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   },
+   "yg8.ygkkk.dpdns.org": {
+    "consecutiveFailures": 0,
+    "slowStrikes": 3,
+    "lastProbe": "2026-11-11T18:16:07.798311717Z",
+    "lastOk": "0001-01-01T00:00:00Z",
+    "lastLatencyMs": 2000,
+    "lastError": "dial tcp 172.64.146.66:443: i/o timeout",
+    "recheckAt": "0001-01-01T00:00:00Z",
+    "heldAt": "0001-01-01T00:00:00Z"
+   }
+  },
+  "pinnedLost": null,
+  "slowMs": 1500,
+  "slowStrikeLimit": 2
+ },
+ "cfnat": {
+  "name": "cfnat",
+  "running": true,
+  "pid": 4403,
+  "startedAt": "2026-11-11T18:13:55Z",
+  "args": [
+   "-addr",
+   "0.0.0.0:1234",
+   "-code",
+   "200",
+   "-colo",
+   "",
+   "-delay",
+   "2000",
+   "-domain",
+   "cloudflaremirrors.com/debian",
+   "-fixed",
+   "207.57.123.31,47.244.225.39,207.57.121.243,123.111.169.70,cmcc.vvvv.ee,www.oopt.eu.cc,cf.xreak.top,cfsaas.080112.xyz,cdn.aneko.ink,www.5h.com,yg8.ygkkk.dpdns.org,www.aneko.ink,cf-cname.xingpingcn.top,www.shopify.com,serviceshub.samsclub.com,www.allianz.com,www.decathlon.com,www.asda.com,cookiebot.com,bluehost.com,nexusmods.com,glassdoor.com,www.jimdo.com,openai.com,www.sage.com,www.speedtest.net,investor.apple.com,markmonitor.com,store.epicgames.com,mycareer.verizon.com,onetrust.com,www.affirm.com",
+   "-fallback",
+   "",
+   "-priority",
+   "",
+   "-ipnum",
+   "20",
+   "-ips",
+   "4",
+   "-num",
+   "3",
+   "-sticky=true",
+   "-port",
+   "443",
+   "-random=true",
+   "-task",
+   "100",
+   "-tls=true"
+  ]
+ },
+ "forward": {
+  "host": "47.244.225.39",
+  "dialMs": 72,
+  "at": "2026-11-11T18:27:30Z",
+  "total": 590,
+  "counts": [
+   {
+    "host": "207.57.123.31",
+    "count": 340
+   },
+   {
+    "host": "47.244.225.39",
+    "count": 238
+   },
+   {
+    "host": "207.57.121.243",
+    "count": 12
+   }
+  ],
+  "clients": [
+   {
+    "client": "192.168.1.64",
+    "host": "47.244.225.39",
+    "total": 550,
+    "counts": [
+     {
+      "host": "207.57.123.31",
+      "count": 340
+     },
+     {
+      "host": "47.244.225.39",
+      "count": 210
+     }
+    ]
+   },
+   {
+    "client": "172.18.0.1",
+    "host": "47.244.225.39",
+    "total": 28,
+    "counts": [
+     {
+      "host": "47.244.225.39",
+      "count": 28
+     }
+    ]
+   },
+   {
+    "client": "192.168.1.11",
+    "host": "207.57.121.243",
+    "total": 12,
+    "counts": [
+     {
+      "host": "207.57.121.243",
+      "count": 12
+     }
+    ]
+   }
+  ]
+ },
+ "proxyAuto": {
+  "updatedAt": "2026-11-11T18:13:55.679524681Z",
+  "host": "vlesdy.trojanjd.dpdns.org",
+  "path": "/thread/proxyip=tw.william.us.ci?ed=2560",
+  "ips": [
+   "207.57.123.31",
+   "47.244.225.39",
+   "207.57.121.243",
+   "123.111.169.70"
+  ],
+  "domains": [
+   "cmcc.vvvv.ee",
+   "www.oopt.eu.cc",
+   "cf.xreak.top",
+   "cfsaas.080112.xyz",
+   "cdn.aneko.ink",
+   "www.5h.com",
+   "yg8.ygkkk.dpdns.org",
+   "www.aneko.ink",
+   "cf-cname.xingpingcn.top",
+   "www.shopify.com",
+   "serviceshub.samsclub.com",
+   "www.allianz.com",
+   "www.decathlon.com",
+   "www.asda.com",
+   "cookiebot.com",
+   "bluehost.com",
+   "nexusmods.com",
+   "glassdoor.com",
+   "www.jimdo.com",
+   "openai.com",
+   "www.sage.com",
+   "www.speedtest.net",
+   "investor.apple.com",
+   "markmonitor.com",
+   "store.epicgames.com",
+   "mycareer.verizon.com",
+   "onetrust.com",
+   "www.affirm.com"
+  ],
+  "results": [
+   {
+    "ip": "43.155.82.88",
+    "latency": 183,
+    "colo": "HKG",
+    "dataLatency": 15004,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+   },
+   {
+    "ip": "43.165.135.8",
+    "latency": 226,
+    "colo": "NRT",
+    "dataLatency": 5066,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": read tcp 127.0.0.1:44842->127.0.0.1:34809: read: connection reset by peer"
+   },
+   {
+    "ip": "207.57.121.243",
+    "latency": 231,
+    "colo": "HKG",
+    "dataLatency": 15004,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+   },
+   {
+    "ip": "207.57.122.184",
+    "latency": 234,
+    "colo": "HKG",
+    "dataLatency": 15004,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+   },
+   {
+    "ip": "202.181.246.184",
+    "latency": 237,
+    "colo": "HKG",
+    "dataLatency": 15005,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+   },
+   {
+    "ip": "47.244.225.39",
+    "latency": 240,
+    "colo": "HKG",
+    "dataLatency": 15005,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+   },
+   {
+    "ip": "13.193.78.117",
+    "latency": 245,
+    "colo": "NRT",
+    "dataLatency": 5061,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": read tcp 127.0.0.1:51570->127.0.0.1:40225: read: connection reset by peer"
+   },
+   {
+    "ip": "13.158.71.221",
+    "latency": 245,
+    "colo": "NRT",
+    "dataLatency": 5064,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": read tcp 127.0.0.1:59264->127.0.0.1:43945: read: connection reset by peer"
+   },
+   {
+    "ip": "38.55.192.142",
+    "latency": 247,
+    "colo": "HKG",
+    "dataLatency": 15004,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+   },
+   {
+    "ip": "207.57.125.21",
+    "latency": 248,
+    "colo": "HKG",
+    "dataLatency": 15005,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+   },
+   {
+    "ip": "207.57.123.31",
+    "latency": 253,
+    "colo": "HKG",
+    "dataLatency": 15004,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+   },
+   {
+    "ip": "13.158.86.30",
+    "latency": 257,
+    "colo": "NRT",
+    "dataLatency": 5063,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": read tcp 127.0.0.1:41790->127.0.0.1:46383: read: connection reset by peer"
+   },
+   {
+    "ip": "152.69.237.109",
+    "latency": 265,
+    "colo": "ICN",
+    "dataLatency": 5063,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": read tcp 127.0.0.1:40204->127.0.0.1:36123: read: connection reset by peer"
+   },
+   {
+    "ip": "61.92.212.253",
+    "latency": 267,
+    "colo": "HKG",
+    "dataLatency": 15005,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+   },
+   {
+    "ip": "175.41.232.194",
+    "latency": 268,
+    "colo": "NRT",
+    "dataLatency": 5064,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": read tcp 127.0.0.1:47974->127.0.0.1:38241: read: connection reset by peer"
+   },
+   {
+    "ip": "83.229.123.135",
+    "latency": 276,
+    "colo": "HKG",
+    "dataLatency": 5063,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": read tcp 127.0.0.1:39646->127.0.0.1:44743: read: connection reset by peer"
+   },
+   {
+    "ip": "38.207.177.204",
+    "latency": 288,
+    "colo": "HKG",
+    "dataLatency": 855,
+    "sourceRank": 2,
+    "stage": "VLESS_PASS",
+    "note": "测速未完成（软门槛，仅影响排序）：VLESS 数据面请求失败: Get \"https://speed.cloudflare.com/__down?bytes=2097152\": read tcp 127.0.0.1:36156->127.0.0.1:43775: read: connection reset by peer"
+   },
+   {
+    "ip": "154.36.145.47",
+    "latency": 297,
+    "colo": "HKG",
+    "dataLatency": 15004,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+   },
+   {
+    "ip": "149.88.87.93",
+    "latency": 305,
+    "colo": "HKG",
+    "dataLatency": 774,
+    "sourceRank": 2,
+    "stage": "VLESS_PASS",
+    "note": "测速未完成（软门槛，仅影响排序）：VLESS 数据面请求失败: Get \"https://speed.cloudflare.com/__down?bytes=2097152\": read tcp 127.0.0.1:59796->127.0.0.1:34025: read: connection reset by peer"
+   },
+   {
+    "ip": "69.8.131.228",
+    "latency": 312,
+    "colo": "NRT",
+    "dataLatency": 15004,
+    "sourceRank": 2,
+    "stage": "VLESS_FAIL",
+    "error": "VLESS 数据面请求失败: Get \"https://www.gstatic.com/generate_204\": context deadline exceeded"
+   },
+   {
+    "ip": "161.117.181.127",
+    "latency": 322,
+    "colo": "SIN",
+    "sourceRank": 2,
+    "stage": "WS_PASS"
+   },
+   {
+    "ip": "103.118.40.68",
+    "latency": 330,
+    "colo": "TPE",
+    "sourceRank": 2,
+    "stage": "WS_PASS"
+   },
+   {
+    "ip": "23.129.140.165",
+    "latency": 333,
+    "colo": "NRT",
+    "sourceRank": 2,
+    "stage": "WS_PASS"
+   },
+   {
+    "ip": "64.83.46.107",
+    "latency": 342,
+    "colo": "NRT",
+    "sourceRank": 2,
+    "stage": "WS_PASS"
+   },
+   {
+    "ip": "15.164.118.107",
+    "latency": 349,
+    "colo": "ICN",
+    "sourceRank": 2,
+    "stage": "WS_PASS"
+   },
+   {
+    "ip": "3.36.57.97",
+    "latency": 357,
+    "colo": "ICN",
+    "sourceRank": 2,
+    "stage": "WS_PASS"
+   },
+   {
+    "ip": "114.204.40.185",
+    "latency": 393,
+    "colo": "NRT",
+    "sourceRank": 2,
+    "stage": "WS_PASS"
+   },
+   {
+    "ip": "133.117.72.192",
+    "latency": 456,
+    "colo": "FUK",
+    "sourceRank": 2,
+    "stage": "WS_PASS"
+   },
+   {
+    "ip": "69.8.131.142",
+    "latency": 747,
+    "colo": "NRT",
+    "sourceRank": 2,
+    "stage": "WS_PASS"
+   },
+   {
+    "ip": "185.115.207.82",
+    "latency": 786,
+    "colo": "SIN",
+    "sourceRank": 2,
+    "stage": "WS_PASS"
+   },
+   {
+    "ip": "103.143.81.178",
+    "latency": 241,
+    "colo": "HKG",
+    "sourceRank": 3,
+    "stage": "WS_PASS"
+   },
+   {
+    "ip": "45.192.206.218",
+    "latency": 498,
+    "colo": "NRT",
+    "sourceRank": 3,
+    "stage": "WS_PASS"
+   },
+   {
+    "ip": "13.231.221.179",
+    "latency": 5000,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 13.231.221.179:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "13.115.139.162",
+    "latency": 5000,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 13.115.139.162:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.229.193",
+    "latency": 5000,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.229.193:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.229.195",
+    "latency": 5000,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.229.195:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.229.44",
+    "latency": 5000,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.229.44:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.229.174",
+    "latency": 5000,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.229.174:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.145.94",
+    "latency": 5000,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.145.94:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "104.18.36.56",
+    "latency": 5000,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 104.18.36.56:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.150.237",
+    "latency": 5000,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.150.237:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "13.114.101.22",
+    "latency": 5001,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 13.114.101.22:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "140.245.70.145",
+    "latency": 5001,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 140.245.70.145:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "13.231.172.130",
+    "latency": 5001,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 13.231.172.130:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.229.45",
+    "latency": 5001,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.229.45:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.229.211",
+    "latency": 5001,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.229.211:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.229.236",
+    "latency": 5001,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.229.236:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.229.190",
+    "latency": 5001,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.229.190:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.229.207",
+    "latency": 5001,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.229.207:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.229.173",
+    "latency": 5001,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.229.173:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.229.170",
+    "latency": 5002,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.229.170:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.229.217",
+    "latency": 5002,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.229.217:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.229.234",
+    "latency": 5002,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.229.234:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "18.138.34.221",
+    "latency": 5002,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 18.138.34.221:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.229.65",
+    "latency": 5003,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.229.65:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.229.144",
+    "latency": 5008,
+    "sourceRank": 2,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.229.144:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "13.196.179.169",
+    "latency": 5000,
+    "sourceRank": 3,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 13.196.179.169:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "104.18.47.31",
+    "latency": 5000,
+    "sourceRank": 3,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 104.18.47.31:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "108.162.193.1",
+    "latency": 5001,
+    "sourceRank": 3,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 108.162.193.1:443: i/o timeout",
+    "errorClass": "timeout"
+   },
+   {
+    "ip": "172.64.148.193",
+    "latency": 5001,
+    "sourceRank": 3,
+    "stage": "WS_FAIL",
+    "error": "dial tcp 172.64.148.193:443: i/o timeout",
+    "errorClass": "timeout"
+   }
+  ],
+  "error": "自动换池被换池闸拦截（cooldown），下轮放行约 2026-11-11T18:43:55Z；保留旧池",
+  "errorAt": "2026-11-11T18:23:06.792172133Z",
+  "memberChannels": {
+   "123.111.169.70": "subscription",
+   "207.57.121.243": "subscription",
+   "207.57.123.31": "subscription",
+   "47.244.225.39": "subscription"
+  }
+ },
+ "poolBlock": {
+  "at": "2026-11-11T18:23:06.791951164Z",
+  "blocked": true,
+  "nextAllowedAt": "2026-11-11T18:43:55Z",
+  "reason": "cooldown",
+  "source": "auto-apply"
+ },
+ "domainFallback": null,
+ "poolSegments": {
+  "123.111.0.0/16": 1,
+  "207.57.0.0/16": 2,
+  "47.244.0.0/16": 1
+ },
+ "sources": {
+  "cfdata:result.csv": {
+   "fetches": 8,
+   "successes": 8,
+   "ips": 1596,
+   "lastSuccess": "2026-11-11T18:18:26.139051272Z",
+   "lastFailed": "0001-01-01T00:00:00Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://bestcf.pages.dev/cfyes/ipv4.txt": {
+   "fetches": 8,
+   "successes": 5,
+   "ips": 60,
+   "lastSuccess": "2026-11-11T18:18:27.147020489Z",
+   "lastFailed": "2026-11-11T17:34:52.754192879Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://bestcf.pages.dev/cmliu2/all.txt": {
+   "fetches": 8,
+   "successes": 5,
+   "ips": 70,
+   "lastSuccess": "2026-11-11T18:18:27.147021437Z",
+   "lastFailed": "2026-11-11T17:34:52.754212727Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://bestcf.pages.dev/domain/all.txt": {
+   "fetches": 8,
+   "successes": 5,
+   "ips": 150,
+   "lastSuccess": "2026-11-11T18:18:27.573671096Z",
+   "lastFailed": "2026-11-11T17:35:08.756555919Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://bestcf.pages.dev/entryip/50.txt": {
+   "fetches": 8,
+   "successes": 5,
+   "ips": 250,
+   "lastSuccess": "2026-11-11T18:18:27.147022301Z",
+   "lastFailed": "2026-11-11T17:34:52.754235179Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://bestcf.pages.dev/gslege/Cfxyz.txt": {
+   "fetches": 8,
+   "successes": 5,
+   "ips": 35,
+   "lastSuccess": "2026-11-11T18:18:27.147021917Z",
+   "lastFailed": "2026-11-11T17:34:52.754222243Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://bestcf.pages.dev/ircf/ipv4.txt": {
+   "fetches": 8,
+   "successes": 5,
+   "ips": 50,
+   "lastSuccess": "2026-11-11T18:18:27.147020861Z",
+   "lastFailed": "2026-11-11T17:34:52.754203091Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://bestcf.pages.dev/nirevil/ipv4.txt": {
+   "fetches": 8,
+   "successes": 5,
+   "ips": 185,
+   "lastSuccess": "2026-11-11T18:18:27.147018485Z",
+   "lastFailed": "2026-11-11T17:34:52.754158534Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://bestcf.pages.dev/s5gy/all.txt": {
+   "fetches": 8,
+   "successes": 5,
+   "ips": 260,
+   "lastSuccess": "2026-11-11T18:18:27.147016613Z",
+   "lastFailed": "2026-11-11T17:34:52.75412299Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://bestcf.pages.dev/uouin/all.txt": {
+   "fetches": 8,
+   "successes": 5,
+   "ips": 210,
+   "lastSuccess": "2026-11-11T18:18:27.147017741Z",
+   "lastFailed": "2026-11-11T17:34:52.754146606Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://bestcf.pages.dev/vps789/top10.txt": {
+   "fetches": 8,
+   "successes": 5,
+   "ips": 50,
+   "lastSuccess": "2026-11-11T18:18:27.37540175Z",
+   "lastFailed": "2026-11-11T17:35:00.755421606Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://bestcf.pages.dev/vvhan/ipv4.txt": {
+   "fetches": 8,
+   "successes": 5,
+   "ips": 135,
+   "lastSuccess": "2026-11-11T18:18:27.147019337Z",
+   "lastFailed": "2026-11-11T17:34:52.754172106Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://bestcf.pages.dev/wetest/ipv4.txt": {
+   "fetches": 8,
+   "successes": 5,
+   "ips": 85,
+   "lastSuccess": "2026-11-11T18:18:27.147019913Z",
+   "lastFailed": "2026-11-11T17:34:52.754182295Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://countrymerge.pages.dev/all.txt": {
+   "fetches": 8,
+   "successes": 5,
+   "ips": 27990,
+   "lastSuccess": "2026-11-11T18:18:27.147027173Z",
+   "lastFailed": "2026-11-11T17:34:52.75433928Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://raw.githubusercontent.com/Senflare/Senflare-IP/main/IPlist-Pro.txt": {
+   "fetches": 4,
+   "successes": 0,
+   "ips": 0,
+   "lastSuccess": "0001-01-01T00:00:00Z",
+   "lastError": "Get \"https://raw.githubusercontent.com/Senflare/Senflare-IP/main/IPlist-Pro.txt\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)",
+   "lastFailed": "2026-11-11T18:07:58.092102881Z",
+   "consecutiveFailures": 4,
+   "backoffUntil": "2026-11-11T19:07:58.092103241Z"
+  },
+  "https://raw.githubusercontent.com/ahang39/router/main/all.txt": {
+   "fetches": 8,
+   "successes": 4,
+   "ips": 20,
+   "lastSuccess": "2026-11-11T18:18:27.147025745Z",
+   "lastFailed": "2026-11-11T18:07:58.092196697Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://raw.githubusercontent.com/einsitang/my-fast-cf-ip/master/fastips.txt": {
+   "fetches": 8,
+   "successes": 4,
+   "ips": 80,
+   "lastSuccess": "2026-11-11T18:18:27.147022961Z",
+   "lastFailed": "2026-11-11T18:07:58.092133457Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://raw.githubusercontent.com/gshtwy/CF-DNS-Clone/main/wetest-cloudflare-v4.txt": {
+   "fetches": 8,
+   "successes": 4,
+   "ips": 60,
+   "lastSuccess": "2026-11-11T18:18:27.147024149Z",
+   "lastFailed": "2026-11-11T18:07:58.092172757Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://raw.githubusercontent.com/hubbylei/bestcf/main/bestcf.txt": {
+   "fetches": 8,
+   "successes": 4,
+   "ips": 40,
+   "lastSuccess": "2026-11-11T18:18:27.147025109Z",
+   "lastFailed": "2026-11-11T18:07:58.092185873Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://raw.githubusercontent.com/yuanxiawan/cfipv4db/main/cfip.txt": {
+   "fetches": 8,
+   "successes": 4,
+   "ips": 59,
+   "lastSuccess": "2026-11-11T18:18:27.147023597Z",
+   "lastFailed": "2026-11-11T18:07:58.092149285Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "https://zip.cm.edu.kg/all.txt": {
+   "fetches": 8,
+   "successes": 5,
+   "ips": 52670,
+   "lastSuccess": "2026-11-11T18:18:27.147026345Z",
+   "lastFailed": "2026-11-11T17:34:52.754329944Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "sub:owo.o00o.ooo": {
+   "fetches": 1,
+   "successes": 0,
+   "ips": 0,
+   "lastSuccess": "0001-01-01T00:00:00Z",
+   "lastError": "Get \"https://vlesdy.trojanjd.dpdns.org/sub?token=<REDACTED>&sub=owo.o00o.ooo\": dial tcp 104.26.6.221:443: i/o timeout",
+   "lastFailed": "2026-11-11T17:27:18.551234337Z",
+   "consecutiveFailures": 1,
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "sub:sub.danfeng.eu.org": {
+   "fetches": 1,
+   "successes": 0,
+   "ips": 0,
+   "lastSuccess": "0001-01-01T00:00:00Z",
+   "lastError": "Get \"https://vlesdy.trojanjd.dpdns.org/sub?token=<REDACTED>&sub=sub.danfeng.eu.org\": dial tcp 172.67.73.176:443: i/o timeout",
+   "lastFailed": "2026-11-11T17:27:18.551490057Z",
+   "consecutiveFailures": 1,
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "sub:sub.keaeye.icu": {
+   "fetches": 1,
+   "successes": 0,
+   "ips": 0,
+   "lastSuccess": "0001-01-01T00:00:00Z",
+   "lastError": "Get \"https://vlesdy.trojanjd.dpdns.org/sub?token=<REDACTED>&sub=sub.keaeye.icu\": dial tcp 104.26.6.221:443: i/o timeout",
+   "lastFailed": "2026-11-11T17:27:18.551269581Z",
+   "consecutiveFailures": 1,
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "sub:sub.lzjbaby.com": {
+   "fetches": 1,
+   "successes": 0,
+   "ips": 0,
+   "lastSuccess": "0001-01-01T00:00:00Z",
+   "lastError": "Get \"https://vlesdy.trojanjd.dpdns.org/sub?token=<REDACTED>&sub=sub.lzjbaby.com\": dial tcp 172.67.73.176:443: i/o timeout",
+   "lastFailed": "2026-11-11T17:27:18.551373609Z",
+   "consecutiveFailures": 1,
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "sub:sub.mia.xx.kg": {
+   "fetches": 1,
+   "successes": 0,
+   "ips": 0,
+   "lastSuccess": "0001-01-01T00:00:00Z",
+   "lastError": "Get \"https://vlesdy.trojanjd.dpdns.org/sub?token=<REDACTED>&sub=sub.mia.xx.kg\": dial tcp 172.67.73.176:443: i/o timeout",
+   "lastFailed": "2026-11-11T17:27:18.551340633Z",
+   "consecutiveFailures": 1,
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "sub:sub.mot.cloudns.biz": {
+   "fetches": 1,
+   "successes": 0,
+   "ips": 0,
+   "lastSuccess": "0001-01-01T00:00:00Z",
+   "lastError": "Get \"https://vlesdy.trojanjd.dpdns.org/sub?token=<REDACTED>&sub=sub.mot.cloudns.biz\": dial tcp 172.67.73.176:443: i/o timeout",
+   "lastFailed": "2026-11-11T17:27:18.551307549Z",
+   "consecutiveFailures": 1,
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "sub:sub.xdu.qzz.io": {
+   "fetches": 1,
+   "successes": 0,
+   "ips": 0,
+   "lastSuccess": "0001-01-01T00:00:00Z",
+   "lastError": "Get \"https://vlesdy.trojanjd.dpdns.org/sub?token=<REDACTED>&sub=sub.xdu.qzz.io\": dial tcp 172.67.73.176:443: i/o timeout",
+   "lastFailed": "2026-11-11T17:27:18.551423169Z",
+   "consecutiveFailures": 1,
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "sub:zrf.zrf.me": {
+   "fetches": 1,
+   "successes": 0,
+   "ips": 0,
+   "lastSuccess": "0001-01-01T00:00:00Z",
+   "lastError": "Get \"https://vlesdy.trojanjd.dpdns.org/sub?token=<REDACTED>&sub=zrf.zrf.me\": dial tcp 172.67.73.176:443: i/o timeout",
+   "lastFailed": "2026-11-11T17:27:18.551454885Z",
+   "consecutiveFailures": 1,
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "subscription:pool": {
+   "fetches": 8,
+   "successes": 8,
+   "ips": 2400,
+   "lastSuccess": "2026-11-11T18:18:26.145331783Z",
+   "lastFailed": "0001-01-01T00:00:00Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  },
+  "user:env": {
+   "fetches": 8,
+   "successes": 8,
+   "ips": 0,
+   "lastSuccess": "2026-11-11T18:18:26.135396706Z",
+   "lastFailed": "0001-01-01T00:00:00Z",
+   "backoffUntil": "0001-01-01T00:00:00Z"
+  }
+ },
+ "sourceChannels": [
+  {
+   "channel": "user",
+   "label": "手动",
+   "sources": 1,
+   "candidates": 0,
+   "inPool": 0,
+   "alive": 0,
+   "slow": 0,
+   "failing": 0,
+   "fetches": 8,
+   "successes": 8,
+   "successRate": 1,
+   "backoff": 0,
+   "lastSuccess": "2026-11-11T18:18:26.135396706Z",
+   "score": 30
+  },
+  {
+   "channel": "cfdata",
+   "label": "CFdata",
+   "sources": 1,
+   "candidates": 250,
+   "inPool": 0,
+   "alive": 0,
+   "slow": 0,
+   "failing": 0,
+   "fetches": 8,
+   "successes": 8,
+   "successRate": 1,
+   "backoff": 0,
+   "lastSuccess": "2026-11-11T18:18:26.139051272Z",
+   "score": 30
+  },
+  {
+   "channel": "subscription",
+   "label": "订阅",
+   "sources": 9,
+   "candidates": 300,
+   "inPool": 4,
+   "alive": 4,
+   "slow": 0,
+   "failing": 0,
+   "fetches": 16,
+   "successes": 8,
+   "successRate": 0.5,
+   "backoff": 0,
+   "lastSuccess": "2026-11-11T18:18:26.145331783Z",
+   "lastError": "Get \"https://vlesdy.trojanjd.dpdns.org/sub?token=<REDACTED>&sub=sub.danfeng.eu.org\": dial tcp 172.67.73.176:443: i/o timeout",
+   "score": 85
+  },
+  {
+   "channel": "bestcf",
+   "label": "BestCF",
+   "sources": 20,
+   "candidates": 442,
+   "inPool": 0,
+   "alive": 0,
+   "slow": 0,
+   "failing": 0,
+   "fetches": 156,
+   "successes": 90,
+   "successRate": 0.5769230769230769,
+   "backoff": 1,
+   "lastSuccess": "2026-11-11T18:18:27.573671096Z",
+   "lastError": "Get \"https://raw.githubusercontent.com/Senflare/Senflare-IP/main/IPlist-Pro.txt\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)",
+   "score": 17.3
+  }
+ ],
+ "_note": "仅保留与本轮审计相关段落；sources/inventory 全量已剔除",
+ "qualityScheduler_summary": {
+  "keys": [
+   "activeIp",
+   "apply",
+   "batchSize",
+   "enabled",
+   "lastDecision",
+   "lastError",
+   "lastProbeAt",
+   "lastSwitchAt",
+   "probeIntervalSeconds",
+   "records"
+  ],
+  "_note": "全量 500KB 候选质量账本已剔除，需要时从 NAS /vol1/1000/Docker/CFNat/data/proxy-quality.json 取"
+ }
+}

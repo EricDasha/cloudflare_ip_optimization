@@ -5,15 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
 <link rel="icon" href="data:,">
-<title>皇位厅 · 订阅本子</title>
-<link rel="stylesheet" href="/styles.css?v=20261108c">
+<title>皇位厅 · 优选</title>
+<link rel="stylesheet" href="/styles.css?v=20261114a">
 </head>
 <body>
 
 <header class="topbar">
   <div class="brand">
-    <span class="brand-glyph" aria-hidden="true">本</span>
-    <div><strong>订阅本子</strong><small>采集 / 考试 · 独立页</small></div>
+    <span class="brand-glyph" aria-hidden="true">优</span>
+    <div><strong>优选</strong><small>采集 / 考试 / 台账 · 独立页</small></div>
   </div>
   <div class="top-status"><span class="st idle" id="subDot">◌</span><span id="subStateLine">…</span></div>
   <span class="clock mono" id="clock">--:--:--</span>
@@ -25,9 +25,9 @@
 <main class="stage">
 
   <!-- 壹 · 总览 -->
-  <section class="card" aria-label="订阅总览">
+  <section class="card" aria-label="优选总览">
     <div class="head-row">
-      <p class="overline">壹 · 订阅总览</p>
+      <p class="overline">壹 · 优选总览</p>
       <div class="actions">
         <button class="btn mini" id="subHarvestBtn" type="button">立即去收</button>
         <button class="btn mini" id="subProbeBtn" type="button">立即考试</button>
@@ -80,10 +80,45 @@
     </table></div>
   </section>
 
+  <!-- 肆 · 来源台账 -->
+  <section class="card" aria-label="来源台账">
+    <div class="head-row">
+      <p class="overline">肆 · 来源台账 · <span id="ledgerCount">0</span> 个地址</p>
+      <div class="actions">
+        <button class="btn mini" id="ledgerEvalBtn" type="button">立即判死</button>
+        <button class="btn mini" id="ledgerRefreshBtn" type="button">刷新</button>
+      </div>
+    </div>
+    <p class="hintline">每个地址被看到过几轮、被真实考试考过几次、通过几次。一次都没通过、又长期不变的第三方地址会被自动请出候选池。</p>
+    <div class="tally sub-tally" aria-live="polite">
+      <div><span class="n mono" id="ledgerTracked">–</span><span class="u">在账地址</span></div>
+      <div><span class="n mono" id="ledgerExcluded">–</span><span class="u">已请出</span></div>
+      <div><span class="n mono" id="ledgerSources">–</span><span class="u">在账来源</span></div>
+      <div><span class="n mono" id="ledgerStale">–</span><span class="u">疑似停更</span></div>
+    </div>
+    <div class="sub-filter" id="ledgerFilter" role="tablist" aria-label="按台账状态筛选">
+      <button class="btn mini on" type="button" data-filter="all">全部</button>
+      <button class="btn mini" type="button" data-filter="excluded">已请出</button>
+      <button class="btn mini" type="button" data-filter="never-passed">从未通过</button>
+    </div>
+    <div class="table-wrap"><table aria-label="来源台账">
+      <thead><tr><th>地址</th><th class="mono">轮数</th><th class="mono">考/过</th><th class="mono">最好</th><th>来源</th><th>状态</th><th></th></tr></thead>
+      <tbody id="ledgerBody"><tr><td colspan="7" class="inline-status">尚未载入</td></tr></tbody>
+    </table></div>
+    <div class="head-row" style="margin-top:18px">
+      <p class="overline">来源清单 · <span id="ledgerSourceCount">0</span> 个</p>
+    </div>
+    <div class="table-wrap"><table aria-label="来源清单">
+      <thead><tr><th>来源</th><th>渠道</th><th class="mono">抓取/成功</th><th class="mono">条数</th><th class="mono">未变轮数</th><th>状态</th></tr></thead>
+      <tbody id="ledgerSourceBody"><tr><td colspan="6" class="inline-status">尚未载入</td></tr></tbody>
+    </table></div>
+    <p class="foot">「未变轮数」= 这份清单连续多少轮内容一字未改。数字很大而地址又考不过，通常说明这个源已经不再维护。</p>
+  </section>
+
 </main>
 
-<footer class="foot">皇位厅 · 订阅本子 · <span id="footClock">--</span></footer>
+<footer class="foot">皇位厅 · 优选 · <span id="footClock">--</span></footer>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
-<script src="/app.js?v=20261108c"></script>
+<script src="/app.js?v=20261114a"></script>
 </body>
 </html>

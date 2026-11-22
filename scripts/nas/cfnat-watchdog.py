@@ -6,13 +6,23 @@ cfnat-watchdog: keep the sing-box tunnel alive and Telegram-alerted.
 - Fallback mode: vless outbound -> one of the verified CF direct-entry domains
 
 Every run (cron, 1/min):
-  1. probe tunnel through sing-box (gstatic 204)
+  1. probe tunnel through sing-box (Cloudflare trace / 204, two endpoints)
   2. healthy + pool mode          -> done
      healthy + fallback mode      -> probe pool directly (cert check);
-                                     2 consecutive OK -> switch back + TG alert
-  3. dead   -> probe the NODE itself (direct www.ox.ac.uk:443 cert check)
-     node dead                    -> TG "node down" (cooldown-guarded), no churn
-     node alive                  -> rotate fallbacks until tunnel OK -> TG alert
+                                     5 consecutive OK spanning >=3 min, and
+                                     only after a dwell on fallback -> switch
+                                     back + TG alert. The dwell doubles every
+                                     time the pool dies again within an hour
+                                     (15 -> 30 -> 60 min cap), so a flapping
+                                     pool cannot restart sing-box every 2 min.
+  3. dead   -> debounce (2 consecutive dead runs), then rotate fallback
+     entries directly; trying a fallback IS the node liveness test
+     (it only succeeds if the node is up) -> TG alert on switch
+     (30 min cooldown). There is no separate "node down" alert:
+     the old "probe the node first" gate was removed — when the tunnel
+     is down this host's direct path to Cloudflare is blocked as well,
+     so the gate could never pass, and scanning the candidates cost
+     minutes and overran the 1-minute cron window.
 
 TG alerts go through the SAME bot openclaw uses (token read at runtime from
 openclaw.json, never logged). The proxy is restored BEFORE sending, so the
@@ -40,12 +50,39 @@ LOG_F = f"{SB_DIR}/watchdog.log"
 LOCK_F = f"{SB_DIR}/watchdog.lock"
 
 POOL_SERVER, POOL_PORT = "192.168.1.50", 1234
-PROXY = "http://127.0.0.1:39281"
-# MUST be a site that does NOT hit the geosite-cn/geoip-cn direct rules -
-# gstatic.com resolves to a CN-reachable edge and the probe silently goes
-# out via `direct`, so it can never detect a dead tunnel (learned the hard way).
-PROBE_URL = "https://www.google.com/generate_204"
-TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
+PROXY = "http://127.0.0.1:39281"          # 出网代理（urltest，机场兜底会自动接管），告警走这条
+# 探测专用入口：sing-box 里 probe-in → 只走 `proxy`（cfnat 主通道），不经过 urltest。
+# 没有它的话，urltest 一旦把流量交给机场节点，看门狗测到的就是机场节点，
+# 不是 cfnat——池子死了也看不见，还会把「机场节点连不上 google」当成池子故障。
+PROBE_PROXY = "http://127.0.0.1:39282"
+_PROBE_PROXY = None
+
+
+def probe_http_proxy():
+    """优先用 39282；配置回滚到没有 probe-in 的老版本时退回 39281。"""
+    global _PROBE_PROXY
+    if _PROBE_PROXY is None:
+        s = socket.socket()
+        s.settimeout(2)
+        try:
+            s.connect(("127.0.0.1", 39282))
+            _PROBE_PROXY = PROBE_PROXY
+        except OSError:
+            _PROBE_PROXY = PROXY
+        finally:
+            s.close()
+    return _PROBE_PROXY
+# 探针要同时满足两条：不会被 geosite-cn/geoip-cn 规则直连（gstatic 就是
+# 这样撒谎的），以及在节点出口真的可达。google 不满足第二条：2026-11-17
+# 夜里经隧道访问 google 全是 000，而 cloudflare trace 正常返回境外 IP——
+# 旧探针把好隧道判死，看门狗每分钟重启一次 sing-box、池子与兜底来回切。
+# 隧道本身就是 CF 边缘，用 CF 自家端点最稳；两个端点互为备份。
+PROBE_URLS = (
+    "https://www.cloudflare.com/cdn-cgi/trace",
+    "https://cp.cloudflare.com/generate_204",
+)
+PROBE_URL = PROBE_URLS[0]
+TRACE_URL = PROBE_URLS[0]
 
 # all verified 2026-10-24: every combo hands back the node cert with node SNI
 FALLBACKS = [
@@ -66,8 +103,17 @@ FALLBACKS = [
 # minute, so more than one attempt would make runs overlap and starve the
 # next tick. Rotation advances across runs instead (fb_idx persists).
 ATTEMPTS_PER_RUN = 1
-RECOVERY_CONSEC = 2
+# 切回池子的门槛必须比判死高得多，否则就是来回抽风：
+# 2026-11-17 夜里的实况是 22:46 判死切兜底、22:48 判「池已恢复」切回、
+# 22:49 又死——每 2 分钟重启一次 sing-box，告警刷屏且代理一直抖。
+# 现在：连续 5 次通过、且跨度 >= 3 分钟；另外进兜底后至少停留 15 分钟。
+RECOVERY_CONSEC = 5
+RECOVERY_WINDOW = 180
+MIN_FALLBACK_DWELL = 900
+FLAP_BACKOFF_MAX = 3600   # 抖动退避上限：兜底最多停留 60 分钟
+STABLE_RESET = 3600       # 池子活过 1 小时才算「稳定」，抖动计数清零
 ALERT_COOLDOWN = 1800  # seconds between identical alerts
+RECOVERY_ALERT_COOLDOWN = 1800  # 恢复通知同样限频，且只有发过 ⚠️ 才发 ✅
 RESTART_SETTLE = 10    # seconds after docker restart before probing
 # CF direct-entry handshakes routinely take 1.5-7s from CN; an 8s cap made
 # ~70% of probes read as "dead". 20s + 2 consecutive failures to debounce.
@@ -106,7 +152,13 @@ def load_state():
 
 
 def save_state(st):
-    json.dump(st, open(STATE_F, "w"), indent=2)
+    # 原子写：先写临时文件再 rename。直接 open(STATE_F, "w") 写一半崩了，
+    # 状态文件损坏，下次 load_state 回落默认值，mode/fb_idx 全丢。
+    # 与 cf_inspect.py 的 _queue_save 同一做法。
+    tmp = STATE_F + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(st, f, indent=2)
+    os.replace(tmp, STATE_F)
 
 
 def read_cfg():
@@ -131,15 +183,31 @@ def current_target():
 
 
 def probe_tunnel(timeout=PROBE_TIMEOUT):
-    r = run(["curl", "-s", "-o", "/dev/null", "-m", str(timeout), "-x", PROXY,
-             "-w", "%{http_code}", PROBE_URL], timeout=timeout + 6)
-    return r.stdout.strip() == "204"
+    for url in PROBE_URLS:
+        try:
+            r = run(["curl", "-s", "-m", str(timeout), "-x", probe_http_proxy(),
+                     "-w", "\n%{http_code}", url], timeout=timeout + 6)
+        except subprocess.TimeoutExpired:
+            # 超时即探针失败：旧代码让 TimeoutExpired 一路抛到 cron 主流程，
+            # 整轮崩掉，本轮 dead_consec 白计。
+            continue
+        body, _, code = r.stdout.rpartition("\n")
+        code = code.strip()
+        if url.endswith("cdn-cgi/trace"):
+            if code == "200" and "ip=" in body:
+                return True
+        elif code == "204":
+            return True
+    return False
 
 
 def egress_ip(timeout=PROBE_TIMEOUT):
     """Exit IP as seen through the tunnel; empty on failure."""
-    r = run(["curl", "-s", "-m", str(timeout), "-x", PROXY, TRACE_URL],
-            timeout=timeout + 6)
+    try:
+        r = run(["curl", "-s", "-m", str(timeout), "-x", probe_http_proxy(), TRACE_URL],
+                timeout=timeout + 6)
+    except subprocess.TimeoutExpired:
+        return ""
     for line in r.stdout.splitlines():
         if line.startswith("ip="):
             return line[3:].strip()
@@ -155,7 +223,10 @@ def direct_ip(timeout=10):
     global _DIRECT_IP
     if _DIRECT_IP is not None:
         return _DIRECT_IP
-    r = run(["curl", "-s", "-m", str(timeout), TRACE_URL], timeout=timeout + 6)
+    try:
+        r = run(["curl", "-s", "-m", str(timeout), TRACE_URL], timeout=timeout + 6)
+    except subprocess.TimeoutExpired:
+        return ""
     for line in r.stdout.splitlines():
         if line.startswith("ip="):
             _DIRECT_IP = line[3:].strip()
@@ -169,9 +240,12 @@ def tunnel_health():
     request leaked out via the `direct` outbound and proved nothing."""
     if not probe_tunnel():
         return False, "probe failed"
-    eip = egress_ip()
+    # 探针刚证明隧道能应答，取出口 IP 却偶尔会慢到超时（实测 trace 一次
+    # 10.8s 才回来）。抓不到就再试一次（短超时），否则两轮巧合能叠成一次
+    # 误判死，又去重启一个本来好好的 sing-box。
+    eip = egress_ip() or egress_ip(timeout=12)
     if not eip:
-        return False, "no egress ip"
+        return False, "no egress ip (2 tries)"
     dip = direct_ip()
     if dip and eip == dip:
         return False, f"leaked direct (ip={eip})"
@@ -186,8 +260,8 @@ def cert_ok(host, port, sni, timeout=8):
     wedged on it for minutes, so the pool was never seen as recovered.
     A socket with a hard timeout cannot do that.
 
-    The subject CN is read straight out of the DER bytes (ASN.1 string
-    contents, UTF8String/PrintableString) - no temp files, no pipelining.
+    The subject CN is read from the parsed cert (exact match on
+    commonName, or an exact DNS SAN) - no temp files, no pipelining.
     """
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
@@ -198,7 +272,117 @@ def cert_ok(host, port, sni, timeout=8):
                 der = tls.getpeercert(binary_form=True)
     except (OSError, ssl.SSLError, ValueError):
         return False
-    return bool(der) and NODE_CERT_CN in der
+    # 精确比对 subject CN（或 SAN DNS）：旧写法 `CN in der` 是 DER
+    # 子串匹配，证书任一字段含该字节串即通过；配 CERT_NONE 时，自签
+    # 证书嵌该串即可冒充节点。CERT_NONE 下 getpeercert() 字典为空，
+    # 故直接解析 DER，只认完整相等的值。
+    if not der:
+        return False
+    want = NODE_CERT_CN.decode("utf-8", "ignore")
+    cns, sans = _cert_names(der)
+    return want in cns or want in sans
+
+
+def _der_read(data, pos):
+    """读一个 DER TLV 头，返回 (tag, value_start, value_len)。"""
+    tag = data[pos]
+    pos += 1
+    if tag & 0x1F == 0x1F:  # 多字节 tag（本处用不到，防御性处理）
+        while True:
+            b = data[pos]
+            pos += 1
+            if not b & 0x80:
+                break
+    length = data[pos]
+    pos += 1
+    if length & 0x80:
+        n = length & 0x7F
+        if n == 0 or n > 4:
+            raise ValueError("bad DER length")
+        length = int.from_bytes(data[pos:pos + n], "big")
+        pos += n
+    if pos + length > len(data):
+        raise ValueError("DER overrun")
+    return tag, pos, length
+
+
+def _der_children(data, start, end):
+    pos = start
+    while pos < end:
+        tag, vs, ln = _der_read(data, pos)
+        yield tag, vs, vs + ln
+        pos = vs + ln
+
+
+def _cert_names(der):
+    """从 DER 证书里精确取出 (subject CN 列表, SAN DNS 列表)。解析失败返回 ([], [])。"""
+    try:
+        tag, vs, ln = _der_read(der, 0)
+        if tag != 0x30:  # Certificate SEQUENCE
+            return [], []
+        tbs_tag, tbs_vs, tbs_ln = _der_read(der, vs)
+        if tbs_tag != 0x30:
+            return [], []
+        kids = list(_der_children(der, tbs_vs, tbs_vs + tbs_ln))
+        idx = 0
+        if kids and kids[0][0] == 0xA0:  # [0] version
+            idx = 1
+        # serial, signature, issuer, validity, subject
+        if len(kids) < idx + 5:
+            return [], []
+        _, subj_vs, subj_end = kids[idx + 4]
+        cns = []
+        for stag, svs, send in _der_children(der, subj_vs, subj_end):
+            if stag != 0x31:  # SET
+                continue
+            for atag, avs, aend in _der_children(der, svs, send):
+                if atag != 0x30:  # AttributeTypeAndValue SEQUENCE
+                    continue
+                parts = list(_der_children(der, avs, aend))
+                if len(parts) != 2:
+                    continue
+                otag, ovs, oend = parts[0]
+                vtag, vvs, vend = parts[1]
+                if otag == 0x06 and der[ovs:oend] == b"\x55\x04\x03":  # OID 2.5.4.3 commonName
+                    cns.append(_der_decode_string(vtag, der[vvs:vend]))
+        sans = []
+        for tag, evs, eend in kids:
+            if tag != 0xA3:  # [3] extensions
+                continue
+            # [3] 的内容本身是一个 SEQUENCE，扩展是它的子项。
+            stag, svs, sln = _der_read(der, evs)
+            if stag != 0x30:
+                continue
+            for xtag, xvs, xend in _der_children(der, svs, svs + sln):
+                if xtag != 0x30:
+                    continue
+                xparts = list(_der_children(der, xvs, xend))
+                if not xparts or xparts[0][0] != 0x06:
+                    continue
+                otag, ovs, oend = xparts[0]
+                if der[ovs:oend] != b"\x55\x1d\x11":  # OID 2.5.29.17 subjectAltName
+                    continue
+                val_tag, val_vs, val_end = xparts[-1]  # OCTET STRING
+                if val_tag != 0x04:
+                    continue
+                inner = der[val_vs:val_end]
+                itag, ivs, iln = _der_read(inner, 0)
+                if itag != 0x30:
+                    continue
+                for gtag, gvs, gend in _der_children(inner, ivs, ivs + iln):
+                    if gtag == 0x82:  # [2] dNSName IA5String
+                        sans.append(inner[gvs:gend].decode("ascii", "ignore"))
+        return cns, sans
+    except (ValueError, IndexError):
+        return [], []
+
+
+def _der_decode_string(tag, raw):
+    if tag == 0x1E:  # BMPString
+        return raw.decode("utf-16-be", "ignore")
+    if tag in (0x0C, 0x16):  # UTF8String, IA5String
+        return raw.decode("utf-8", "ignore")
+    return raw.decode("ascii", "ignore")
 
 
 def set_target(server, port):
@@ -294,6 +478,12 @@ def main():
     st = load_state()
     sni = sni_of(read_cfg())
     cur_server, cur_port = current_target()
+    # mode 以 sing-box 实际指向为准。旧版轮换失败时会把 mode 留在 "pool"，
+    # 而 target 已经改成了兜底域名——于是「切回池子」的分支永远不执行，
+    # 卡在兜底上直到人工发现。这里每轮按 target 校正一次。
+    st["mode"] = "pool" if (cur_server, cur_port) == (POOL_SERVER, POOL_PORT) else "fallback"
+    if st["mode"] == "fallback" and not st.get("dwell_until"):
+        st["dwell_until"] = time.time() + MIN_FALLBACK_DWELL
 
     # ---- 1) tunnel healthy? ----
     healthy, detail = tunnel_health()
@@ -301,20 +491,44 @@ def main():
         st["dead_consec"] = 0
         flush_pending(st)  # the tunnel works again - deliver what we owed
         if st.get("mode") == "fallback":
+            now = time.time()
+            if now < st.get("dwell_until", 0):
+                # 抖动退避期内不碰池子：切回只会再死一次，还白重启一次 sing-box
+                st["consec_ok"] = 0
+                st["recovery_since"] = 0
+                save_state(st)
+                return
             if cert_ok(POOL_SERVER, POOL_PORT, sni):
                 st["consec_ok"] = st.get("consec_ok", 0) + 1
-                if st["consec_ok"] >= RECOVERY_CONSEC:
+                if st["consec_ok"] == 1:
+                    st["recovery_since"] = now
+                if (st["consec_ok"] >= RECOVERY_CONSEC
+                        and now - st.get("recovery_since", now) >= RECOVERY_WINDOW):
                     log("pool recovered, switching back to cfnat entry")
                     if set_target(POOL_SERVER, POOL_PORT) and tunnel_health()[0]:
+                        sb = st.get("switchback_at", 0)
+                        st["flap_count"] = (
+                            st.get("flap_count", 0) + 1
+                            if sb and now - sb < STABLE_RESET else 0)
+                        st["switchback_at"] = now
                         st["mode"] = "pool"
                         st["consec_ok"] = 0
-                        notify(st, "✅ cfnat 池已恢复（连续探测通过），sing-box 已切回 "
-                                f"{POOL_SERVER}:{POOL_PORT}，兜底入口下线。")
+                        st["recovery_since"] = 0
+                        st["dwell_until"] = 0
+                        # 只有真的发过 ⚠️ 才配一条 ✅，否则就是「空发」
+                        alerted = st.pop("dead_alerted", False)
+                        if (alerted
+                                and now - st.get("last_recovery_alert", 0) > RECOVERY_ALERT_COOLDOWN):
+                            if notify(st, "✅ cfnat 池已恢复（连续探测通过），sing-box 已切回 "
+                                       f"{POOL_SERVER}:{POOL_PORT}，兜底入口下线。"):
+                                st["last_recovery_alert"] = now
                     else:
                         st["consec_ok"] = 0
+                        st["recovery_since"] = 0
                         log("switch-back failed; staying on fallback")
             else:
                 st["consec_ok"] = 0
+                st["recovery_since"] = 0
             save_state(st)
         else:
             st["consec_ok"] = 0
@@ -351,13 +565,26 @@ def main():
             st["mode"] = "fallback"
             st["fb_idx"] = (idx + 1) % len(FALLBACKS)
             st["consec_ok"] = 0
-            log(f"fallback {dom}:{port} carries the tunnel [{fb_detail}]")
+            st["recovery_since"] = 0
             now = time.time()
+            sb = st.get("switchback_at", 0)
+            st["flap_count"] = (
+                st.get("flap_count", 0) + 1
+                if sb and now - sb < STABLE_RESET else 0)
+            dwell = min(MIN_FALLBACK_DWELL * (2 ** min(st.get("flap_count", 0), 2)),
+                        FLAP_BACKOFF_MAX)
+            st["dwell_until"] = now + dwell
+            st["fallback_since"] = now
+            log(f"fallback {dom}:{port} carries the tunnel [{fb_detail}], "
+                f"dwell {dwell // 60}min, flapped {st['flap_count']}x")
             if now - st.get("last_alert", 0) > ALERT_COOLDOWN:
+                extra = (f"，池子近期已反复 {st['flap_count']} 次，先停留 {dwell // 60} 分钟再试"
+                         if st.get("flap_count") else "，池恢复后自动切回")
                 if notify(st, "⚠️ cfnat 隧道不通，sing-box 已切换兜底入口 " + dom + ":" + str(port) +
-                           f"（候选 {idx + 1}/{len(FALLBACKS)}），代理与 NewAPI 上游已恢复。"
-                           "池恢复后自动切回。（30 分钟冷却）"):
+                           f"（候选 {idx + 1}/{len(FALLBACKS)}），代理与 NewAPI 上游已恢复" +
+                           extra + "。"):
                     st["last_alert"] = now
+                    st["dead_alerted"] = True
             save_state(st)
             return
         st["fb_idx"] = (idx + 1) % len(FALLBACKS)

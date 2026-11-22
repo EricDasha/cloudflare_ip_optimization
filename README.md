@@ -94,7 +94,7 @@ GET /api/status → qualityScheduler：
 
 - `cf.090227.xyz`：第三方优选目录；抓取 `/ct?ips=6`、`/cu`、`/cmcc?ips=8` API 与固定优选域名 DNS。候选源清单由服务端维护，未启用的旧社区 DNS 源不会参与刷新。
 
-订阅转换器（`PROXY_SUBSCRIPTION_CONVERTER`，默认 `https://vlesdy.trojanjd.dpdns.org/sub`）配合第三方维护者域名（`PROXY_SUBSCRIPTION_MAINTAINERS`，默认 `owo.o00o.ooo`、`cm.soso.edu.kg`、`zrf.zrf.me`、`sub.keaeye.icu`、`sub.mot.cloudns.biz`、`sub.mia.xx.kg`、`sub.lzjbaby.com`、`sub.xdu.qzz.io`）是日常 IP 来源：服务端按 `?token=…&sub=<维护者>` 拉取节点链接，提取 IP 后慢筛入池。token 经 `PROXY_SUBSCRIPTION_TOKEN` 从 `.env` 注入，不进仓库、不回显。手动扫描的“订阅内容”粘贴同样支持，把转换后的 VLESS/Trojan/SS/VMess 或 Clash 内容贴入即可；服务端只从明确的节点 URI、JSON 或 Clash `server` 字段提取节点域名，不保存或记录原文。
+订阅转换器（`PROXY_SUBSCRIPTION_CONVERTER`，默认 `https://vlesdy.trojanjd.dpdns.org/sub`）配合第三方维护者域名（`PROXY_SUBSCRIPTION_MAINTAINERS`，默认 `cm.soso.edu.kg`、`zrf.zrf.me`、`sub.keaeye.icu`、`sub.mia.xx.kg`、`sub.lzjbaby.com`、`sub.xdu.qzz.io`；2026-11-15 按实测通过率移除了 `owo.o00o.ooo` 与 `sub.mot.cloudns.biz`）是日常 IP 来源：服务端按 `?token=…&sub=<维护者>` 拉取节点链接，提取 IP 后慢筛入池。token 经 `PROXY_SUBSCRIPTION_TOKEN` 从 `.env` 注入，不进仓库、不回显。手动扫描的“订阅内容”粘贴同样支持，把转换后的 VLESS/Trojan/SS/VMess 或 Clash 内容贴入即可；服务端只从明确的节点 URI、JSON 或 Clash `server` 字段提取节点域名，不保存或记录原文。
 
 服务端只允许上述固定候选源与订阅维护者清单，不接受任意 URL；第三方 HTTPS 源禁止跨域跳转，正文限制为 512 KiB，不执行脚本。手动导入的节点域名最多 64 个 hostname、共享 3 秒解析期限，并只接受公网 IPv4。所有结果仍拒绝私网、回环、链路本地与组播地址。扫描接口限制请求体为 1 MiB、并发为 `1-500`、扫描数量为 `1-10000`，同一时刻只运行一个扫描任务。
 
@@ -150,7 +150,7 @@ CFdata 供给层：扫描器在启动时后台自扫一次，此后每 6 小时�
 1. 初版判据只比快照时间戳，一次无害的刷新就能吞掉整轮 90 秒考试——线上 2026-11-04 12:18 与 12:21 两轮各有 20 个候选通过 VLESS 终审，全被丢掉。
 2. 改成「通关 IP 是否仍在候选名单里」后，12:38 又丢一轮（passed=10）。根因这时才看清：**候选池不是稳定名册，是按层配额灌入、上限 1000 的轮转采样队列**，每轮重新排序；GitHub raw 六个源超时一次，整池就从 743 掉到 650，同一个 IP 这轮在榜、下轮掉出榜是常态。拿供给队列的抖动去否定一个端到端验过的结论，属于本末倒置。
 
-现在只守一条与候选名单无关、可就地复验的不变量：**进池的必须是公网 IPv4 且属于 Cloudflare 边缘段**（`filterPoolAdmissibleIPs`，与刷新时那道段闸同一把尺子）。个别地址复验不过就逐个剔除，剩下的照常采用，不因一两个失效地址作废整轮。
+现在只守一条与候选名单无关、可就地复验的不变量：**进池的必须是公网 IPv4**（`filterPoolAdmissibleIPs`，与刷新时那道段闸同一把尺子）。Cloudflare 官方段只作来源标签，不是准入门——真正的判据是 WS `101` 初筛与 VLESS 数据面终审（见本节末尾说明）。个别地址复验不过就逐个剔除，剩下的照常采用，不因一两个失效地址作废整轮。
 
 **优越判定双轨**（`superiorTo`，累计 3 轮与晋升复核走同一函数）：
 
@@ -196,8 +196,10 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 | 变量 | 对应 cfnat 参数 | 默认 |
 |---|---|---|
 | `CFNAT_ADDR` | `-addr` | `0.0.0.0:1234` |
+| `CFNAT_ALT_ADDR` | `-addr2`（实验性第二入口，留空关闭） | 空 |
+| `CFNAT_ALT_PORT` | `-port2`（第二入口的目标端口，0 沿用 `-port`） | `0` |
 | `CFNAT_COLO` | `-colo` | 空 |
-| `CFNAT_DELAY` | `-delay` | `2000` |
+| `CFNAT_DELAY` | `-delay` | `300` |
 | `CFNAT_DOMAIN` | `-domain` | `cloudflaremirrors.com/debian` |
 | `CFNAT_FIXED_IPS` | `-fixed` | 空 |
 | `CFNAT_FALLBACK` | `-fallback`（兜底目标，仅拨号失败时尝试） | 空 |
@@ -210,6 +212,8 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 | `CFNAT_TASK` | `-task` | `100` |
 | `CFNAT_TLS` | `-tls` | `true` |
 | `CFNAT_CODE` | `-code` | `200` |
+
+多端口实验：设置 `CFNAT_ALT_ADDR=0.0.0.0:1235`、`CFNAT_ALT_PORT=8443` 后，同一个 cfnat 进程会多监听一个 1235，所有连接改拨目标的 8443 端口；1234 仍走 `CFNAT_PORT`。两个入口共享同一份池和粘性表，只用于对比「443 被干扰时换端口是否更稳」，不改变 `-ipnum/-num/-sticky` 语义。
 
 启用固定转发 IP 池后，CFnat 只在新 TCP 连接建立时按顺序轮换池中的 IP；一个前端连接从拨号到关闭始终绑定同一个上游，不会在数据面并发竞速，也不会主动连接自身监听口做协议健康检查。
 
@@ -269,6 +273,7 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 | `PROXY_AUTO_PRESCREEN_CONCURRENCY` | 三层漏斗初筛（TCP/TLS RTT）并发；过高会触发扫描限流（见诊断指引） | `100` |
 | `PROXY_AUTO_SHORTLIST` | 初筛短名单容量，按延迟升序取前 N 进精筛 | `60` |
 | `PROXY_DOMAIN_FORWARD` | 并入 CFnat 固定转发池的优选域名，逗号分隔 | 空 |
+| `PROXY_DOMAIN_ORDER` | 自动并入域名在 `-fixed` 段内排序：`quality` 按成功率/均速（不摘除），`stable` 保持原序 | `quality` |
 | `PROXY_AUTO_DOMAINS` | 启用的优选域名并入 cfnat 固定转发（`-fixed`），不是 `-fallback` | `false`（Compose 为 `true`） |
 | `PROXY_PREFERRED_RESOLVE` / `PROXY_PREFERRED_IPS_PER_DOMAIN` / `PROXY_PREFERRED_RESOLVED_CANDIDATES` | 已废弃不再读取（优选域名直接做 `-fixed` 成员活解析） | -- |
 | `PROXY_CFDATA_CANDIDATES` | 已废弃不再读取（cfdata 走 `result.csv` 供给层） | -- |
@@ -278,6 +283,8 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 | `PROXY_SCHEDULER_APPLY` | 调度器是否允许自动换池（仍需 `PROXY_AUTO_APPLY=true`） | `true` |
 | `PROXY_SCHEDULER_PROBE_INTERVAL_SECONDS` | 后台调度探测间隔，秒 | `300` |
 | `PROXY_SCHEDULER_BATCH_SIZE` | 每轮调度候选数 | `12` |
+| `PROXY_SCHEDULER_SEGMENT_GAIN` | 片区多样性门禁的换池代价阈值：减段换池需候选吞吐高出该比例；`0` 恢复严格拦截 | `0.15` |
+| `PROXY_EWMA_ALPHA` | 跨轮吞吐平滑系数。历史来自「上一轮池成绩 + 逐成员台账（`proxy-source-ledger.json` 的 `ewmaMbps`）」，只影响排序，不改准入与落盘实测值；`0` 关闭 | `0.3` |
 | `PROXY_ACTIVE_PROBE_ENABLED` | 在位验活总闸：定时复检生效池每个 IP，坏者请下台（独立于后台优化器） | `true` |
 | `PROXY_ACTIVE_PROBE_INTERVAL_SECONDS` | 在位验活间隔，秒（钳制 `[300,1800]`＝5~30 分，越界回落 `600`） | `600` |
 | `PROXY_ACTIVE_PROBE_FAIL_THRESHOLD` | 连续失败几次才请下台（钳制 `[1,10]`，越界回落 `3`；单次抖动不换人） | `3` |
@@ -292,6 +299,12 @@ Active 的延迟基线来自每轮调度的轻量 WS 健康探测，故 WS 轨�
 | `PROXY_VLESS_SPEED_BYTES` | 每个通过节点的下载测速字节数（仅前 6 个候选，软门槛） | `2097152` |
 | `PROXY_VLESS_SPEED_TIMEOUT` | 每个下载测速超时，秒 | `20` |
 | `PROXY_VLESS_MIN_DOWNLOAD_MBPS` | 下载测速软门槛，仅影响排序与展示 | `3` |
+| `PROXY_VLESS_DATA_LATENCY_CEILING_MS` | 数据面延迟天花板，超线按「低于参考值」处理；0 关闭 | `1200` |
+| `PROXY_VLESS_SPEED_INTERVAL_MS` | 串行测速间隔，毫秒；0 关闭 | `250` |
+| `PROXY_VLESS_SPEED_EARLY_ABORT` | 观察 3 秒仍低于参考值 40% 时提前放弃测速 | `true` |
+| `PROXY_TRACE_L7` | 入池前用 `/cdn-cgi/trace` 复验 https/TLS/kex/colo/ip/uag/CF-RAY/Server；探测失败放行 | `true` |
+| `PROXY_WS_PROBES` | shortlist 每个候选的 WS 握手次数（1–3），用于丢包/抖动排序 | `3` |
+| `PROXY_POOL_COLO_CAP` | 单机房池内软上限；0 关闭，跌破最小池时回填 | `3` |
 | `SING_BOX_BIN` | sing-box 二进制路径 | `/usr/local/bin/sing-box` |
 
 ### 劣质成员怎么被换掉
@@ -451,9 +464,38 @@ python3 scripts/cf_inspect.py --always
 - **每条投递路径各重试一次。** 2026-11-03 那三次丢失都是「一次超时就放弃」，而代理端口
   刚重启时有十几秒不可用，多半再打一次就过去了。
 
+### 7 天风控模型（`scripts/cf_risk.py`）
+
+绝对阈值在这套环境里必然误报：反代池的可用水平随线路每天变，判「低」只会天天喊狼来了。
+所以风控改成**和自己比**——每轮巡检记一条样本，只留最近 7 个自然日，用前几天的中位数当基线。
+
+| 判据 | 触发 | 级别 |
+|---|---|---|
+| 终审通过率断崖 | 今天 < 前 3~6 天中位数 × 50%，或 MAD 稳健 z < -3.5 | WARN |
+| 官方段整段封锁 | canary 5 个 anycast 边缘地址 TLS 全部握不上（状态迁移时告警一次） | CRITICAL |
+| 官方段可达却没进终审 | canary ≥3 个握手成功，但终审名单 0 个官方段 | WARN |
+| 官方段可握手但终审全灭 | canary ≥3 个握手成功，但连续 2 次官方段测 ≥5 个、0 通过（疑似 L7 干扰） | WARN |
+| 供给塌方 | 今天源成功率 < 40%，历史中位数 ≥ 80% | WARN |
+| 池缩水 | 今天池内 IP 中位数 ≤ 历史中位数一半（历史 ≥4） | WARN |
+
+数学选择及其理由：
+
+- **比例用求和后再除**，不是各样本比例求平均——否则只有 2 个终审样本的小时和 60 个样本的小时权重相同。
+- **基线用中位数、离散度用 MAD（中位绝对偏差）**，不用均值/标准差：一个离群日不会把基线或分母带偏。
+- **分母只认 `VLESS_PASS`**。`WS_PASS` 是「WS 101 通了但数据面失败」，2026-11-17 实测一堆这种 IP 下载只有 27 KB/s 或直接 000，算进去会虚高。
+- **数据不足就闭嘴**：当天终审 < 15 个、或有效历史 < 3 天，只记录不判定。冷启动约 1 天后生效。
+
+存储 `/vol1/1000/Docker/CFNat/cf-risk-daily.json`（与补发队列同目录，不写 `data/`），tmp + `os.replace` 原子写。
+可用 `CF_RISK_FILE` / `CF_RISK_DROP_FACTOR` / `CF_RISK_MAD_Z` 覆盖。单独调试：
+
+```bash
+python3 scripts/cf_risk.py --dry-run                  # 只判定不落盘
+python3 scripts/cf_risk.py --status-file /tmp/s.json  # 离线复盘
+```
+
 **部署要点（NAS）**：
 
-- 脚本位置 `/vol1/1000/Docker/CFNat/scripts/cf_inspect.py`
+- 脚本位置 `/vol1/1000/Docker/CFNat/scripts/cf_inspect.py` 与 `cf_risk.py`（同目录，`import cf_risk`）
 - 调度用**用户级 crontab**（`administer`），每 2 小时整点：`0 */2 * * *`
 - 日志 `/vol1/1000/Docker/CFNat/data/cf-inspect.log`
 

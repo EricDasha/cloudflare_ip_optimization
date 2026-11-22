@@ -8,7 +8,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -31,10 +30,9 @@ const (
 )
 
 var (
-	activeConnections  int32 // 用于跟踪活跃连接的数量
-	validIPClientCache sync.Map
-	randomMu           sync.Mutex
-	randomGenerator    = rand.New(rand.NewSource(time.Now().UnixNano()))
+	activeConnections int32 // 用于跟踪活跃连接的数量
+	randomMu          sync.Mutex
+	randomGenerator   = rand.New(rand.NewSource(time.Now().UnixNano()))
 )
 
 // maxClientAssignments 设备钉位表的上限。
@@ -58,6 +56,14 @@ type IPManager struct {
 	// 两种分发方式互斥（-sticky 决定），但混在一次会干扰单测钉住的「粘性
 	// 不推进轮转指针」这条约束，也会在两套逻辑并存时产生难以解释的偏移。
 	assignCursor int
+	// primary 是 ipAddresses 里「字面是 IP」的那部分，顺序与 ipAddresses 一致。
+	//
+	// 为什么要把 IP 和域名分开：-fixed 同时收 IP 与优选域名，而优选域名要先解析
+	// 再连、通常比直连 IP 慢一个量级（实测 p50 254ms 对 77ms，尾部能到 2 秒）。
+	// 设备钉位如果落在域名上，这台设备的每一条新连接都要付这笔账。所以钉位与
+	// 轮转只在 primary 里挑；域名退化为拨号失败时的回退目标，仍然可用，但不再
+	// 分走常规流量。primary 为空（池里只有域名）时退回旧行为。
+	primary []string
 }
 
 func NewIPManager() *IPManager {
@@ -70,6 +76,12 @@ func (m *IPManager) SetIPAddresses(ips []string) {
 	m.ipAddresses = ips
 	m.dispatchIndex = 0
 	m.assignCursor = 0
+	m.primary = m.primary[:0]
+	for _, ip := range ips {
+		if net.ParseIP(ip) != nil {
+			m.primary = append(m.primary, ip)
+		}
+	}
 	if m.assignments == nil {
 		m.assignments = map[string]string{}
 		return
@@ -92,7 +104,28 @@ func (m *IPManager) SetPriorityIPs(ips []string) {
 	// 加权，来源优先级只在控制面构建 active pool 时生效。
 }
 
+// rotatePool 返回本连接应当轮转的集合：有 IP 就只在 IP 里转，否则退回全量。
+func (m *IPManager) rotatePool() []string {
+	if len(m.primary) > 0 {
+		return m.primary
+	}
+	return m.ipAddresses
+}
+
+// indexOf 返回成员在 ipAddresses 中的下标（回退序列的起点），找不到返回 -1。
+func (m *IPManager) indexOf(target string) int {
+	for i, ip := range m.ipAddresses {
+		if ip == target {
+			return i
+		}
+	}
+	return -1
+}
+
 // nextTargets returns a round-robin slice for a new client connection.
+//
+// 轮转只在 IP 成员里推进（primary 为空时退回全量）；回退序列仍按 ipAddresses
+// 的整体顺序展开，所以域名依旧排在 IP 之后作为兜底，不会被彻底摘掉。
 func (m *IPManager) nextTargets(port, count int) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -102,12 +135,17 @@ func (m *IPManager) nextTargets(port, count int) []string {
 	if count > len(m.ipAddresses) {
 		count = len(m.ipAddresses)
 	}
+	pool := m.rotatePool()
+	start := m.indexOf(pool[m.dispatchIndex%len(pool)])
+	if start < 0 {
+		start = 0
+	}
+	m.dispatchIndex = (m.dispatchIndex + 1) % len(pool)
 
 	ips := make([]string, count)
 	for i := range ips {
-		ips[i] = m.ipAddresses[(m.dispatchIndex+i)%len(m.ipAddresses)]
+		ips[i] = m.ipAddresses[(start+i)%len(m.ipAddresses)]
 	}
-	m.dispatchIndex = (m.dispatchIndex + count) % len(m.ipAddresses)
 	return generateTargets(ips, port)
 }
 
@@ -133,10 +171,18 @@ func (m *IPManager) assignLocked(clientHost string) int {
 	}
 	// 已有钉位：出口还在池里就继续用。这是换池时设备不跳线的关键——
 	// 补进来一个新成员不应该让所有正在看视频的设备同时换线。
+	//
+	// 例外：钉位落在域名上而池里还有 IP 时，本轮重新分配。升级前钉到域名的
+	// 设备会一直背着「先解析再连」的代价，不主动改钉位它就永远不会换回来。
+	pool := m.rotatePool()
+	pinnable := make(map[string]struct{}, len(pool))
+	for _, ip := range pool {
+		pinnable[ip] = struct{}{}
+	}
 	if target, ok := m.assignments[clientHost]; ok {
-		for i, ip := range m.ipAddresses {
-			if ip == target {
-				return i
+		if _, still := pinnable[target]; still {
+			if idx := m.indexOf(target); idx >= 0 {
+				return idx
 			}
 		}
 		delete(m.assignments, clientHost)
@@ -146,9 +192,9 @@ func (m *IPManager) assignLocked(clientHost string) int {
 		used[target] = struct{}{}
 	}
 	pick := -1
-	for offset := 0; offset < n; offset++ {
-		idx := (m.assignCursor + offset) % n
-		if _, taken := used[m.ipAddresses[idx]]; taken {
+	for offset := 0; offset < len(pool); offset++ {
+		idx := (m.assignCursor + offset) % len(pool)
+		if _, taken := used[pool[idx]]; taken {
 			continue
 		}
 		pick = idx
@@ -156,11 +202,15 @@ func (m *IPManager) assignLocked(clientHost string) int {
 	}
 	if pick < 0 {
 		// 设备比出口多，只能轮流复用；此时至少保证相邻设备不挤在同一个出口。
-		pick = m.assignCursor % n
+		pick = m.assignCursor % len(pool)
 	}
-	m.assignments[clientHost] = m.ipAddresses[pick]
-	m.assignCursor = (pick + 1) % n
-	return pick
+	target := pool[pick]
+	m.assignments[clientHost] = target
+	m.assignCursor = (pick + 1) % len(pool)
+	if idx := m.indexOf(target); idx >= 0 {
+		return idx
+	}
+	return 0
 }
 
 // repinClient 把一台设备的钉位改到一个刚刚拨通的出口上。
@@ -246,12 +296,15 @@ func main() {
 	Delay := flag.Int("delay", 300, "有效延迟（毫秒），超过此延迟将断开连接")
 	domain := flag.String("domain", "cloudflaremirrors.com/debian", "响应状态码检查的域名地址")
 	fixedIPs := flag.String("fixed", "", "固定转发目标：IP 或优选域名，多个用逗号分隔；留空时自动扫描")
+	fixedFile := flag.String("fixedfile", "", "固定转发目标清单文件（逗号或换行分隔）；每 5 秒检查一次改动并热更新，优先于 -fixed")
 	fallbackIPs := flag.String("fallback", "", "兜底目标（IP 或优选域名），仅在固定转发目标拨号失败时尝试；多个用逗号分隔")
 	priorityIPs := flag.String("priority", "", "兼容旧配置保留；数据面不再按优先 IP 加权")
 	ipCount := flag.Int("ipnum", 20, "提取的有效IP数量")
 	ipsType := flag.String("ips", "4", "指定生成IPv4还是IPv6地址 (4或6)")
 	num := flag.Int("num", 1, "单连接拨号失败时按顺序尝试的目标数量")
 	port := flag.Int("port", 443, "转发的目标端口")
+	altAddr := flag.String("addr2", "", "实验性第二监听地址（如 0.0.0.0:1235）；留空关闭")
+	altPort := flag.Int("port2", 0, "第二监听口转发的目标端口；0 表示沿用 -port")
 	random := flag.Bool("random", true, "是否随机生成IP，如果为false，则从CIDR中拆分出所有IP")
 	sticky := flag.Bool("sticky", true, "设备粘性：同一客户端 IP 恒定走同一上游，且不同设备尽量各占一个出口（拨号失败才顺延）")
 	maxThreads := flag.Int("task", 100, "并发请求最大协程数")
@@ -274,13 +327,122 @@ func main() {
 
 	log.Printf("正在监听 %s 并转发到 %d 个目标地址，有效延迟：%d ms", *localAddr, *num, *Delay)
 
+	// 单条客户端连接的接入逻辑抽出来，主监听口和实验性第二入口共用。
+	// 两个入口共享同一个 IPManager，因此设备粘性、轮换顺序和 fallback
+	// 完全一致；差别只在「拨号目标端口」。
+	acceptConn := func(conn net.Conn, targetPort int) {
+		clientAddr := conn.RemoteAddr().String()
+		atomic.AddInt32(&activeConnections, 1)
+		log.Printf("客户端来源: %s 连接建立，当前活跃连接数: %d", clientAddr, atomic.LoadInt32(&activeConnections))
+		// 多目标参数仅作为“失败时按顺序回退”，不再并发竞速，
+		// 从而保证一次前端逻辑连接只产生一个真实上游会话。
+		// 粘性模式：每台设备独占一个上游；拨号失败按序回退不变。
+		clientHost, _, _ := net.SplitHostPort(clientAddr)
+		var primary []string
+		if *sticky {
+			primary = ipManager.nextTargetsForClient(clientHost, targetPort, *num)
+		} else {
+			primary = ipManager.nextTargets(targetPort, *num)
+		}
+		var fallback []string
+		if fallbackManager != nil {
+			fallback = fallbackManager.nextTargets(targetPort, 1)
+		}
+		// 只有粘性模式下才纠正钉位：轮转模式本来就不该有「设备记忆」。
+		manager := ipManager
+		if !*sticky {
+			manager = nil
+		}
+		go handleConnection(conn, manager, clientHost, append(primary, fallback...), time.Duration(*Delay)*time.Millisecond)
+	}
+
+	if strings.TrimSpace(*altAddr) != "" {
+		altTargetPort := *altPort
+		if altTargetPort <= 0 || altTargetPort > 65535 {
+			altTargetPort = *port
+		}
+		altListener, err := net.Listen("tcp", *altAddr)
+		if err != nil {
+			log.Printf("无法监听第二入口 %s: %v（主入口继续运行）", *altAddr, err)
+		} else {
+			defer altListener.Close()
+			log.Printf("正在监听 %s 并转发到目标端口 %d（实验性第二入口）", *altAddr, altTargetPort)
+			go func() {
+				for {
+					if tcpListener, ok := altListener.(*net.TCPListener); ok {
+						_ = tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
+					}
+					conn, err := altListener.Accept()
+					if err != nil {
+						if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+							continue
+						}
+						if opErr, ok := err.(*net.OpError); ok && strings.Contains(opErr.Error(), "use of closed network connection") {
+							return
+						}
+						log.Printf("第二入口接受连接时发生错误: %v", err)
+						continue
+					}
+					acceptConn(conn, altTargetPort)
+				}
+			}()
+		}
+	}
+
+	// 固定目标的来源：优先 -fixedfile（可热更新），否则用 -fixed 的字面值。
+	fixedFileMode := strings.TrimSpace(*fixedFile) != ""
+	var appliedFixed string
+	readFixedSource := func() string {
+		if !fixedFileMode {
+			return *fixedIPs
+		}
+		b, err := os.ReadFile(*fixedFile)
+		if err != nil {
+			// 读不到就沿用上一份：一次读盘失败不该让转发目标凭空清空。
+			return appliedFixed
+		}
+		return strings.TrimSpace(string(b))
+	}
+	applyFixedTargets := func(raw string) error {
+		targets, err := parseFixedTargets(raw)
+		if err != nil {
+			return err
+		}
+		if len(targets) == 0 {
+			return fmt.Errorf("目标清单为空")
+		}
+		ipManager.SetIPAddresses(targets)
+		appliedFixed = raw
+		return nil
+	}
+	if fixedFileMode {
+		appliedFixed = readFixedSource()
+		if appliedFixed == "" {
+			// 清单可能比进程晚落地：等一会儿，但绝不因为读不到就退回官方段扫描。
+			for i := 0; i < 30 && appliedFixed == ""; i++ {
+				time.Sleep(time.Second)
+				appliedFixed = readFixedSource()
+			}
+			if appliedFixed == "" {
+				log.Fatalf("固定转发目标清单 %s 读不到内容，拒绝退回官方段扫描", *fixedFile)
+			}
+		}
+	}
+
 	for {
 		startTime := time.Now()
-		fixedMode := strings.TrimSpace(*fixedIPs) != ""
+		fixedRaw := readFixedSource()
+		fixedMode := strings.TrimSpace(fixedRaw) != ""
 		fallbackMode := strings.TrimSpace(*fallbackIPs) != ""
+		if fixedFileMode && !fixedMode {
+			// 文件模式下不存在「退回去自己扫描」这个选项：等清单恢复即可。
+			log.Printf("固定转发目标清单为空，3 秒后重试")
+			time.Sleep(3 * time.Second)
+			continue
+		}
 		var results []result
 		if fixedMode {
-			targets, parseErr := parseFixedTargets(*fixedIPs)
+			targets, parseErr := parseFixedTargets(fixedRaw)
 			if parseErr != nil {
 				log.Printf("固定转发目标配置无效: %v", parseErr)
 				time.Sleep(3 * time.Second)
@@ -302,7 +464,9 @@ func main() {
 					fallbackManager.SetIPAddresses(fbTargets)
 				}
 			}
-			log.Printf("使用 %d 个固定转发目标（IP 或优选域名），跳过官方段扫描", len(results))
+			fixedIPs, fixedDomains := countFixedKinds(results)
+			log.Printf("使用 %d 个固定转发目标（%d IP + %d 域名），跳过官方段扫描", len(results), fixedIPs, fixedDomains)
+			appliedFixed = strings.TrimSpace(fixedRaw)
 		} else {
 
 			// 使用函数处理 locations.json，确保 defer 正确执行
@@ -386,27 +550,31 @@ func main() {
 
 		// 应用数据中心筛选
 		if *coloFilter != "" && !fixedMode {
-			filters := strings.Split(*coloFilter, ",")
-			var filteredResults []result
-			for _, r := range results {
-				for _, filter := range filters {
-					if strings.EqualFold(r.dataCenter, filter) {
-						filteredResults = append(filteredResults, r)
-						break
-					}
-				}
+			results = applyColoFilter(results, *coloFilter)
+			if len(results) == 0 {
+				// 过滤后为空不能进 accept 循环：否则 SetIPAddresses(nil)
+				// 后每个连接都无上游可转、且永远不再重扫。
+				fmt.Println("数据中心筛选后无可用IP")
+				time.Sleep(3 * time.Second)
+				continue
 			}
-			results = filteredResults
 		}
 
-		// 按 TCP 延迟排序
-		sort.Slice(results, func(i, j int) bool {
+		// 按 TCP 延迟排序。必须用 Stable：fixed 模式下全部 tcpDuration
+		// 都是 0，不稳定排序会打乱用户指定的 -fixed 顺序，再经
+		// capFixedTargets 截断，留谁全凭运气；扫描模式下延迟相同也
+		// 应保持扫描顺序。
+		sort.SliceStable(results, func(i, j int) bool {
 			return results[i].tcpDuration < results[j].tcpDuration
 		})
 
 		// 只显示指定数量的 IP
 		if len(results) > *ipCount {
-			results = results[:*ipCount]
+			if fixedMode {
+				results = capFixedTargets(results, *ipCount)
+			} else {
+				results = results[:*ipCount]
+			}
 		}
 
 		fmt.Println("IP 地址 | 数据中心 | 地区 | 城市 | 延迟")
@@ -414,7 +582,11 @@ func main() {
 			fmt.Printf("%s | %s | %s | %s | %s\n", r.ip, r.dataCenter, r.region, r.city, r.latency)
 		}
 
-		fmt.Printf("成功提取 %d 个有效IP，耗时 %d秒\n", len(results), time.Since(startTime)/time.Second)
+		if domains := len(results) - countIPTargets(results); domains > 0 {
+			fmt.Printf("成功提取 %d 个有效IP + %d 个域名，耗时 %d秒\n", len(results)-domains, domains, time.Since(startTime)/time.Second)
+		} else {
+			fmt.Printf("成功提取 %d 个有效IP，耗时 %d秒\n", len(results), time.Since(startTime)/time.Second)
+		}
 
 		// 设置 IP 地址列表
 		var ips []string
@@ -424,6 +596,12 @@ func main() {
 		ipManager.SetIPAddresses(ips)
 		if priorities, err := parseFixedTargets(*priorityIPs); err == nil {
 			ipManager.SetPriorityIPs(priorities)
+		}
+
+		// 清单文件一旦就位，转发目标就交给守护协程维护：换池时只改文件，
+		// 由这条协程热更新，不再走「杀进程重来」那条把在途连接全掐断的路。
+		if fixedFileMode && fixedMode {
+			startFixedFileWatcher(*fixedFile, appliedFixed, applyFixedTargets)
 		}
 
 		// CFnat 数据面只负责在新 TCP 连接建立时轮换 IP。
@@ -445,44 +623,28 @@ func main() {
 				continue
 			}
 
-			clientAddr := conn.RemoteAddr().String()
-			atomic.AddInt32(&activeConnections, 1)
-			log.Printf("客户端来源: %s 连接建立，当前活跃连接数: %d", clientAddr, atomic.LoadInt32(&activeConnections))
-			// 多目标参数仅作为“失败时按顺序回退”，不再并发竞速，
-			// 从而保证一次前端逻辑连接只产生一个真实上游会话。
-			// 粘性模式：每台设备独占一个上游；拨号失败按序回退不变。
-			clientHost, _, _ := net.SplitHostPort(clientAddr)
-			var primary []string
-			if *sticky {
-				primary = ipManager.nextTargetsForClient(clientHost, *port, *num)
-			} else {
-				primary = ipManager.nextTargets(*port, *num)
-			}
-			var fallback []string
-			if fallbackManager != nil {
-				fallback = fallbackManager.nextTargets(*port, 1)
-			}
-			// 只有粘性模式下才纠正钉位：轮转模式本来就不该有「设备记忆」。
-			manager := ipManager
-			if !*sticky {
-				manager = nil
-			}
-			go handleConnection(conn, manager, clientHost, append(primary, fallback...), time.Duration(*Delay)*time.Millisecond)
+			acceptConn(conn, *port)
 		}
 	}
 }
 
 // loadLocations 加载位置信息，使用函数封装确保 defer 正确执行
+// httpGetClient 给裸 http.Get 加 10 秒超时：远端挂住时启动不再无限等。
+var httpGetClient = &http.Client{Timeout: 10 * time.Second}
+
 func loadLocations() ([]location, error) {
 	var locations []location
 
 	if _, err := os.Stat("locations.json"); os.IsNotExist(err) {
 		fmt.Println("本地 locations.json 不存在\n正在从 https://www.baipiao.eu.org/cloudflare/locations 下载 locations.json")
-		resp, err := http.Get("https://www.baipiao.eu.org/cloudflare/locations")
+		resp, err := httpGetClient.Get("https://www.baipiao.eu.org/cloudflare/locations")
 		if err != nil {
 			return nil, fmt.Errorf("无法从URL中获取JSON: %v", err)
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("下载 locations.json 失败，状态码: %d", resp.StatusCode)
+		}
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
@@ -526,11 +688,27 @@ func loadLocations() ([]location, error) {
 }
 
 // scanIPs 扫描 IP 列表并返回结果
+// clampThreads 把用户传的并发数钳到 [1,1000]，越界时打印提示并回落。
+func clampThreads(n int, flagName string) int {
+	if n < 1 {
+		fmt.Printf("-%s %d 无效，并发数钳到 1\n", flagName, n)
+		return 1
+	}
+	if n > 1000 {
+		fmt.Printf("-%s %d 过大，并发数钳到 1000\n", flagName, n)
+		return 1000
+	}
+	return n
+}
+
 func scanIPs(ipList []string, locationMap map[string]location, maxThreads int) []result {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var results []result
 
+	// -task 0 或负数会让 make(chan,<=0) 后第一次发送即永久阻塞；
+	// 上限 1000 防手滑把并发打爆。
+	maxThreads = clampThreads(maxThreads, "task")
 	thread := make(chan struct{}, maxThreads)
 
 	var count int32
@@ -620,7 +798,7 @@ func scanIPs(ipList []string, locationMap map[string]location, maxThreads int) [
 
 // 获取URL内容
 func getURLContent(url string) (string, error) {
-	resp, err := http.Get(url)
+	resp, err := httpGetClient.Get(url)
 	if err != nil {
 		return "", err
 	}
@@ -677,7 +855,11 @@ func parseIPList(content string) []string {
 func parseFixedTargets(value string) ([]string, error) {
 	seen := make(map[string]struct{})
 	var targets []string
-	for _, raw := range strings.Split(value, ",") {
+	// 逗号是老写法，换行是清单文件（-fixedfile）的写法：两种都得认。
+	// 主机名里不可能出现空白，按空白切分不会误伤。
+	for _, raw := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	}) {
 		target := strings.TrimSpace(raw)
 		if target == "" {
 			continue
@@ -698,6 +880,53 @@ func parseFixedTargets(value string) ([]string, error) {
 		return nil, fmt.Errorf("至少需要一个固定 IP 或域名")
 	}
 	return targets, nil
+}
+
+// countFixedKinds 分别统计固定目标里的 IP 与域名数量。
+func countFixedKinds(results []result) (ips, domains int) {
+	for _, r := range results {
+		if net.ParseIP(r.ip) == nil {
+			domains++
+		} else {
+			ips++
+		}
+	}
+	return ips, domains
+}
+
+// countIPTargets 统计列表里真正的 IP 条数（域名不计）。
+func countIPTargets(results []result) int {
+	n := 0
+	for _, r := range results {
+		if net.ParseIP(r.ip) != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// capFixedTargets 把 IP 数量限制在 limit 以内，域名全部保留。
+//
+// 固定模式下 -fixed 同时带 IP 和域名，-ipnum 的语义是「取多少个有效 IP」，
+// 不是「整个目标列表最多几项」。旧实现直接 results[:ipCount]，排序对全为 0
+// 的固定目标又不稳定，域名会被任意截掉——IP 池一空，域名也跟着消失。
+func capFixedTargets(results []result, limit int) []result {
+	if limit < 0 {
+		limit = 0
+	}
+	out := make([]result, 0, len(results))
+	ips := 0
+	for _, r := range results {
+		if net.ParseIP(r.ip) == nil {
+			out = append(out, r)
+			continue
+		}
+		if ips < limit {
+			out = append(out, r)
+			ips++
+		}
+	}
+	return out
 }
 
 // validForwardHostname 校验可作为转发目标的域名：仅 ASCII、含点、逐标签合法。
@@ -741,7 +970,9 @@ func nextRandomIntn(n int) int {
 	return randomGenerator.Intn(n)
 }
 
-// 从每个/24子网随机提取一个IPv4
+// 从每个/24子网随机提取一个IPv4。非法输入直接跳过：旧写法只按 "."
+// 切分，`1.2.3.4.5/24` 会拼出 5 段非法地址，`/16` 后缀去不掉也
+// 会原样残留；且末段可取 .0（网络地址）与 .255（广播地址）。
 func getRandomIPv4s(ipList []string) []string {
 	var randomIPs []string
 	for _, subnet := range ipList {
@@ -750,18 +981,31 @@ func getRandomIPv4s(ipList []string) []string {
 		if subnet == "" {
 			continue
 		}
-		baseIP := strings.TrimSuffix(subnet, "/24")
-		octets := strings.Split(baseIP, ".")
-		if len(octets) >= 4 {
-			octets[3] = fmt.Sprintf("%d", nextRandomIntn(256))
-			randomIP := strings.Join(octets, ".")
-			randomIPs = append(randomIPs, randomIP)
+		ip, ipnet, err := net.ParseCIDR(subnet)
+		if err != nil {
+			continue
 		}
+		ones, bits := ipnet.Mask.Size()
+		if bits != 32 || ones != 24 {
+			continue
+		}
+		ip4 := ip.To4()
+		if ip4 == nil {
+			continue
+		}
+		out := make(net.IP, net.IPv4len)
+		copy(out, ip4)
+		// 主机段取 1..254，避开 .0 网络地址与 .255 广播地址。
+		out[3] = byte(1 + nextRandomIntn(254))
+		randomIPs = append(randomIPs, out.String())
 	}
 	return randomIPs
 }
 
 // 从每个/48子网随机提取一个IPv6
+// 从每个/48子网随机提取一个IPv6（保留前三组）。旧写法按 ":" 切分，
+// `2400::/48` 这类压缩写法会切出空段，拼出 `2400:::` 非法地址；
+// 非十六进制段也不校验。
 func getRandomIPv6s(ipList []string) []string {
 	var randomIPs []string
 	for _, subnet := range ipList {
@@ -770,19 +1014,50 @@ func getRandomIPv6s(ipList []string) []string {
 		if subnet == "" {
 			continue
 		}
-		baseIP := strings.TrimSuffix(subnet, "/48")
-		sections := strings.Split(baseIP, ":")
-		if len(sections) >= 3 {
-			sections = sections[:3]
-			for i := 3; i < 8; i++ {
-				sections = append(sections, fmt.Sprintf("%x", nextRandomIntn(65536)))
-			}
-			randomIP := strings.Join(sections, ":")
-			randomIPs = append(randomIPs, randomIP)
+		_, ipnet, err := net.ParseCIDR(subnet)
+		if err != nil {
+			continue
 		}
+		ones, bits := ipnet.Mask.Size()
+		if bits != 128 || ones != 48 {
+			continue
+		}
+		ip16 := ipnet.IP.To16()
+		if ip16 == nil {
+			continue
+		}
+		out := make(net.IP, net.IPv6len)
+		copy(out, ip16)
+		for i := 6; i < net.IPv6len; i++ {
+			out[i] = byte(nextRandomIntn(256))
+		}
+		randomIPs = append(randomIPs, out.String())
 	}
 	return randomIPs
 }
+
+// applyColoFilter 按数据中心（逗号分隔，忽略大小写）筛选扫描结果。
+func applyColoFilter(results []result, coloFilter string) []result {
+	filters := strings.Split(coloFilter, ",")
+	var filtered []result
+	for _, r := range results {
+		for _, filter := range filters {
+			if strings.EqualFold(r.dataCenter, filter) {
+				filtered = append(filtered, r)
+				break
+			}
+		}
+	}
+	return filtered
+}
+
+// readIPs 展开上限：单个 CIDR 最多 65536 个地址（/16），整文件最多
+// 262144 条。再大不是“候选列表”，是直接把内存和扫描时间撑爆——
+// IPv6 /48 展开是 2^80 个地址，旧代码会在这个循环里跑到天荒地老。
+const (
+	maxCIDRExpansion = 65536
+	maxReadIPsTotal  = 262144
+)
 
 // 从CIDR中拆分出所有IP
 func readIPs(filename string) ([]string, error) {
@@ -805,12 +1080,20 @@ func readIPs(filename string) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
+			// 先算再展开：掩码位数直接决定展开规模，IPv6 大前缀
+			// 不经此检查会把循环跑到天荒地老。
+			if ones, bits := ipNet.Mask.Size(); bits-ones > 16 {
+				return nil, fmt.Errorf("CIDR %s 展开超过 %d 个地址", line, maxCIDRExpansion)
+			}
 			// 使用新变量避免遮蔽
 			for currentIP := ipAddr.Mask(ipNet.Mask); ipNet.Contains(currentIP); incrementIP(currentIP) {
 				ips = append(ips, currentIP.String())
 			}
 		} else {
 			ips = append(ips, line)
+		}
+		if len(ips) > maxReadIPsTotal {
+			return nil, fmt.Errorf("IP 文件展开超过 %d 条", maxReadIPsTotal)
 		}
 	}
 
@@ -843,58 +1126,6 @@ func generateTargets(ips []string, port int) []string {
 	return targets
 }
 
-func checkValidIP(ip string, port int, useTLS bool, domain string, code int) bool {
-	address := ip
-	if strings.Contains(ip, ":") {
-		address = fmt.Sprintf("[%s]", ip)
-	}
-	targetURL := fmt.Sprintf("http://%s", domain)
-	if useTLS {
-		targetURL = fmt.Sprintf("https://%s", domain)
-	}
-
-	cacheKey := fmt.Sprintf("%s:%d", address, port)
-	clientAny, loaded := validIPClientCache.Load(cacheKey)
-	var client *http.Client
-	if loaded {
-		client = clientAny.(*http.Client)
-	} else {
-		transport := &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				log.Printf("尝试连接 IP: %s 端口: %d", ip, port)
-				dialer := &net.Dialer{Timeout: 2 * time.Second}
-				return dialer.DialContext(ctx, network, fmt.Sprintf("%s:%d", address, port))
-			},
-		}
-		newClient := &http.Client{
-			Timeout:   2 * time.Second,
-			Transport: transport,
-		}
-		actual, _ := validIPClientCache.LoadOrStore(cacheKey, newClient)
-		client = actual.(*http.Client)
-	}
-
-	log.Printf("向 URL %s 发送请求以检查 IP %s 是否有效", targetURL, ip)
-	resp, err := client.Get(targetURL)
-	if err != nil {
-		log.Printf("检查 IP %s 时发生错误: %v", ip, err)
-		return false
-	}
-	defer resp.Body.Close()
-
-	log.Printf("IP %s 的检查响应状态码: %d", ip, resp.StatusCode)
-
-	isValid := resp.StatusCode == code
-	if isValid {
-		log.Printf("IP %s 是有效的", ip)
-	} else {
-		log.Printf("IP %s 不是有效的", ip)
-	}
-
-	return isValid
-}
-
 // 处理客户端连接；仅在拨号失败时按顺序尝试下一个地址。
 // manager/clientHost 用于钉位纠正：钉住的出口拨不通、回退到别的成员并拨通时，
 // 把该设备的钉位改到真正拨通的那个，别让它下一条连接再去撞同一堵墙。
@@ -915,6 +1146,52 @@ func handleConnection(conn net.Conn, manager *IPManager, clientHost string, forw
 // 日志里带客户端地址是有意为之：控制台的「设备名册」靠这一行把「哪台设备
 // 现在走哪个出口」对上号。cfnat 是四层哑管道，/proc 里只看到两个互不相干的
 // socket，唯一能把它们连起来的证据就是这里打出来的这条记录。
+// fixedFilePollInterval 是清单文件的检查间隔。
+//
+// 5 秒是「换池延迟」与「无谓读盘」的折中：调度器换池一轮本来就要几十秒，
+// 5 秒的滞后用户感知不到；而 5 秒一次 stat+read 对一个几 KB 的文件可以忽略。
+const fixedFilePollInterval = 5 * time.Second
+
+// startFixedFileWatcher 盯着 -fixedfile，内容一变就热更新转发目标。
+//
+// 为什么不用「重启 cfnat」来换池：进程是唯一数据面，重启会把在途连接全部
+// 掐断（2026-11 生产实测每次 40–47 条），而一轮换池通常只是替换一两个成员。
+// 热更新只换目标清单，IPManager 的钉位表里仍在新池的设备保持原样，其余设备
+// 按新池重新分配，连接一条都不用断。
+func startFixedFileWatcher(path, initial string, apply func(string) error) {
+	go func() {
+		current := initial
+		ticker := time.NewTicker(fixedFilePollInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			next := strings.TrimSpace(string(raw))
+			if next == "" || next == current {
+				continue
+			}
+			if err := apply(next); err != nil {
+				// 坏清单不覆盖好清单：保持上一份继续转发，等下一次写入。
+				log.Printf("固定转发目标热更新失败（继续用上一份清单）: %v", err)
+				continue
+			}
+			current = next
+			targets, _ := parseFixedTargets(next)
+			ips, domains := 0, 0
+			for _, t := range targets {
+				if net.ParseIP(t) != nil {
+					ips++
+				} else {
+					domains++
+				}
+			}
+			log.Printf("固定转发目标热更新：%d 个成员（%d IP + %d 域名）", len(targets), ips, domains)
+		}
+	}()
+}
+
 func handleConnectionWithDial(conn net.Conn, forwardAddrs []string, dial func(context.Context, string, string) (net.Conn, error)) {
 	clientHost, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	defer func() {
@@ -944,6 +1221,12 @@ func handleConnectionWithDial(conn net.Conn, forwardAddrs []string, dial func(co
 	log.Printf("未找到可用的转发连接: %v", lastErr)
 }
 
+// pipeIdleTimeout 任一方向无流量超过此时长即断开：半开/装死的连接
+// 否则会永远占着两个 goroutine、两个 FD 与一个 activeConnections
+// 计数。10 分钟——内层协议自带心跳，真空闲这么久就是死了。
+// 变量而非常量，供测试收窄。
+var pipeIdleTimeout = 10 * time.Minute
+
 func pipeConnections(src, dst net.Conn) {
 	var wg sync.WaitGroup
 	var closeOnce sync.Once
@@ -958,15 +1241,41 @@ func pipeConnections(src, dst net.Conn) {
 
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(src, dst)
+		_, _ = copyWithIdleTimeout(src, dst, pipeIdleTimeout)
 		closeBoth()
 	}()
 
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(dst, src)
+		_, _ = copyWithIdleTimeout(dst, src, pipeIdleTimeout)
 		closeBoth()
 	}()
 
 	wg.Wait()
+}
+
+// copyWithIdleTimeout 从 src 拷到 dst，每次读前刷新 src 的读 deadline。
+// 对端握手完就装死时，读超时即返回，不再无限占槽。
+func copyWithIdleTimeout(dst io.Writer, src net.Conn, timeout time.Duration) (int64, error) {
+	buf := make([]byte, 32*1024)
+	var written int64
+	for {
+		if err := src.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+			return written, err
+		}
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[:nr])
+			written += int64(nw)
+			if ew != nil {
+				return written, ew
+			}
+			if nw != nr {
+				return written, io.ErrShortWrite
+			}
+		}
+		if er != nil {
+			return written, er
+		}
+	}
 }

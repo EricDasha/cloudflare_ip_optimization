@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -256,7 +257,14 @@ func (a *app) throneNextDelay() time.Duration {
 //
 // 常态轮次摸全池；存在「快速复检」待办时只摸那几个嫌疑成员——整池每 2 分钟
 // 扫一遍既没必要，也会让高频节拍变成真实负载。
-func (a *app) probeThroneOnce(parent context.Context) {
+func (a *app) probeThroneOnce(_ context.Context) {
+	if a.manualScanPending() {
+		return
+	}
+	bgCtx, ok := a.backgroundScanContext()
+	if !ok {
+		return
+	}
 	current := a.proxyActivePoolSnapshot()
 	// 只摸真正参与转发的成员。被用户关闭的成员不进 -fixed，它们由
 	// disabled_bench.go 单独体检（延迟 + 下载速度）并决定去留；让这条链
@@ -275,19 +283,23 @@ func (a *app) probeThroneOnce(parent context.Context) {
 		return
 	}
 	cfg.Concurrency = 4
-	// 单次探测超时必须高于「慢」阈值，否则慢成员会先被超时打断、记成失败，
-	// 于是「慢」这一档永远测不出来——那正是我们要抓的那批人。
-	cfg.MaxLatency = int(throneProbeSlowMs()) + 500
-	if cfg.MaxLatency < 1500 {
-		cfg.MaxLatency = 1500
-	}
-	if cfg.MaxLatency > 3000 {
-		cfg.MaxLatency = 3000
-	}
+	cfg.MaxLatency = throneProbeMaxLatencyMs()
 	targets := a.throneProbeTargets(members)
-	ctx, cancel := context.WithTimeout(parent, 40*time.Second)
+	// 整轮预算要盖得住「每个目标都摸到慢阈值」的最坏情况，否则排在尾部的那批
+	// 目标会在 ctx 已经到期后才开跑，连一个字节都没发出去就被记成失败——这和
+	// 2026-11-11 域名成批误判是同一个病：预算不够被当成了「成员死了」。
+	budget := 40 * time.Second
+	if need := time.Duration(len(targets)/cfg.Concurrency+1) * time.Duration(cfg.MaxLatency) * time.Millisecond; need > budget {
+		budget = need
+	}
+	ctx, cancel := context.WithTimeout(bgCtx, budget)
 	defer cancel()
 	results := scanProxyWebSockets(ctx, targets, cfg)
+	if ctx.Err() != nil {
+		// 用户操作抢占导致的取消不能记成成员失败，否则会把健康成员误判死。
+		log.Printf("throne probe canceled by manual operation: %v", ctx.Err())
+		return
+	}
 	now := time.Now()
 	a.recordThroneProbeResults(results, now)
 	a.reapThroneMembers(current, now)
@@ -307,6 +319,19 @@ func (a *app) throneProbeTargets(members []string) []string {
 		return members
 	}
 	return suspects
+}
+
+// throneResultIsTimeout 判断一条探测失败是否属于「只是慢了」——超时/截止时间到。
+//
+// 用 ErrorClass 为首要判据（分类逻辑集中在 classifyProbeError），文本匹配只兜底：
+// 有些超时来自 context 包装，分类未必落到 timeout 上。硬失败（403/拒绝/重置/
+// 证书不对）一律返回 false，它们该走正常的连败计数。
+func throneResultIsTimeout(r proxyScanResult) bool {
+	if r.ErrorClass == failureTimeout {
+		return true
+	}
+	msg := strings.ToLower(r.Error)
+	return strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded")
 }
 
 // recordThroneProbeResults 把本轮成绩记入验活账本，并给嫌疑成员排上快速复检。
@@ -335,6 +360,23 @@ func (a *app) recordThroneProbeResults(results []proxyScanResult, now time.Time)
 			} else {
 				st.SlowStrikes = 0
 			}
+		} else if net.ParseIP(r.IP) == nil && throneResultIsTimeout(r) {
+			// 域名只认硬失败（拒绝/重置/状态码非 101/证书不对）。
+			//
+			// 2026-11-11 线上事故：29 个域名在同一轮被判死全部摘除，池子从 31 掉到 7，
+			// cfnat 随即重启。事后在 NAS 上逐个手工握手，那 29 个里 24 个正常返回 101，
+			// 只是耗时 1.5–2.1s；而本轮的握手预算 = slowMs+500 = 2000ms。域名走
+			// SNI 复用到同一个 Worker，天然比直连 IP 慢一档，被这 2 秒卡在了门槛外。
+			//
+			// 判死一个域名要重启一次 cfnat、断掉全部在途连接，代价与「一个慢域名多花
+			// 几百毫秒拨号」完全不对等。真死的域名由 30 分钟一轮的域名体检负责摘除
+			// （domain-quality.json，TCP + VLESS 三轮取样，dead 状态进闸门过滤），
+			// 那条链有足够样本量，不会因为一次 2 秒超时就把人赶走。
+			//
+			// 超时仍按「慢」记账，页面看得见，只是不触发处置。
+			st.SlowStrikes++
+			st.LastError = r.Error
+			st.LastLatencyMs = r.Latency
 		} else {
 			st.ConsecutiveFailures++
 			st.SlowStrikes = 0
@@ -381,7 +423,7 @@ func (a *app) reapThroneMembers(current proxyActivePool, now time.Time) {
 		}
 	}
 	// 域名没有「就地换人」这一说：域名死了就是下线进观察期，不找替身。
-	replacements, scanned := a.findThroneReplacements(ipVictims, current)
+	replacements, replacementResults, scanned := a.findThroneReplacements(ipVictims, current)
 	var deferred []string
 	if len(ipVictims) > 0 && !scanned {
 		// 「没考成」不等于「没替补」。这一轮扫描锁被别人占着（全量重挑、手动扫描
@@ -476,6 +518,9 @@ func (a *app) reapThroneMembers(current proxyActivePool, now time.Time) {
 		}
 		next.Results = keptResults
 	}
+	// 替补的握手成绩必须随成员一起进池：否则页面上新成员没有延迟/机房，
+	// 前端 isActiveMember 也会在质量调度抽样前把它当成非活跃成员。
+	next.Results = mergePoolResults(next.IPs, next.Results, replacementResults)
 
 	if len(removed) == 0 {
 		// 全员暂留：不动池子、不重启 cfnat，只把「暂留」写进账本并清掉复检标记，
@@ -490,15 +535,22 @@ func (a *app) reapThroneMembers(current proxyActivePool, now time.Time) {
 		a.markThroneHeld(held, now)
 		return
 	}
+	if err := a.applyPoolLocked(next, fresh); err != nil {
+		a.setThroneProbeError("在位验活换池失败: " + err.Error())
+		a.markThroneHeld(held, now)
+		return
+	}
+	// 隔离必须发生在换池成功之后：换池失败时成员还在原位，先写 1 小时
+	// 冷静期会让内存里的隔离态与实际转发状态脱节。
 	for _, domain := range removed {
 		if net.ParseIP(domain) == nil {
 			a.quarantineDomain(domain, now.Add(domainQuarantine))
 		}
 	}
-	if err := a.applyPoolLocked(next, fresh); err != nil {
-		a.setThroneProbeError("在位验活换池失败: " + err.Error())
-		a.markThroneHeld(held, now)
-		return
+	for _, ip := range removed {
+		if net.ParseIP(ip) != nil {
+			a.removeCandidateIP(ip)
+		}
 	}
 	a.markPoolSwitched(next.UpdatedAt)
 	// 已下线的成员不再占账本；暂留的照旧留着，下一轮还会被重新评估。
@@ -610,20 +662,28 @@ func (a *app) markThroneHeld(members []string, now time.Time) {
 //
 // 配置缺失（Host/Path 空）算 true：那是配置问题，不是资源竞争，排复检只会
 // 让系统每 2 分钟白摸一次。
-func (a *app) findThroneReplacements(victims []string, current proxyActivePool) (map[string]string, bool) {
+func (a *app) findThroneReplacements(victims []string, current proxyActivePool) (map[string]string, []proxyScanResult, bool) {
 	if len(victims) == 0 {
-		return nil, true
+		return nil, nil, true
 	}
 	cfg := defaultProxyAutoConfig()
 	if cfg.Host == "" || cfg.Path == "" {
-		return nil, true
+		return nil, nil, true
 	}
 	// 替补考试是网络活，必须在拿换池锁之前完成（锁序见函数头注释）。
 	if !lockTimeout(&a.proxyScanMu, 30*time.Second) {
 		log.Printf("throne probe: replacement scan skipped, proxy scan busy")
-		return nil, false
+		return nil, nil, false
 	}
 	defer a.proxyScanMu.Unlock()
+	if a.manualScanPending() {
+		return nil, nil, false
+	}
+	bgCtx, ok := a.backgroundScanContext()
+	if !ok {
+		return nil, nil, false
+	}
+	defer a.noteScanActivity("throne", "替补考试")()
 	snapshot := a.proxyCandidateSnapshot()
 	inPool := make(map[string]bool, len(current.IPs))
 	for _, ip := range current.IPs {
@@ -641,7 +701,7 @@ func (a *app) findThroneReplacements(victims []string, current proxyActivePool) 
 		pending = append(pending, ip)
 	}
 	if len(pending) == 0 {
-		return nil, true
+		return nil, nil, true
 	}
 	ceiling := poolEntryMaxLatencyMs()
 	scanCfg := cfg
@@ -650,9 +710,12 @@ func (a *app) findThroneReplacements(victims []string, current proxyActivePool) 
 	if scanCfg.MaxLatency < 500 {
 		scanCfg.MaxLatency = 500
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(bgCtx, 90*time.Second)
 	defer cancel()
 	results := scanProxyWebSockets(ctx, pending, scanCfg)
+	if ctx.Err() != nil {
+		return nil, nil, false
+	}
 	applyCandidateSourcePriority(results, snapshot.SourceByIP)
 	fast := make([]string, 0, need)
 	for _, result := range results {
@@ -663,7 +726,7 @@ func (a *app) findThroneReplacements(victims []string, current proxyActivePool) 
 	}
 	if len(fast) == 0 {
 		log.Printf("throne probe: %d candidates scanned, none under the %dms entry ceiling", len(pending), ceiling)
-		return nil, true
+		return nil, nil, true
 	}
 	fast = orderPassedByColoPreference(fast, results, poolColoPreferenceSet())
 	fast = orderPassedBySegmentHealth(fast, results)
@@ -671,7 +734,7 @@ func (a *app) findThroneReplacements(victims []string, current proxyActivePool) 
 	if len(unresolved) > 0 {
 		log.Printf("throne probe: no qualified replacement for %v (%d candidates passed the gate)", unresolved, len(fast))
 	}
-	return picked, true
+	return picked, results, true
 }
 
 // pruneThroneLedger 把验活账本收窄到当前转发成员。

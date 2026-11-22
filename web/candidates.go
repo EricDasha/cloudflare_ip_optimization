@@ -366,10 +366,13 @@ var proxyCandidateSources = map[string]proxyCandidateSource{
 			// `error code: 1034`（Cloudflare 跨账户 CNAME 被封），该域已废。
 			// GitHub 原始列表。
 			// 2026-10-22 复测（NAS，单源 6s、26 源并发）：命中率 94%~100%，
-			// 是全部渠道里质量最高的一批，不可删。此前日志里的 6 条
-			// `context deadline` 是 30s 总预算把并发批次一起判死所致，
-			// 已把 refreshProxyCandidates 的总超时放宽到 90s。
-			"https://raw.githubusercontent.com/Senflare/Senflare-IP/main/IPlist-Pro.txt",          // 29/29
+			// 是全部渠道里质量最高的一批。此前日志里的 6 条 `context deadline`
+			// 有两层原因：30s 总预算把并发批次一起判死（已放宽到 90s），
+			// 以及 Go 默认 Transport 优先走 IPv6，而 NAS 的 IPv6 出口到
+			// raw.githubusercontent.com 不通（fetchHTTPSBody 已改为强制 tcp4）。
+			//
+			// 2026-11-15 复测：六条里只有 Senflare 真死（NAS 顺序 curl 12s
+			// 超时、无响应），已移除；其余五条均 200（0.5~1.6s），保留。
 			"https://raw.githubusercontent.com/einsitang/my-fast-cf-ip/master/fastips.txt",        // 20/20
 			"https://raw.githubusercontent.com/yuanxiawan/cfipv4db/main/cfip.txt",                 // 15/16
 			"https://raw.githubusercontent.com/gshtwy/CF-DNS-Clone/main/wetest-cloudflare-v4.txt", // 14/14
@@ -434,16 +437,23 @@ func applyCandidateSourcePriority(results []proxyScanResult, sourceByIP map[stri
 	for i := range results {
 		results[i].SourceRank = rank(results[i].IP)
 	}
+	// 来源只做同分裁决，不再压过延迟。
+	//
+	// 2026-11-15 线上故障：shortlist 只有 60 个名额，这里原先按
+	// user → cfdata → subscription → bestcf 排序，于是 cfdata 的 250 个候选
+	// 即使握手 550~722ms 也全部排在 bestcf 的 10~20 Mbps 候选之前；bestcf
+	// 连进 WS 终审的机会都没有，生效池里自然一个 bestcf 成员都看不到。
+	// 注释本来就写着「来源决定什么时候测，不决定性能排名」——现在让代码
+	// 与这句话一致：先按延迟取最快的 60 个，来源只在延迟相同时分先后。
 	sort.SliceStable(results, func(i, j int) bool {
 		leftOK, rightOK := results[i].Error == "", results[j].Error == ""
 		if leftOK != rightOK {
 			return leftOK
 		}
-		leftRank, rightRank := results[i].SourceRank, results[j].SourceRank
-		if leftRank != rightRank {
-			return leftRank < rightRank
+		if results[i].Latency != results[j].Latency {
+			return results[i].Latency < results[j].Latency
 		}
-		return results[i].Latency < results[j].Latency
+		return results[i].SourceRank < results[j].SourceRank
 	})
 }
 
@@ -459,6 +469,9 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 	// 复测：单源 6s 超时、26 源并发，全部成功；故总预算放宽到 90s。
 	ctx, cancel := context.WithTimeout(parent, 90*time.Second)
 	defer cancel()
+	// 先按台账规则判一次死，再开始灌候选。放在灌入之前是刻意的：本轮新判死
+	// 的地址立刻就不占名额，不必再等六个小时到下一轮。
+	a.evaluateStale(time.Now())
 	resolved := make([]string, 0, candidatePoolTotalCap)
 	sourceByIP := make(map[string]string)
 	sourceErrors := []string{}
@@ -489,6 +502,12 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 			key := ip.To4().String()
 			if !isCloudflareIPv4(ip) {
 				offEdgeCount++
+			}
+			// 台账已判死的地址不再占名额。判据是「见过足够多轮、考过足够多次、
+			// 一次都没把流量送到过」，与「像不像 CF 官方段」无关——这条闸只拦
+			// 事实上的死重，不拦第三方反代。
+			if a.ledgerExcluded(key) {
+				continue
 			}
 			if _, ok := sourceByIP[key]; ok {
 				continue
@@ -552,6 +571,10 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 	forwardDomains := a.fetchBestcfForwardDomains(ctx)
 	if len(forwardDomains) == 0 {
 		sourceErrors = append(sourceErrors, "BestCF 优选域名表: 本次未获取到域名")
+		// 与 IP 为空分支同一口径：只记 error，沿用旧快照的域名，不清空。
+		// 目前因静态表 bestcfExtraForwardDomains 恒有 2 条而不可达，
+		// 是静态表被改空时的防线。
+		forwardDomains = a.proxyCandidateSnapshot().ForwardDomains
 	}
 	seen := make(map[string]struct{})
 	ips := make([]string, 0, len(resolved))
@@ -597,9 +620,11 @@ func (a *app) refreshProxyCandidates(parent context.Context) (bool, error) {
 	a.candidateMu.Lock()
 	a.candidates = snapshot
 	a.candidateMu.Unlock()
-	if err := a.saveProxyCandidateCache(snapshot); err != nil {
+	if err := a.persistCandidates(); err != nil {
 		log.Printf("save proxy candidate cache: %v", err)
 	}
+	// 记一轮台账：这些地址各自被哪个渠道供出。下一轮的淘汰判定靠它。
+	a.observeCandidateRound(sourceByIP)
 	log.Printf("proxy candidate cache refreshed: %d IPv4, next=%s", len(ips), snapshot.NextRefresh.Format(time.RFC3339))
 	return true, nil
 }
@@ -647,6 +672,13 @@ func filterPoolAdmissibleIPs(passed []string) ([]string, []string) {
 func (a *app) proxyCandidateSnapshot() proxyCandidateSnapshot {
 	a.candidateMu.RLock()
 	defer a.candidateMu.RUnlock()
+	return a.proxyCandidateSnapshotLocked()
+}
+
+// proxyCandidateSnapshotLocked 与 proxyCandidateSnapshot 等价，但要求调用方
+// 已持有 candidateMu（读锁或写锁）。写路径需要「深拷贝 → 原地修改副本」时
+// 用它，避免解锁后落盘与并发写共享同一底层 map。
+func (a *app) proxyCandidateSnapshotLocked() proxyCandidateSnapshot {
 	snapshot := a.candidates
 	snapshot.Sources = append([]string(nil), snapshot.Sources...)
 	snapshot.IPs = append([]string(nil), snapshot.IPs...)
@@ -698,15 +730,29 @@ func (a *app) saveProxyCandidateCache(snapshot proxyCandidateSnapshot) error {
 		return err
 	}
 	path := filepath.Join(a.dataDir, proxyCandidateCacheFile)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeFileAtomic(path, data, 0644)
+}
+
+// persistCandidates 把当前内存态写成候选缓存。
+//
+// 调用方通常在「取快照 → 改副本 → 解锁」之后落盘，直接传旧 snapshot 会
+// 把较旧的状态写回磁盘。这里重新取一次最新快照；candidateSaveMu 串行化
+// 写入，配合 writeFileAtomic 的唯一临时文件，并发保存不再互相截断。
+func (a *app) persistCandidates() error {
+	snapshot := a.proxyCandidateSnapshot()
+	a.candidateSaveMu.Lock()
+	defer a.candidateSaveMu.Unlock()
+	return a.saveProxyCandidateCache(snapshot)
 }
 
 func isPublicIPv4(ip net.IP) bool {
 	return ip != nil && ip.To4() != nil && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsUnspecified() && !ip.IsMulticast() && !ip.IsLinkLocalUnicast()
+}
+
+// isPublicIPv6 与 isPublicIPv4 同口径的公网 IPv6 判定：To4() != nil 的
+// IPv4 映射地址不算 IPv6（由 isPublicIPv4 覆盖）。
+func isPublicIPv6(ip net.IP) bool {
+	return ip != nil && ip.To4() == nil && ip.To16() != nil && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsUnspecified() && !ip.IsMulticast() && !ip.IsLinkLocalUnicast()
 }
 
 const maxCandidateSourceBody = 512 * 1024
@@ -747,19 +793,53 @@ func extractPublicIPv4(text string) []string {
 	return result
 }
 
+// candidateHTTPClient 返回候选源抓取专用的 HTTP 客户端。
+//
+// 2026-11-15 线上故障：NAS 上 curl 逐个访问 GitHub raw 全部 200（0.5~1.6s），
+// 但 Go 并发抓取六条 raw 全部报 `context deadline exceeded (Client.Timeout
+// exceeded while awaiting headers)`。同一台机器、同一时刻，差别只在 Go 的
+// 拨号器会同时尝试 AAAA/A 记录，而 NAS 的 IPv6 出口不可用——Happy Eyeballs
+// 的 300ms 回退在 8s 总预算里被多条并发连接摊薄，最终全批超时。
+//
+// 候选源全是公网 IPv4 服务，强制 tcp4 是这里唯一正确的选择：既避开不可用的
+// IPv6 路径，也让 26 个源并发时每条连接都有确定的出口。超时同时放宽到 12s，
+// 给跨洋 TLS 握手留余量；ResponseHeaderTimeout 仍单独兜底，防止半开连接挂死。
+func candidateHTTPClient(timeout time.Duration) *http.Client {
+	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			// 显式关闭环境代理：候选源抓取是控制面自己的出站请求，
+			// 不能因为 NAS 上存在 HTTP_PROXY 就绕道本地代理，否则抓取
+			// 失败会被误记成源站不可用。
+			Proxy: nil,
+			DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
+				return dialer.DialContext(ctx, "tcp4", addr)
+			},
+			// 候选源是静态文件 CDN，HTTP/1.1 足够；Go 的 HTTP/2 实现在
+			// raw.githubusercontent.com 上偶发 `http2: timeout awaiting
+			// response headers`，退回 HTTP/1.1 可消掉这类假超时。
+			ForceAttemptHTTP2:     false,
+			MaxIdleConns:          64,
+			MaxIdleConnsPerHost:   8,
+			IdleConnTimeout:       30 * time.Second,
+			TLSHandshakeTimeout:   6 * time.Second,
+			ResponseHeaderTimeout: 10 * time.Second,
+		},
+	}
+}
+
 func fetchHTTPSBody(parent context.Context, rawURL string) ([]byte, error) {
 	target, err := url.Parse(rawURL)
 	if err != nil || target.Scheme != "https" || target.Hostname() == "" {
 		return nil, errors.New("候选源 URL 必须是 HTTPS")
 	}
-	client := &http.Client{
-		Timeout: 8 * time.Second,
-		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			if !strings.EqualFold(req.URL.Hostname(), target.Hostname()) {
-				return http.ErrUseLastResponse
-			}
-			return nil
-		},
+	client := candidateHTTPClient(12 * time.Second)
+	client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+		if !allowHTTPSRedirect(req, target) {
+			return http.ErrUseLastResponse
+		}
+		return nil
 	}
 	request, err := http.NewRequestWithContext(parent, http.MethodGet, target.String(), nil)
 	if err != nil {
@@ -832,10 +912,12 @@ func (a *app) fetchBestcfForwardDomains(ctx context.Context) []string {
 		body, err := fetchHTTPSBody(ctx, rawURL)
 		if err != nil {
 			a.recordSourceHealth(rawURL, 0, err)
+			a.recordSourceContent(rawURL, "bestcf", "domain", nil, err)
 			return
 		}
 		list := extractForwardDomainList(string(body))
 		a.recordSourceHealth(rawURL, len(list), nil)
+		a.recordSourceContent(rawURL, "bestcf", "domain", list, nil)
 		collected = append(collected, list...)
 	}
 	pull(bestcfForwardDomainTopURL)
@@ -996,6 +1078,14 @@ func (a *app) resolveProxySources(parent context.Context, sourceIDs []string, re
 	errorsFound := make([]string, 0)
 	for i, target := range targets {
 		a.recordSourceHealth(target.healthKey, len(results[i]), errs[i])
+		// 台账另记一份「内容指纹」：健康账回答「这次抓没抓到」，台账回答
+		// 「这份清单多久没变过了」。两者缺一不可——一个源可以每次都抓成功，
+		// 同时连续几个月吐同一批死地址。
+		kind := "ip"
+		if target.domain != "" {
+			kind = "dns"
+		}
+		a.recordSourceContent(target.healthKey, "bestcf", kind, results[i], errs[i])
 		if errs[i] != nil {
 			errorsFound = append(errorsFound, fmt.Sprintf("%s: %v", target.healthKey, errs[i]))
 		}

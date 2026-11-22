@@ -321,6 +321,7 @@ func (a *app) probeDisabledBenchOnce(parent context.Context) (deferred bool) {
 	// 第三关：弱成员和替补比。只有弱成员才触发，正常轮次没有额外开销。
 	swaps := make(map[string]string)
 	swapReasons := make(map[string]string)
+	var swapResults map[string]proxyScanResult
 	// 锁位模式只转置顶成员，换进来的普通候选根本不会转发。此时找替补
 	// 只是把成员从池里删掉，起不到「换人承载流量」的作用，跳过。
 	if len(weak) > 0 && !pool.Lock {
@@ -330,22 +331,29 @@ func (a *app) probeDisabledBenchOnce(parent context.Context) (deferred bool) {
 			victims = append(victims, item.member)
 			statByIP[item.member] = item.stat
 		}
-		swaps, swapReasons = a.findDisabledBenchReplacements(victims, statByIP, minMbps)
+		swaps, swapReasons, swapResults = a.findDisabledBenchReplacements(victims, statByIP, minMbps)
 	}
 
 	if len(removals) == 0 && len(swaps) == 0 {
 		return false
 	}
-	a.applyDisabledBenchChanges(removals, swaps, swapReasons, now)
+	a.applyDisabledBenchChanges(removals, swaps, swapReasons, now, swapResults)
 	return false
 }
 
 // probeDisabledWebSockets 对一组 IP 做 WS 101 握手验活。返回结果表与
 // 「是否真的跑成了」——扫描锁被占时返回 false，调用方据此延后而不是误判。
-func (a *app) probeDisabledWebSockets(parent context.Context, targets []string, cfg proxyAutoConfig) (map[string]proxyScanResult, bool) {
+func (a *app) probeDisabledWebSockets(_ context.Context, targets []string, cfg proxyAutoConfig) (map[string]proxyScanResult, bool) {
 	out := make(map[string]proxyScanResult, len(targets))
 	if len(targets) == 0 {
 		return out, true
+	}
+	if a.manualScanPending() {
+		return out, false
+	}
+	bgCtx, ok := a.backgroundScanContext()
+	if !ok {
+		return out, false
 	}
 	// 全量重挑/补位会把 proxyScanMu 攥住一到几分钟，20 秒的窗口经常整段错过。
 	// 体检本身只需要几秒，等久一点比反复撞墙划算：90 秒足以熬过一轮考试。
@@ -354,6 +362,7 @@ func (a *app) probeDisabledWebSockets(parent context.Context, targets []string, 
 		return out, false
 	}
 	defer a.proxyScanMu.Unlock()
+	defer a.noteScanActivity("disabled-bench", "关闭席体检")()
 	scanCfg := cfg
 	scanCfg.Concurrency = 2
 	// 关闭成员要能测出「慢」：超时给到 3 秒，低于它的慢成员才有机会
@@ -362,10 +371,14 @@ func (a *app) probeDisabledWebSockets(parent context.Context, targets []string, 
 	if slow := int(throneProbeSlowMs()) + 1500; slow > scanCfg.MaxLatency {
 		scanCfg.MaxLatency = slow
 	}
-	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
+	ctx, cancel := context.WithTimeout(bgCtx, 45*time.Second)
 	defer cancel()
 	for _, r := range scanProxyWebSockets(ctx, targets, scanCfg) {
 		out[r.IP] = r
+	}
+	if ctx.Err() != nil {
+		log.Printf("disabled bench canceled by manual operation: %v", ctx.Err())
+		return out, false
 	}
 	return out, true
 }
@@ -410,6 +423,9 @@ func disabledBenchSpeedURL(size int) string {
 	raw := strings.TrimSpace(env("PROXY_DISABLED_BENCH_SPEED_URL", ""))
 	if raw == "" {
 		raw = strings.TrimSpace(env("PROXY_VLESS_SPEED_URL", ""))
+		if customSpeedURLUnhealthy.Load() {
+			raw = ""
+		}
 	}
 	if raw == "" {
 		raw = disabledBenchSpeedURLDefault
@@ -585,16 +601,16 @@ func disabledCandidateBeats(victim disabledBenchStat, candLatencyMs int64, candM
 
 // findDisabledBenchReplacements 给弱成员找替补：先 WS 过进池闸，再按需测速。
 // 一次最多摸 disabledBenchCandidateBatch 个候选，给几个候选测速，够用即可。
-func (a *app) findDisabledBenchReplacements(victims []string, victimStats map[string]disabledBenchStat, minMbps float64) (map[string]string, map[string]string) {
+func (a *app) findDisabledBenchReplacements(victims []string, victimStats map[string]disabledBenchStat, minMbps float64) (map[string]string, map[string]string, map[string]proxyScanResult) {
 	swaps := make(map[string]string)
 	reasons := make(map[string]string)
 	if len(victims) == 0 {
-		return swaps, reasons
+		return swaps, reasons, nil
 	}
 	pool := a.proxyActivePoolSnapshot()
 	cfg := defaultProxyAutoConfig()
 	if cfg.Host == "" || cfg.Path == "" {
-		return swaps, reasons
+		return swaps, reasons, nil
 	}
 	snapshot := a.proxyCandidateSnapshot()
 	disabled := disabledMemberSet(pool)
@@ -609,12 +625,20 @@ func (a *app) findDisabledBenchReplacements(victims []string, victimStats map[st
 		pending = append(pending, ip)
 	}
 	if len(pending) == 0 {
-		return swaps, reasons
+		return swaps, reasons, nil
+	}
+	if a.manualScanPending() {
+		return swaps, reasons, nil
+	}
+	bgCtx, ok := a.backgroundScanContext()
+	if !ok {
+		return swaps, reasons, nil
 	}
 	if !lockTimeout(&a.proxyScanMu, 60*time.Second) {
 		log.Printf("disabled bench: replacement scan busy, keeping %d weak members", len(victims))
-		return swaps, reasons
+		return swaps, reasons, nil
 	}
+	defer a.noteScanActivity("disabled-bench", "替补考试")()
 	ceiling := poolEntryMaxLatencyMs()
 	scanCfg := cfg
 	scanCfg.Concurrency = 6
@@ -622,10 +646,15 @@ func (a *app) findDisabledBenchReplacements(victims []string, victimStats map[st
 	if scanCfg.MaxLatency < 500 {
 		scanCfg.MaxLatency = 500
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(bgCtx, 45*time.Second)
 	results := scanProxyWebSockets(ctx, pending, scanCfg)
+	canceled := bgCtx.Err() != nil
 	cancel()
 	a.proxyScanMu.Unlock()
+	if canceled {
+		log.Printf("disabled bench replacement scan canceled by manual operation: %v", bgCtx.Err())
+		return swaps, reasons, nil
+	}
 	applyCandidateSourcePriority(results, snapshot.SourceByIP)
 
 	type candidate struct {
@@ -633,7 +662,9 @@ func (a *app) findDisabledBenchReplacements(victims []string, victimStats map[st
 		latency int64
 	}
 	passed := make([]candidate, 0, len(results))
+	resultByIP := make(map[string]proxyScanResult, len(results))
 	for _, r := range results {
+		resultByIP[r.IP] = r
 		if r.Error != "" || r.Latency > ceiling {
 			continue
 		}
@@ -641,7 +672,7 @@ func (a *app) findDisabledBenchReplacements(victims []string, victimStats map[st
 	}
 	sort.SliceStable(passed, func(i, j int) bool { return passed[i].latency < passed[j].latency })
 	if len(passed) == 0 {
-		return swaps, reasons
+		return swaps, reasons, resultByIP
 	}
 
 	speedCfg, template, speedErr := disabledBenchSpeedConfig()
@@ -656,7 +687,10 @@ func (a *app) findDisabledBenchReplacements(victims []string, victimStats map[st
 			return
 		}
 		speedProbes++
-		probeCtx, probeCancel := context.WithTimeout(context.Background(), speedCfg.Timeout)
+		if bgCtx.Err() != nil {
+			return
+		}
+		probeCtx, probeCancel := context.WithTimeout(bgCtx, speedCfg.Timeout)
 		metrics, err := probeVLESSCandidateMetrics(probeCtx, ip, cfg.Port, speedCfg, template)
 		probeCancel()
 		if err != nil {
@@ -702,7 +736,11 @@ func (a *app) findDisabledBenchReplacements(victims []string, victimStats map[st
 		reasons[victim] = reason
 		used[candidate] = true
 	}
-	return swaps, reasons
+	if bgCtx.Err() != nil {
+		log.Printf("disabled bench replacement scan canceled by manual operation: %v", bgCtx.Err())
+		return make(map[string]string), make(map[string]string), nil
+	}
+	return swaps, reasons, resultByIP
 }
 
 // applyDisabledBenchChanges 把体检结论落成池变更。
@@ -711,7 +749,7 @@ func (a *app) findDisabledBenchReplacements(victims []string, victimStats map[st
 // 不重启 cfnat。换成替补则会让一根新线开始转发，必须走完整换池。
 // 两条路必须分开：为了删掉一个不转发的成员重启 cfnat，是在拿真实用户的
 // 连接给后台体检陪跑。
-func (a *app) applyDisabledBenchChanges(removals []string, swaps map[string]string, reasons map[string]string, now time.Time) {
+func (a *app) applyDisabledBenchChanges(removals []string, swaps map[string]string, reasons map[string]string, now time.Time, benchResults ...map[string]proxyScanResult) {
 	if !lockTimeout(&a.cfnatCtlMu, 10*time.Second) {
 		log.Printf("disabled bench: pool control busy, deferring %d removals / %d swaps", len(removals), len(swaps))
 		return
@@ -778,15 +816,16 @@ func (a *app) applyDisabledBenchChanges(removals []string, swaps map[string]stri
 		}
 		next.MemberChannels = channels
 	}
-	if len(next.Results) > 0 {
-		kept := make([]proxyScanResult, 0, len(next.Results))
-		for _, result := range next.Results {
-			if !containsString(removed, result.IP) {
-				kept = append(kept, result)
+	// 替补的握手成绩随成员一起进池，同时自然过滤掉被移除成员的成绩。
+	freshResults := make([]proxyScanResult, 0, len(effectiveSwaps))
+	if len(benchResults) > 0 {
+		for _, candidate := range effectiveSwaps {
+			if result, ok := benchResults[0][candidate]; ok {
+				freshResults = append(freshResults, result)
 			}
 		}
-		next.Results = kept
 	}
+	next.Results = mergePoolResults(next.IPs, next.Results, freshResults)
 	if _, _, err := planFixedMembers(next); err != nil {
 		log.Printf("disabled bench: resulting pool unusable, aborting: %v", err)
 		return
@@ -805,6 +844,12 @@ func (a *app) applyDisabledBenchChanges(removals []string, swaps map[string]stri
 			return
 		}
 		a.markPoolSwitched(next.UpdatedAt)
+	}
+
+	// 换下的死 IP 不再留在候选缓存：否则下一轮 refresh 又会把它扫一遍，
+	// 考不过不会回池，只是白烧扫描预算。victims 只来自 pool.IPs，不含域名。
+	for _, victim := range removed {
+		a.removeCandidateIP(victim)
 	}
 
 	// 成功之后才记账：失败时保留原判，下一轮可以重试。

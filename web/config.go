@@ -8,8 +8,13 @@ import (
 )
 
 const (
-	defaultDataDir                = "/data"
-	maxLogBytes                   = 512 * 1024
+	defaultDataDir = "/data"
+	maxLogBytes    = 512 * 1024
+	// maxLogFileBytes / maxLogFileBackups 是磁盘日志的轮转上限。
+	// 内存里的 maxLogBytes 只管 Web 面板的日志窗口，管不到落盘文件；
+	// 落盘曾无上限增长到 639 MB。
+	maxLogFileBytes               = 100 * 1024 * 1024
+	maxLogFileBackups             = 3
 	proxyCandidateRefreshInterval = 6 * time.Hour
 	proxyCandidateCacheFile       = "proxy-candidates.json"
 	proxyActivePoolFile           = "proxy-active.json"
@@ -23,8 +28,13 @@ const (
 	// CF 段（104.16/13、104.24/14、103.31/22、108.162.192/18），实测抽 10 个
 	// 有 8 个 TLS 握手成功。卡在 12 等于把大半可用域名挡在门外。
 	// 放宽到 30：既覆盖足够多的可通域名，又不至于让 cfnat 的 -fixed 参数过长。
-	maxForwardDomains   = 30
-	maxVLESSSpeedProbes = 6
+	maxForwardDomains = 30
+	// maxVLESSSpeedProbesDefault 每轮测速的候选数上限（可用
+	// PROXY_VLESS_SPEED_PROBES 覆盖）。
+	//
+	// 2026-11-13 修正：原值 6 小于现场的 PROXY_AUTO_POOL_SIZE=10，池里永远
+	// 有 4 个成员零吞吐证据，排序只能退回握手延迟。默认提到 10 与池宽对齐。
+	maxVLESSSpeedProbesDefault = 10
 	// minFallbackForwardDomains 质量闸的兜底下限。
 	//
 	// 2026-10-22 二次事故：上游链路故障 3 小时把 16 个优选域名全打成 unstable
@@ -110,6 +120,18 @@ func poolEntryMaxLatencyMs() int64 {
 // 为什么不复用进池那条 800ms：进池是「别把慢的放进来」，代价为零，卡得越紧越好；
 // 请下台要重启一次 cfnat、断一次现有连接，必须留滞回余量。实测好 IP 的 WS 约
 // 190ms，坏的 1650/1809ms，1500ms 落在中间的空档里，两边都不容易误伤。
+// throneProbeMaxLatencyMs 单次探测超时：必须高于「慢」阈值，否则慢成员
+// 先被超时打断、记成失败，「慢」这一档永远测不出来。上限跟着慢阈值走
+// （慢阈值本身钳在 [300,5000]，超时最多 5500），不再另钳 3000——
+// 旧实现钳 3000 时 slowMs>2500 的「慢」根本不可观测。
+func throneProbeMaxLatencyMs() int {
+	ms := int(throneProbeSlowMs()) + 500
+	if ms < 1500 {
+		ms = 1500
+	}
+	return ms
+}
+
 func throneProbeSlowMs() int64 {
 	ms := int64(envInt("PROXY_ACTIVE_PROBE_SLOW_MS", 1500))
 	if ms < 300 || ms > 5000 {
@@ -203,9 +225,14 @@ func defaultSubscriptionConverter() string {
 }
 
 // subscriptionMaintainers 第三方订阅维护者域名清单（逗号/空白分隔）。
-// 默认内置用户给出的 7 个维护者；环境变量可覆盖。
+// 默认内置用户给出的 8 个维护者；环境变量可覆盖。
 func subscriptionMaintainers() []string {
-	raw := strings.TrimSpace(env("PROXY_SUBSCRIPTION_MAINTAINERS", "owo.o00o.ooo cm.soso.edu.kg zrf.zrf.me sub.keaeye.icu sub.mot.cloudns.biz sub.mia.xx.kg sub.lzjbaby.com sub.xdu.qzz.io"))
+	// 2026-11-15 按实测通过率清理默认清单：
+	//   - sub.mot.cloudns.biz 通过率 2.9%，基本是死源；
+	//   - owo.o00o.ooo 通过率 22.6%，拉低整层质量且拖慢采集。
+	// 两个都从默认值移除。已部署实例的维护者清单存在 /data 的
+	// proxy-subscriptions.json 里，部署时需同步清理，否则本函数不生效。
+	raw := strings.TrimSpace(env("PROXY_SUBSCRIPTION_MAINTAINERS", "cm.soso.edu.kg zrf.zrf.me sub.keaeye.icu sub.mia.xx.kg sub.lzjbaby.com sub.xdu.qzz.io"))
 	seen := make(map[string]struct{})
 	out := make([]string, 0, 16)
 	for _, host := range strings.FieldsFunc(raw, func(r rune) bool {
@@ -301,6 +328,18 @@ func poolColoPreferenceSet() map[string]struct{} {
 		return nil
 	}
 	return prefer
+}
+
+// maxVLESSSpeedProbes 返回每轮 VLESS 测速的候选数上限。
+//
+// 语义是「测几个」，不是「录取几个」：测得再多也不淘汰，只决定谁有成绩。
+// 上限受 32 约束，避免把一轮自动换池拖成几十分钟的串行下载。
+func maxVLESSSpeedProbes() int {
+	n := envInt("PROXY_VLESS_SPEED_PROBES", maxVLESSSpeedProbesDefault)
+	if n < 1 || n > 32 {
+		n = maxVLESSSpeedProbesDefault
+	}
+	return n
 }
 
 func env(key, def string) string {

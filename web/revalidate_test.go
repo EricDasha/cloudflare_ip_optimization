@@ -389,3 +389,47 @@ func TestRevalidateFailureLandsInReport(t *testing.T) {
 		t.Fatalf("detail.last = %#v, want the aborted report", detail["last"])
 	}
 }
+
+// 预算耗尽没轮上的域名不得按失败剔除：它根本没被测过。
+func TestRevalidateKeepsSkippedDomains(t *testing.T) {
+	pool := proxyActivePool{
+		Host:    "h",
+		Path:    "/p",
+		IPs:     []string{"10.0.0.1"},
+		Domains: []string{"good.example", "skipped.example", "bad.example"},
+	}
+	f := newRevalidateFixture(t, pool)
+	revalidateDeps.checkDomains = func(a *app, ctx context.Context, domains []string, base int) []revalidateMemberResult {
+		out := make([]revalidateMemberResult, 0, len(domains))
+		for _, d := range domains {
+			switch d {
+			case "bad.example":
+				out = append(out, revalidateMemberResult{Member: d, Kind: "domain", OK: false, Stage: "speed", Error: "boom"})
+			case "skipped.example":
+				out = append(out, revalidateMemberResult{Member: d, Kind: "domain", OK: false, Stage: "skipped", Error: "验证预算用尽", ErrorClass: failureTimeout})
+			default:
+				out = append(out, revalidateMemberResult{Member: d, Kind: "domain", OK: true})
+			}
+		}
+		return out
+	}
+	f.app.beginRevalidate(4)
+
+	report, err := f.app.revalidateActivePool(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if report.Aborted {
+		t.Fatalf("round was aborted: %s", report.Note)
+	}
+	if len(f.applied) != 1 {
+		t.Fatalf("applied %d times, want 1", len(f.applied))
+	}
+	got := f.applied[0]
+	if len(got.Domains) != 2 || got.Domains[0] != "good.example" || got.Domains[1] != "skipped.example" {
+		t.Fatalf("Domains = %v, want [good.example skipped.example]", got.Domains)
+	}
+	if len(report.Removed) != 1 || report.Removed[0] != "bad.example" {
+		t.Fatalf("Removed = %v, want [bad.example]", report.Removed)
+	}
+}
