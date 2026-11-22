@@ -75,6 +75,13 @@ BANDWIDTH_URL = os.environ.get(
 MIN_KBPS = float(os.environ.get("QUALITY_GUARD_MIN_KBPS", "400"))
 BANDWIDTH_EVERY = int(os.environ.get("QUALITY_GUARD_BANDWIDTH_EVERY", "3"))
 
+# 2026-11-22：默认只观察、不处置。守卫的 kick/optimize 走的是手动入口，
+# 会绕过 Go 侧的换池冷却与健康闸（optimize 还带 manual=true 直接放行），
+# 和调度器、在位验活互相拆台：守卫踢人 → Go 重建 cfnat → 看门狗撞上重启窗口
+# 判死切兜底 → 守卫改测兜底再给池子定罪。处置权归 Go（它知道池子全貌），
+# 守卫只负责告警。确需它动手时设 QUALITY_GUARD_ACTIONS=1。
+ACTIONS_ENABLED = os.environ.get("QUALITY_GUARD_ACTIONS", "0") == "1"
+
 
 def log(msg):
     line = "%s %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
@@ -371,6 +378,10 @@ def main():
         diag = measure_bandwidth()
         if diag is not None:
             log("本机路径实测 %.0f KB/s（仅记录）" % diag)
+        if not ACTIONS_ENABLED:
+            log("readonly: 带宽连续 %d 轮不足（%s），不处置（QUALITY_GUARD_ACTIONS=0）" % (streak, bw_note))
+            save_state(state)
+            return 0
         for target, mbps in bw_culprits[:3]:
             if now - float(kicked.get(target, 0)) < KICK_COOLDOWN:
                 continue
@@ -406,6 +417,11 @@ def main():
         log("pool stale: %.1fh since last apply" % ((now - updated) / 3600))
     if stale_funnel():
         log("funnel stalled: 近 3 小时考试 0 通过、池子没有更新")
+
+    if not ACTIONS_ENABLED:
+        log("readonly: 连续 %d 轮变慢（p50=%dms max=%dms 失败=%d），不处置（QUALITY_GUARD_ACTIONS=0）" % (streak, p50, worst, fails))
+        save_state(state)
+        return 0
 
     # 1) 先找拖后腿的成员。只在「有成员自己握手就慢」时踢人。
     sni = os.environ.get("QUALITY_GUARD_SNI", "vlesdy.trojanjd.dpdns.org")

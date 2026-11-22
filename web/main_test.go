@@ -255,6 +255,32 @@ func TestAllowPoolSwitchHealthGateStillBlocksHealthyFullPool(t *testing.T) {
 	}
 }
 
+// 2026-11-22：健康票只证明 WS 能连。池里已有实测不达标成员时，健康不再是
+// 拒绝换池的理由——否则 39 KB/s 的池子会顶着「健康」一直不动。
+func TestAllowPoolSwitchHealthGateWaivedForBelowReferencePool(t *testing.T) {
+	now := time.Now()
+	a := &app{
+		dataDir:      t.TempDir(),
+		activeHealth: map[string]*activeHealthStat{},
+	}
+	for _, ip := range []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"} {
+		a.activeHealth[ip] = &activeHealthStat{Success: 5, LastCheck: now}
+	}
+	a.activePool = proxyActivePool{
+		UpdatedAt: now.Add(-time.Hour), Host: "h", Path: "/p",
+		IPs: []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
+		Results: []proxyScanResult{
+			{IP: "10.0.0.1", DownloadMbps: 0.2},
+			{IP: "10.0.0.2", DownloadMbps: 9.0},
+			{IP: "10.0.0.3", DownloadMbps: 9.0},
+		},
+	}
+	a.lastPoolSwitchAt = now.Add(-time.Hour)
+	if !a.allowPoolSwitch(now, "test-below-reference").Allowed {
+		t.Fatal("pool with a measured 0.2 Mbps member was still blocked by the health gate")
+	}
+}
+
 // 救援快车道：整池每个成员都达到连续失败阈值 → 跳过冷却与健康闸。
 // 冷却仍在进行、池子也不「健康」，但此时不换就是断网，防抖必须让路。
 func TestAllowPoolSwitchRescueBypassesCooldownAndHealth(t *testing.T) {

@@ -619,7 +619,30 @@ func (a *app) setProxyPoolError(message string, results []proxyScanResult) {
 	a.activePool.Error = message
 	a.activePool.ErrorAt = time.Now()
 	if results != nil {
-		a.activePool.Results = results
+		// 2026-11-22 修正：原实现整份替换成绩单。可走到这里的路径大多是
+		// 「终审不足、沿用旧池」——旧成员本轮根本没被扫，成绩被抹成空，
+		// 下游所有闸门对「没成绩」一律放行，粘性于是把它们钉给用户。
+		// 改成合并：本轮出现的用新成绩覆盖，仍在池里的旧成员保留旧成绩。
+		targets := make([]string, 0, len(results)+len(a.activePool.IPs))
+		seen := make(map[string]struct{}, len(results))
+		for _, r := range results {
+			if r.IP == "" {
+				continue
+			}
+			if _, ok := seen[r.IP]; ok {
+				continue
+			}
+			seen[r.IP] = struct{}{}
+			targets = append(targets, r.IP)
+		}
+		for _, member := range forwardingMembers(a.activePool) {
+			if _, ok := seen[member]; ok {
+				continue
+			}
+			seen[member] = struct{}{}
+			targets = append(targets, member)
+		}
+		a.activePool.Results = mergePoolResults(targets, a.activePool.Results, results)
 	}
 	pool := a.activePool
 	a.activeMu.Unlock()
@@ -681,6 +704,38 @@ func (a *app) verifyActivePoolAlive() (int, int) {
 	}
 	wg.Wait()
 	return alive, len(targets)
+}
+
+// activePoolBelowReference 找出旧池里「已被实测证明不达标」的成员。
+//
+// 用途：funnel 在终审不足时是否该豁免本轮换池。旧判据只看 TCP 存活，
+// 而 TCP 能连的成员可能只有 39 KB/s——那就没有理由再豁免。这里只认实测
+// 证据：跑过测速没成绩、吞吐低于及格线、数据面延迟超天花板。没有成绩的
+// 成员不算「坏」（未知不等于差），由其他闸门负责补测。
+func (a *app) activePoolBelowReference(minMbps float64, dataCeiling int64) []string {
+	pool := a.proxyActivePoolSnapshot()
+	byMember := make(map[string]proxyScanResult, len(pool.Results))
+	for _, result := range pool.Results {
+		if result.IP != "" {
+			byMember[result.IP] = result
+		}
+	}
+	var bad []string
+	for _, member := range forwardingMembers(pool) {
+		result, ok := byMember[member]
+		if !ok {
+			continue
+		}
+		switch {
+		case speedProbeFailed(result):
+			bad = append(bad, member+"(测速失败)")
+		case result.DownloadMbps > 0 && minMbps > 0 && result.DownloadMbps < minMbps:
+			bad = append(bad, fmt.Sprintf("%s(%.2fMbps)", member, result.DownloadMbps))
+		case dataCeiling > 0 && result.DataLatency > dataCeiling:
+			bad = append(bad, fmt.Sprintf("%s(数据面 %dms)", member, result.DataLatency))
+		}
+	}
+	return bad
 }
 
 // activeHealthStat 记录生效池 IP 的被动健康：成功/失败计数与最近失败时间。
@@ -853,8 +908,16 @@ func (a *app) allowPoolSwitch(now time.Time, reason string) poolSwitchVerdict {
 		return poolSwitchVerdict{Allowed: true, Reason: "understaffed"}
 	}
 	if len(forwarding) > 0 && a.activePoolHealthy(forwarding) {
-		log.Printf("pool switch blocked: active pool healthy, keep working IPs (%s)", reason)
-		return poolSwitchVerdict{Reason: "healthy"}
+		// 2026-11-22 修正：健康票只证明「WS 能连」，不证明「用起来不卡」。
+		// 旧判据在此一票否决，于是 39 KB/s 的池子照样顶着「健康」不动。
+		// 有实测不达标证据时，健康不再是拒绝理由；没有任何成绩的老池仍然放行
+		// （无证据不等于坏，仍由冷却与在位验活负责）。
+		if bad := a.activePoolBelowReference(vlessMinDownloadMbps(), vlessDataLatencyCeilingMs()); len(bad) > 0 {
+			log.Printf("pool switch: active pool healthy by WS but %d members below reference, waiving health gate: %v (%s)", len(bad), bad, reason)
+		} else {
+			log.Printf("pool switch blocked: active pool healthy, keep working IPs (%s)", reason)
+			return poolSwitchVerdict{Reason: "healthy"}
+		}
 	}
 	return poolSwitchVerdict{Allowed: true, Reason: "ok"}
 }

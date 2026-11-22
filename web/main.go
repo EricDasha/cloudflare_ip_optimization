@@ -244,9 +244,6 @@ func main() {
 	mux.HandleFunc("/api/cfdata/detail", a.handleCFdataDetail)
 	mux.HandleFunc("/api/cfdata/speed", a.handleCFdataSpeed)
 	mux.HandleFunc("/api/cfdata/push-candidates", a.handleCFdataPushCandidates)
-	// /sub 是给客户端直接订阅的节点清单：只发官方段 IP，池子换了客户端下次
-	// 拉取就换。写死节点的客户端不会自己变，用户只能自己发现「又卡了」。
-	mux.HandleFunc("/sub", a.handleSubscription)
 	mux.HandleFunc("/api/logs", a.handleLogs)
 	mux.HandleFunc("/api/files", a.handleFiles)
 	mux.HandleFunc("/api/file/", a.handleFileDownload)

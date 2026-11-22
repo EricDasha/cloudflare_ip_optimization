@@ -280,6 +280,19 @@ func vlessMinDownloadMbps() float64 {
 	return mbps
 }
 
+// speedProbeFailureNotePrefix 是「测速跑过但没跑出成绩」的 Note 前缀，
+// 由 rankVLESSPassesBySpeedWithProbeAndHistory 与 fillMissingSpeedMetrics 写入。
+const speedProbeFailureNotePrefix = "测速"
+
+// speedProbeFailed 判断该成员本轮是否「跑过测速却没有成绩」。
+//
+// 它和「从未测速」必须分开：从未测速是未知，不该判慢；跑过却失败是已知的
+// 不合格，与实测不及格同罪。旧实现把两者都当成 DownloadMbps==0，于是一次
+// 测速超时就能让成员以「未知」身份留在池里。
+func speedProbeFailed(r proxyScanResult) bool {
+	return r.DownloadMbps <= 0 && strings.HasPrefix(r.Note, speedProbeFailureNotePrefix)
+}
+
 // ewmaRankingAlpha 是跨轮吞吐平滑系数。0 完全关闭；上限 0.9 防止历史权重过大。
 func ewmaRankingAlpha() float64 {
 	alpha := envFloat("PROXY_EWMA_ALPHA", 0.3)
@@ -473,11 +486,21 @@ func dropBelowReferenceIPsWithDataCeiling(passed []string, results []proxyScanRe
 	}
 	mbps := make(map[string]float64, len(results))
 	dataLatency := make(map[string]int64, len(results))
+	probeFailed := make(map[string]bool, len(results))
 	for _, r := range results {
 		mbps[r.IP] = r.DownloadMbps
 		dataLatency[r.IP] = r.DataLatency
+		if speedProbeFailed(r) {
+			probeFailed[r.IP] = true
+		}
 	}
 	isSlow := func(ip string) bool {
+		// 2026-11-22 修正：跑过测速却没跑出成绩的成员，和实测不及格同等对待。
+		// 原实现只判 v > 0，于是一次测速超时就能让该成员以「未知」身份留池，
+		// 再被 cfnat 按设备粘性钉住。真正的「从未尝试」仍然不判慢。
+		if probeFailed[ip] {
+			return true
+		}
 		if v := mbps[ip]; v > 0 && minMbps > 0 && v < minMbps {
 			return true
 		}
@@ -991,9 +1014,19 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 		// 验证的出口换成只过了 TCP/TLS/WS 的未知成员。2026-11-16 事故就是
 		// 这条路把 6 个可用出口换成了 3 个 dial timeout 目标，cfnat 每个目标
 		// 等 2 秒，客户端 6 秒后连接被关。降级只留给「旧池已死」这一种情况。
-		if alive, total := a.verifyActivePoolAlive(); alive > 0 {
-			a.setProxyPoolError(fmt.Sprintf("%s；旧池 %d/%d 存活，跳过降级并继续沿用", message, alive, total), results)
+		// 2026-11-22 修正：原判据是 alive > 0——旧池只要有一个成员 TCP 能连，
+		// 本轮筛出来的整池候选就全部作废。线上后果是池子连续 20 小时不换血，
+		// 设备被 cfnat 的粘性钉在掉速成员上。现在三个条件同时成立才豁免：
+		//   ① 旧池存活数够最小池（不够就该换）；
+		//   ② 本轮一个都没通过（有通过的就该换血）；
+		//   ③ 旧池没有被实测证明不达标的成员（有坏成员就不该继续豁免）。
+		belowRef := a.activePoolBelowReference(vlessMinDownloadMbps(), vlessDataLatencyCeilingMs())
+		if alive, total := a.verifyActivePoolAlive(); alive >= cfg.MinPool && len(passed) == 0 && len(belowRef) == 0 {
+			a.setProxyPoolError(fmt.Sprintf("%s；旧池 %d/%d 存活且无实测不达标成员，跳过降级并继续沿用", message, alive, total), results)
 			return
+		}
+		if len(belowRef) > 0 {
+			log.Printf("proxy auto apply: 旧池有 %d 个实测不达标成员，不再豁免本轮换池: %v", len(belowRef), belowRef)
 		}
 		// L3 降级：VLESS 数据面没验过，但 WS 101 已经通过 —— 说明 TCP/TLS/WS
 		// 三层都通，失败点大概率在探测目标而非链路本身。池子空掉比用
@@ -1032,7 +1065,9 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 			// 2026-10-22 事故：建池 0 通过，旧池唯一 IP 早已 dial timeout，
 			// 系统照样报「保留旧池」，对外看起来一切正常。
 			alive, total := a.verifyActivePoolAlive()
-			if alive > 0 {
+			// 降级已经试过仍不够人，此时保留旧池的门槛与上面同口径：
+			// 旧池连最小池人数都凑不齐，等于把一具半尸留在岗位上。
+			if alive >= cfg.MinPool {
 				a.setProxyPoolError(fmt.Sprintf("%s；旧池 %d/%d 存活，继续沿用", message, alive, total), results)
 				return
 			}
