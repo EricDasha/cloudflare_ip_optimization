@@ -270,6 +270,46 @@ runCFdataBackgroundScan        cfdata 扫描
 要等下一次真实换池或手动优选才会被清掉。首次手动优选后应能看到 `lastActiveChangeAt`
 前进，且调度器不再在 30 分钟内二次换池。
 
+### v5：换池热更新 + 把「考试车」换成与被测对象一致的 worker（`f65bb3b`、`b038ca6`，2026-11-22 00:27 / 19:06 CST）
+
+**动机**：池子每轮重排都写一份新的 `-fixed`，`sameCFnatArgs` 是顺序敏感的逐字比较，
+于是每次 applied 都判成「参数变了」→ 重启 cfnat → 掐断 40 多条在用连接，平均 11 分钟一次。
+
+**改法**：新增 `-fixedfile`。web 侧只写 `/data/cfnat-fixed.txt`（一行一个成员），
+cfnat 参数恒为 `-fixedfile /data/cfnat-fixed.txt`，自己每 5 秒轮询热更。
+写文件失败时先回滚上一份内容再回滚池状态，坏清单绝不会覆盖好清单。
+
+**教训一（首个部署就炸）**：`parseFixedTargets` 原来只按逗号切分，整份换行清单被当成
+一个主机名，cfnat 每 3 秒刷一条 `固定转发目标配置无效: "16.76...\n..."`。改用
+`strings.FieldsFunc` 按逗号/换行/空白切分。
+
+**教训二（19:00 那次「又开始卡了」的真根因）**：部署后 18 小时池子一次没变。日志里每轮都是
+`VLESS 终审仅 0 个通过，低于最小池 3；旧池 29/29 存活，跳过降级并继续沿用`。
+原因是容器 env `PROXY_VLESS_TEST_URL=https://www.gstatic.com/generate_204` 配
+`data/vless-probe-outbound.json` 指向 **cpoytcp（GTPV1）**——也就是我们已知最慢的那条
+worker（TLS 冷连接 4–8 秒）在当考试车。候选节点再快也过不了这道终审，漏斗考试永远 0 通过；
+而旧池 29/29 全都「存活」，`allowPoolSwitch` 就永远走「跳过降级」分支。**池子在手，二十小时没换血。**
+
+**处置**：模板换成 `vlesdy`（uuid `94892c52-…`、`path=/thread?ed=2560`、`fp=chrome`、无 alpn），
+旧模板备份在 `_backup/pre-fixedfile-20261122-002743/vless-probe-outbound.cpoytcp.json`。
+模板每轮漏斗现读（`web/funnel.go:856` `loadVLESSOutboundTemplate`），不需要重启容器。
+换后一轮即 `beforeIps 3 / beforeDomains 26 → afterIps 4 / afterDomains 30`，
+日志出现 `proxy auto apply: trace L7 checked 7 finalists (0 rejected, 0 unverified)` 与
+`proxy active pool applied (unchanged, no restart)`。
+
+**教训三（探针位置）**：质量探针必须走 `127.0.0.1:39282`（sing-box 的 probe-in，等于完整用户路径）。
+`curl --connect-to www.gstatic.com:443:127.0.0.1:1234` 对非 CF 域名必得 `000`——cfnat 只是
+TCP 转发到 CF 边缘，SNI 不是 CF 托管的名字会被立刻拒掉，量到的是「被拒得多快」，不是「通不通」。
+
+**新守卫** `scripts/nas/cfnat-quality-guard.py`（NAS 上 `/vol1/1000/Docker/sing-box/`，
+cron `*/5`）：经 39282 打 5 次非 CF 目标，算 p50/max/失败数；连续 2 轮不达标才动手——
+先对池内前 6 个 IP 做 TLS 握手定责，慢于 800ms 就 `/api/cfnat/active/kick` 踢掉（1800s 冷却）；
+成员都正常则 `/api/cfnat/optimize` 重排（3600s 冷却）；池子超过 3 小时没更新且近 3 小时
+考试 0 通过时记一条告警。
+
+**回滚点**：`local/cloudflare-tools:rollback-20261122-002743`；
+备份 `_backup/pre-fixedfile-20261122-002743/`（compose、`.env`、`proxy-active.json`、三个旧二进制、旧 VLESS 模板）。
+
 ---
 
 ## 5. 部署与回滚
