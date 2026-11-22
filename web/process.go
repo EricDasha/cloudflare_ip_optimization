@@ -404,7 +404,11 @@ func defaultCFnatConfig() cfnatConfig {
 		Num:      envInt("CFNAT_NUM", defaultCFnatNum),
 		Port:     envInt("CFNAT_PORT", 443),
 		Random:   envBool("CFNAT_RANDOM", true),
-		Sticky:   envBool("CFNAT_STICKY", true),
+		// 2026-11-22 改默认为 false：粘性把一台设备的所有连接钉在同一个成员上，
+		// 而成员吞吐在几分钟内能差三倍（实测 172.64.229.213 直连 3.7 MB/s、
+		// 104.25.246.114 只有 0.5 MB/s）。钉上去就等于全程赌那一个成员。
+		// 轮转后慢成员只拖累其中一部分连接，且不会被一条慢线锁死整台设备。
+		Sticky: envBool("CFNAT_STICKY", false),
 		Task:     envInt("CFNAT_TASK", 100),
 		TLS:      envBool("CFNAT_TLS", true),
 		Fallback: env("CFNAT_FALLBACK", ""),
