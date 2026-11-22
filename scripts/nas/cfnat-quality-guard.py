@@ -198,8 +198,11 @@ def main():
     state = load_state()
     now = time.time()
     times, fails = measure_user_path()
-    worst = max(times) if times else 0
-    p50 = sorted(times)[len(times) // 2] if times else 0
+    ordered = sorted(times)
+    # 单次 1.7s 不算病：这条出口本来就有 2~5% 的 SYN 丢失，五次里慢一次是常态。
+    # 所以用「次差值」当 worst，要两次以上都慢才判 degraded。
+    worst = ordered[-2] if len(ordered) >= 4 else (ordered[-1] if ordered else 0)
+    p50 = ordered[len(ordered) // 2] if ordered else 0
     bad = fails > MAX_FAILS or worst > OK_MAX_MS
 
     if not bad:
