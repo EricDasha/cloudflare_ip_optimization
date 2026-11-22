@@ -889,8 +889,10 @@ func (a *app) autoApplyProxyPool(parent context.Context, manual bool) (applied b
 			MaxLatency:  cfg.MaxLatency,
 			TLS:         true,
 		}
-		// scanProxyIPs 返回按 (通过, 延迟升序) 排列；直接取延迟达标的前 N。
-		prescreen := scanProxyIPs(runCtx, candidates, prescreenCfg)
+		// scanProxyIPs 返回按 (通过, 延迟升序) 排列；先取延迟达标的，但座次让直连
+		// CF 边缘的地址优先——段外的中转盒子同样能通、握手同样漂亮，吞吐却可能只有
+		// 几百 KB/s（见 preferCloudflareEdges 注释）。座位数不变，探测压力不变。
+		prescreen := preferCloudflareEdges(scanProxyIPs(runCtx, candidates, prescreenCfg))
 		shortlist = make([]string, 0, shortlistSize)
 		for _, result := range prescreen {
 			if result.Error != "" {

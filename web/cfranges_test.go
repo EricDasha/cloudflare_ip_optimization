@@ -62,3 +62,29 @@ func TestCloudflareCIDRCount(t *testing.T) {
 		t.Fatalf("cloudflare IPv4 nets = %d, want 15", len(cloudflareIPv4Nets))
 	}
 }
+
+// 段外的中转盒子握手可以比直连边缘更漂亮，但吞吐由那台机器决定
+// （2026-11-22 实测 175.41.232.194：170ms / 200KB/s，同池 172.64.x 225ms / 3.4MB/s）。
+// 所以座次让官方段优先，但不能把它删掉——它是可用的兜底。
+func TestPreferCloudflareEdgesKeepsBothGroupsInOrder(t *testing.T) {
+	in := []proxyScanResult{
+		{IP: "175.41.232.194", Latency: 75},
+		{IP: "172.64.145.33", Latency: 90},
+		{IP: "13.231.172.130", Latency: 80},
+		{IP: "172.64.229.15", Latency: 100},
+		{IP: "104.16.9.9", Latency: 120, Error: "tls handshake failed"},
+		{IP: "45.32.100.7", Latency: 60},
+	}
+	got := preferCloudflareEdges(in)
+	// 官方段里失败的那条随第二组走：调用方本来就会跳过 Error 非空的条目，
+	// 这里只保证「能用的官方段」全部排在「能用的段外」前面。
+	want := []string{"172.64.145.33", "172.64.229.15", "175.41.232.194", "13.231.172.130", "104.16.9.9", "45.32.100.7"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].IP != want[i] {
+			t.Fatalf("order[%d] = %s, want %s (整表 %v)", i, got[i].IP, want[i], got)
+		}
+	}
+}

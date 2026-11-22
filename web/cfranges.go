@@ -212,6 +212,33 @@ func isCloudflareIPv4(ip net.IP) bool {
 	return false
 }
 
+// preferCloudflareEdges 把官方段内的候选整体排到前面，段外的中转盒子沉到最后，
+// 组内保持原有顺序（调用方给的是延迟升序）。
+//
+// 为什么只沉不删：段外地址按 2026-11-05 的结论仍然可以进池（它们是能用的反代
+// 中转），删掉会缩小可选面。但「直连 CF 边缘」和「先转到一台别人的机器再进 CF」
+// 是两件事——后者多一跳，带宽由那台机器说了算，而初筛只看握手 RTT，看不出这个
+// 区别。2026-11-22 线上实测：175.41.232.194 握手 170ms（全池最漂亮），吞吐只有
+// 200KB/s；同池的 172.64.x 握手 225ms，吞吐 3.4MB/s。座次按延迟排，中转盒子就
+// 抢走了直连的位置，用户被粘在上面看视频就卡——而那台机器永远不会出现在报错里。
+func preferCloudflareEdges(results []proxyScanResult) []proxyScanResult {
+	if len(results) < 2 {
+		return results
+	}
+	out := make([]proxyScanResult, 0, len(results))
+	for _, result := range results {
+		if result.Error == "" && isCloudflareIPv4(net.ParseIP(result.IP)) {
+			out = append(out, result)
+		}
+	}
+	for _, result := range results {
+		if result.Error != "" || !isCloudflareIPv4(net.ParseIP(result.IP)) {
+			out = append(out, result)
+		}
+	}
+	return out
+}
+
 // segmentOf 返回 IP 所属片区的标识，用于建池时的段多样性配额。
 //
 // 官方段内返回官方 CIDR（如 "104.16.0.0/13"）；官方段外的公网地址返回 /16
